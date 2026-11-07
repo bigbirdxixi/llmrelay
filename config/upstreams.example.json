@@ -1,0 +1,38 @@
+[
+  {
+    "platform": "openai",
+    "name": "OpenAI 官方（示例，改完才能用）",
+    "type": "openai",
+    "base_url": "https://api.openai.com/v1",
+    "api_keys": ["sk-把你的-key-填这里"],
+    "models": ["gpt-4o-mini"],
+    "model_map": {},
+    "extra": {},
+    "enabled": true,
+    "timeout_s": 300
+  },
+  {
+    "platform": "deepseek",
+    "name": "DeepSeek",
+    "type": "openai",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_keys": ["sk-把你的-key-填这里"],
+    "models": ["deepseek-chat", "deepseek-reasoner"],
+    "model_map": { "fast": "deepseek-chat" },
+    "extra": { "model_reasoning": { "deepseek-reasoner": "off" } },
+    "enabled": true,
+    "timeout_s": 300
+  },
+  {
+    "platform": "anthropic",
+    "name": "Anthropic 原生",
+    "type": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "api_keys": ["sk-ant-把你的-key-填这里"],
+    "models": ["claude-sonnet-4-5-20250929"],
+    "model_map": {},
+    "extra": {},
+    "enabled": true,
+    "timeout_s": 300
+  }
+]

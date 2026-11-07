@@ -1,0 +1,22 @@
+# Caddy 反代示例：证书全自动（Let's Encrypt），不用自己续签
+# 用法：把域名 A 记录指到这台机器，80/443 放行，然后
+#   caddy run --config deploy/caddy.Caddyfile
+# flush_interval -1 是流式的关键：每个 chunk 立刻下发，不攒包。
+
+relay.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:8800 {
+        flush_interval -1
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+        header_up X-Real-IP {remote_host}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+}

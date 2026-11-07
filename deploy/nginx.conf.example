@@ -1,0 +1,46 @@
+# Nginx 反代示例：把 https://relay.example.com 转到本机 127.0.0.1:8800
+# 用法：证书用 certbot 签好后放到下面两个路径，或改成你自己的证书路径。
+#   certbot --nginx -d relay.example.com
+# 关键点：SSE 必须关掉缓冲（proxy_buffering off）+ HTTP/1.1 长连接，否则流式会被攒着一起发。
+
+upstream llm_relay {
+    server 127.0.0.1:8800;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name relay.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name relay.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/relay.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/relay.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://llm_relay;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        # ---- 流式转发必须的四项 ----
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

@@ -1,0 +1,22 @@
+# 运行数据 / 配置（含明文的 API Key，绝不能提交）
+data/
+config/upstreams.json
+config/clients.json
+config/settings.json
+config/tenants/
+.env
+
+# 发布产物（tar.gz 包走 GitHub Releases，不进仓库）
+dist/
+
+# 部署证书（certbot / 自签产物，各环境不同）
+deploy/certs/*.pem
+deploy/certs/*.key
+deploy/certs/*.crt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+nul

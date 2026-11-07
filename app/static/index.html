@@ -1,0 +1,2148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Relay · token 中转站控制台</title>
+<style>
+:root{
+  --bg:#0b1016; --panel:#121a24; --panel2:#16202c; --line:#22303f;
+  --fg:#e6edf5; --dim:#8ba0b6; --accent:#4f8cff; --accent2:#38bdf8;
+  --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+  --radius:12px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",Roboto,sans-serif}
+a{color:var(--accent)}
+button{font:inherit;cursor:pointer}
+input,select,textarea{font:inherit;background:var(--panel2);color:var(--fg);
+  border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+label{display:block;font-size:12px;color:var(--dim);margin:0 0 6px}
+.field{margin-bottom:14px}
+.btn{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+  border-radius:8px;padding:8px 14px;transition:.15s}
+.btn:hover{border-color:var(--accent);color:#fff}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#3b7bf5}
+.btn.danger{color:var(--err);border-color:#3a2630}
+.btn.danger:hover{background:#2a1a20}
+.btn.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* login */
+#login{position:fixed;inset:0;background:rgba(6,10,15,.94);display:flex;
+  align-items:center;justify-content:center;z-index:99}
+#login .box{width:380px;background:var(--panel);border:1px solid var(--line);
+  border-radius:16px;padding:26px}
+#login h1{font-size:17px;margin:0 0 4px}
+#login p{color:var(--dim);font-size:12.5px;margin:0 0 18px}
+#login .hint{margin-top:12px;font-size:12px;color:var(--dim);line-height:1.6}
+#login .hint code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--accent2)}
+
+/* layout */
+#app{display:none;min-height:100vh}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
+  padding:12px 22px;background:rgba(11,16,22,.86);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line)}
+header .logo{font-weight:700;letter-spacing:.3px}
+header .logo span{color:var(--accent)}
+header .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px}
+header .spacer{flex:1}
+header .meta{color:var(--dim);font-size:12px}
+nav{display:flex;gap:4px;padding:10px 22px 0}
+nav button{background:transparent;border:none;color:var(--dim);padding:8px 14px;
+  border-radius:9px 9px 0 0;border-bottom:2px solid transparent}
+nav button.active{color:#fff;background:var(--panel);border-bottom-color:var(--accent)}
+main{padding:18px 22px 60px;max-width:1280px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px 18px;margin-bottom:16px}
+.panel h2{font-size:14px;margin:0 0 14px;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel h2 small{color:var(--dim);font-weight:400}
+.grid{display:grid;gap:14px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+.kpi .k{color:var(--dim);font-size:12px}
+.kpi .v{font-size:24px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi .s{font-size:11.5px;color:var(--dim);margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+/* 表格比 panel 宽时在 panel 内部横向滚动，不撑破边框 */
+.tw{overflow-x:auto;overflow-y:visible;max-width:100%;margin:0 -2px;padding:0 2px}
+.tw::-webkit-scrollbar{height:8px}
+.tw::-webkit-scrollbar-thumb{background:#25313f;border-radius:99px}
+.tw::-webkit-scrollbar-track{background:transparent}
+/* 请求日志：表格按自然宽度排，panel 跟随，超出 panel 在 .tw 内横向滚动 */
+#tab-logs .panel{width:max-content;max-width:100%}
+#tab-logs .panel h2{flex-wrap:wrap;row-gap:6px}
+.logtable{width:auto}
+/* 表头内联箭头筛选：列标题旁一个小箭头，默认只显箭头，选中后追加值/"N 项"并高亮 */
+th .thf{display:flex;align-items:center;gap:4px}
+th.num .thf{justify-content:flex-end}
+th .thfb{border:0;background:none;color:var(--dim);font-size:10px;padding:1px 5px;cursor:pointer;border-radius:5px;line-height:1.4}
+th .thfb:hover{color:var(--fg);background:var(--panel2)}
+th .thfb.on{color:var(--accent)}
+.thfv{font-size:11px;color:var(--fg);font-family:ui-monospace,Consolas,monospace}
+th .thfb.on + .thfv{color:var(--accent)}
+/* 页码条 */
+.pgs{display:inline-flex;gap:4px;align-items:center}
+.pg{min-width:28px;padding:4px 7px;font-size:12px;text-align:center}
+.pg.on{border-color:var(--accent);color:var(--accent);background:var(--panel2)}
+.pgell{font-size:12px;color:var(--dim);padding:0 2px}
+.thfpop{position:fixed;z-index:70;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:8px;min-width:150px;max-height:280px;overflow:auto;
+  box-shadow:0 10px 28px rgba(0,0,0,.55)}
+.thfpop .thfph{font-size:11px;color:var(--dim);padding:0 2px 6px;border-bottom:1px solid var(--line);margin-bottom:5px}
+.thfopt{display:flex;align-items:center;gap:7px;font-size:12px;padding:3px 2px;cursor:pointer;white-space:nowrap}
+.thfopt input{width:auto;margin:0;accent-color:var(--accent)}
+.thfopt:hover{color:var(--fg)}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--dim);font-weight:500;font-size:12px}
+tr:hover td{background:#0f1620}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;
+  background:#1b2634;color:var(--dim);border:1px solid var(--line)}
+.pill.ok{color:var(--ok);border-color:#1f4438;background:#10261f}
+.pill.err{color:var(--err);border-color:#4a2530;background:#2a1419}
+.pill.warn{color:var(--warn);border-color:#4a3a17;background:#241d0d}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+.dim{color:var(--dim)}
+.empty{color:var(--dim);text-align:center;padding:26px 0;font-size:13px}
+.bar{height:6px;border-radius:99px;background:#1b2634;overflow:hidden;min-width:80px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:10px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px}
+tbody tr.sel td{background:#132238}
+tbody tr.sel td:first-child::before{content:"✓ ";color:#4f8cff;font-weight:700}
+tbody tr:hover td{background:#101a28}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:200;
+  display:flex;flex-direction:column;gap:8px;align-items:center}
+#toast .t{background:#18232f;border:1px solid var(--line);padding:9px 16px;border-radius:9px;
+  font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.45)}
+#toast .t.err{border-color:#4a2530;color:#ffb4b4}
+#toast .t.ok{border-color:#1f4438;color:#a7f3d0}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* 概览页：活跃情况（左）× 近期活动（右）——左 45% / 右 55%：
+   日历格子已改弹性列（随 panel 伸缩），留白消失；堆叠图更宽更舒展 */
+.split.ov{grid-template-columns:minmax(0,9fr) minmax(0,11fr);gap:14px}
+.regionmap{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px;align-items:start}
+.regionmap svg .rm0{fill:var(--panel2)}
+@media (max-width:900px){.split,.split.ov{grid-template-columns:1fr}.regionmap{grid-template-columns:1fr}}
+#modal{position:fixed;inset:0;background:rgba(4,8,12,.72);display:none;z-index:60;
+  overflow:auto;padding:40px 16px}
+#modal.on{display:block}
+#modal .sheet{max-width:640px;margin:0 auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:16px;padding:22px}
+#modal h3{margin:0 0 16px;font-size:15px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:99px;
+  padding:4px 11px;font-size:12px;color:var(--dim)}
+.chip:hover{color:#fff;border-color:var(--accent)}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{background:#0a1017;border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  font-family:ui-monospace,Consolas,monospace;font-size:12.3px;color:#b9cfe6;
+  overflow:auto;white-space:pre;line-height:1.65}
+.modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
+.mrow{display:flex;align-items:center;gap:8px}
+.mrow .mono.mname{flex:0 1 40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--fg)}
+.mrow select{width:132px;padding:5px 8px;font-size:12.5px}
+.mrow input.mal{flex:1;min-width:130px;padding:5px 8px;font-size:12.5px}
+.mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
+.mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="box">
+    <h1>LLM Relay 控制台</h1>
+    <p id="loginHint">登录你的账号</p>
+    <div class="field"><input id="loginEmail" type="email" placeholder="邮箱" autocomplete="username"></div>
+    <div class="field"><input id="loginPass" type="password" placeholder="密码（至少 8 位）" autocomplete="current-password"></div>
+    <button class="btn primary" style="width:100%" id="loginBtn" onclick="doAuth()">登录</button>
+    <button class="btn" style="width:100%;margin-top:8px;display:none" id="resendVerify" onclick="resendVerify()">重发确认邮件</button>
+    <p class="hint" id="pendingNote" style="display:none;margin-top:6px"></p>
+    <div class="hint">
+      <a href="#" onclick="toggleAuthMode();return false;" id="loginSwitch">没有账号？注册</a>
+      <span id="firstTip" style="display:none">　（第一个注册的账号自动成为管理员）</span>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <div class="logo">LLM <span>Relay</span></div>
+    <div class="meta"><span class="dot"></span><span id="hMeta">连接中…</span></div>
+    <div class="spacer"></div>
+    <select id="tenantSel" style="display:none;width:190px" onchange="S.tenant=this.value;refreshAll()"></select>
+    <span class="pill" id="who" style="max-width:220px;overflow:hidden;text-overflow:ellipsis"></span>
+    <button class="btn sm" onclick="refreshAll()">刷新</button>
+    <button class="btn sm" onclick="logout()">退出</button>
+  </header>
+  <nav>
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="providers">上游平台</button>
+    <button data-tab="usage">用量统计</button>
+    <button data-tab="logs">请求日志</button>
+    <button data-tab="settings">设置</button>
+    <button data-tab="users" id="navUsers" style="display:none">账号</button>
+  </nav>
+  <main>
+    <section id="tab-overview"></section>
+    <section id="tab-providers" hidden></section>
+    <section id="tab-usage" hidden></section>
+    <section id="tab-logs" hidden></section>
+    <section id="tab-settings" hidden></section>
+    <section id="tab-users" hidden></section>
+  </main>
+</div>
+
+<div id="modal"><div class="sheet" id="modalBody"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const S = { tab: "overview",
+            user: null, tenant: "", authMode: "login", pick: {},
+            providers: [], presets: [], overview: null, models: [] };
+const PALETTE = ["#4f8cff","#38bdf8","#34d399","#fbbf24","#f472b6","#a78bfa","#fb923c","#22d3ee","#f87171","#a3e635"];
+
+/* 中国省级地图路径（DataV 边界数据投影 + Douglas-Peucker 2px 简化，离线内嵌，无外部依赖） */
+const CHINA_PROVINCE_PATHS = {
+  "北京": "M697.7,196.7L700.2,195.5L691.9,194.7L687.1,189.4L682.4,191.4L684.1,193.9L673.6,197.3L676.8,201.5L669.0,205.0L669.4,210.8L683.8,213.9L691.0,210.4L689.1,205.0L697.7,203.4L695.6,197.9L697.7,196.7Z",
+  "天津": "M704.0,214.6L706.6,211.9L702.3,211.9L700.1,207.0L704.2,204.6L699.2,201.7L695.3,204.5L695.1,210.9L689.6,211.3L691.1,218.9L688.6,224.4L696.3,227.4L703.5,225.5L702.2,223.2L708.5,217.1L700.3,215.2L704.0,214.6Z",
+  "河北": "M699.5,195.6L695.8,199.9L704.2,204.6L700.2,206.3L702.1,211.5L706.6,211.9L704.7,215.3L715.0,222.0L716.3,218.6L726.8,215.1L730.9,207.2L735.9,206.1L731.2,197.2L720.4,193.0L726.3,185.6L712.9,185.1L709.6,179.2L712.1,174.3L709.3,174.6L704.2,165.8L691.2,169.1L689.3,175.5L682.0,175.2L678.8,178.6L674.8,176.1L665.2,181.7L660.0,181.2L660.0,173.7L655.5,173.2L650.0,178.4L650.5,182.5L645.1,183.8L647.2,186.8L644.2,188.8L651.7,199.8L655.0,200.2L645.6,205.2L653.0,207.5L655.6,211.9L652.2,219.5L645.4,219.6L640.3,227.3L640.1,231.7L649.1,240.7L643.5,253.1L638.9,255.4L642.9,260.6L660.8,265.3L669.4,263.8L666.3,258.5L676.9,245.8L689.5,238.1L699.1,238.0L706.8,230.5L702.1,226.3L688.6,224.4L691.1,218.9L689.6,211.3L683.8,213.9L673.5,212.8L668.8,209.2L669.0,205.0L676.8,201.5L673.6,197.3L684.1,193.9L682.4,191.4L686.6,189.5L691.9,194.7L699.5,195.6Z M695.6,204.2L688.7,206.0L694.7,211.2L695.6,204.2Z",
+  "山西": "M592.1,287.3L610.2,283.6L617.6,280.4L617.6,277.0L628.4,278.1L641.3,271.6L642.9,260.6L638.9,255.4L643.5,253.1L649.1,240.7L640.1,231.7L640.3,227.3L645.4,219.6L652.2,219.5L655.6,211.9L653.0,207.5L645.6,205.2L655.0,200.2L651.7,199.8L649.0,194.3L640.3,200.2L621.4,201.6L615.7,211.2L609.0,210.6L603.7,214.4L599.6,228.9L594.1,232.9L598.4,242.5L592.2,250.6L595.6,271.7L589.9,283.0L592.1,287.3Z",
+  "内蒙古": "M392.0,163.1L402.3,180.4L399.0,183.7L409.6,191.6L409.8,196.9L414.7,193.8L416.7,196.3L422.4,192.5L436.5,192.2L437.4,201.3L426.4,207.2L447.6,214.5L449.6,221.4L453.5,220.3L455.0,224.0L461.8,225.8L466.3,222.3L463.7,218.9L472.0,216.8L480.4,219.1L496.8,214.3L498.4,220.8L486.6,229.6L488.4,233.4L485.8,235.2L498.3,244.8L522.1,238.8L525.3,222.0L534.9,214.9L540.5,220.2L533.1,230.9L556.4,241.1L567.9,240.6L568.2,235.1L572.3,235.4L572.0,229.2L584.9,216.5L589.7,216.4L588.7,213.7L595.9,216.6L603.6,211.7L602.8,214.9L606.6,214.3L609.0,210.6L615.7,211.2L621.4,201.6L627.9,202.9L647.9,197.5L645.0,184.1L650.5,182.5L650.0,178.4L655.5,173.2L660.0,173.7L660.0,181.2L665.2,181.7L674.8,176.1L678.8,178.6L682.0,175.2L689.3,175.5L691.2,169.1L704.2,165.8L709.3,174.6L712.1,174.3L709.6,179.2L713.3,185.6L725.7,186.0L729.1,181.7L726.3,172.1L730.3,169.3L735.5,171.9L739.3,179.8L744.9,173.6L763.6,168.5L767.2,164.7L786.8,162.6L793.9,155.9L788.1,152.6L791.4,150.4L789.2,142.4L785.2,137.2L772.3,141.0L768.9,131.0L771.8,125.5L767.7,119.2L762.8,118.3L765.8,114.2L779.4,119.0L780.2,113.5L786.0,110.8L783.3,105.9L792.5,104.1L792.5,101.1L787.9,99.4L789.0,101.9L783.4,103.5L774.5,94.1L802.4,76.2L806.5,82.1L810.7,67.4L816.9,66.3L817.5,52.4L826.2,45.5L825.1,42.7L829.7,38.2L815.6,28.8L804.6,34.7L783.4,34.1L777.6,22.7L780.1,19.9L770.7,15.9L765.8,19.4L755.8,14.6L765.4,7.6L760.6,3.4L751.2,4.1L738.3,12.0L739.0,14.8L749.0,15.5L747.4,18.8L749.8,21.3L739.2,28.6L724.6,48.1L728.1,48.5L728.0,51.5L704.7,61.2L688.1,56.3L674.2,76.5L674.6,80.4L670.1,81.9L676.3,89.1L689.3,85.8L698.2,89.7L704.7,84.0L716.2,84.4L733.6,96.5L736.5,104.4L721.4,102.8L698.8,105.8L698.1,109.1L686.1,110.1L679.9,119.3L667.6,123.8L655.3,123.9L641.4,133.6L616.7,128.4L607.8,139.5L615.9,149.5L601.8,155.0L593.0,163.3L575.6,168.6L548.0,168.2L510.8,181.5L503.4,180.3L503.5,177.1L486.7,177.0L447.9,165.0L427.5,166.6L392.0,163.1Z",
+  "辽宁": "M791.4,208.7L800.8,209.3L809.7,199.8L824.0,193.8L822.5,191.4L825.6,187.8L818.4,180.1L821.0,173.1L811.7,163.2L811.8,158.0L805.5,162.3L802.6,156.5L795.4,152.6L792.0,160.0L786.8,162.6L767.2,164.7L763.6,168.5L744.9,173.6L739.3,179.8L735.5,171.9L730.3,169.3L726.3,172.1L728.8,183.2L720.4,193.0L731.2,197.2L735.7,205.7L745.3,202.4L754.9,192.3L765.4,191.9L770.4,195.3L772.2,198.2L768.1,203.5L756.4,212.2L757.1,215.0L764.0,215.1L762.6,219.4L754.4,221.8L755.1,224.8L791.4,208.7Z",
+  "吉林": "M883.3,168.9L888.7,159.9L899.1,168.7L895.5,164.1L906.7,161.0L909.3,152.5L902.5,153.4L895.6,150.1L894.9,144.2L890.6,147.4L888.6,144.5L878.1,147.6L877.7,151.0L872.4,151.9L864.7,137.1L859.8,139.6L860.4,142.9L855.8,143.8L851.3,138.7L852.4,136.2L844.7,136.3L843.4,127.7L828.7,127.3L824.0,121.9L804.5,123.1L798.5,118.1L796.9,110.0L780.2,113.5L779.4,119.0L765.8,114.2L762.8,118.3L767.7,119.2L771.8,125.5L768.9,131.0L772.3,141.0L785.2,137.2L791.2,149.3L787.9,151.7L789.7,153.8L796.3,153.1L802.6,156.5L805.5,162.3L811.8,158.0L811.7,163.2L821.0,173.1L818.4,180.1L825.6,187.8L822.5,192.0L829.4,191.4L842.9,178.0L847.8,183.0L860.8,184.8L863.9,181.6L859.6,175.2L873.5,174.8L879.8,168.2L883.3,168.9Z",
+  "黑龙江": "M791.9,111.2L797.9,110.2L798.5,118.1L804.5,123.1L824.0,121.9L828.7,127.3L843.4,127.7L844.7,136.3L852.4,136.2L851.3,138.7L855.8,143.8L860.4,142.9L859.8,139.6L864.7,137.1L872.4,151.9L877.7,151.0L878.1,147.6L888.6,144.5L890.6,147.4L894.9,144.2L895.6,150.1L906.7,153.6L909.1,152.4L909.2,144.2L904.0,132.0L912.1,130.1L918.0,124.5L934.1,129.4L936.9,127.8L937.0,123.2L948.6,110.7L952.6,94.5L961.8,88.6L958.4,84.6L960.3,80.4L966.6,77.7L936.8,82.2L928.1,88.5L904.3,88.6L899.5,82.7L902.2,79.8L897.5,75.0L899.7,70.9L893.0,71.1L882.1,62.7L856.3,60.1L852.0,56.6L853.1,50.4L848.9,48.8L848.4,42.5L842.7,37.9L843.7,34.0L841.2,34.6L842.5,32.7L835.8,24.5L837.2,21.6L828.3,14.1L830.5,12.0L823.9,10.6L822.9,7.3L811.7,7.0L787.5,0.0L760.6,3.4L765.4,7.6L755.8,14.6L765.8,19.4L770.7,15.9L780.1,19.9L777.6,22.7L783.4,34.1L804.6,34.7L815.6,28.8L829.8,39.3L817.5,52.4L816.9,66.3L810.7,67.4L806.5,82.1L802.4,76.2L774.5,94.1L783.7,103.7L789.0,101.9L787.9,99.4L792.5,101.1L792.5,104.1L783.3,105.9L786.0,110.8L791.9,111.2Z",
+  "上海": "M751.5,341.6L757.2,346.7L767.7,345.0L767.4,340.8L758.2,334.1L751.5,341.6Z M767.8,332.5L757.9,328.7L754.8,330.3L758.6,333.4L766.5,335.3L767.8,332.5Z M765.1,336.8L760.9,334.3L765.1,336.8Z",
+  "江苏": "M697.1,287.9L694.9,289.8L689.2,281.6L682.9,285.0L694.4,294.8L702.0,295.9L703.8,300.8L710.0,300.4L706.7,308.1L710.9,308.6L713.3,315.8L719.0,315.5L720.4,312.2L725.5,314.2L724.0,319.8L716.2,317.8L718.2,321.7L713.5,325.5L714.9,330.0L720.6,332.4L718.6,337.6L736.7,339.2L745.5,345.5L758.6,333.4L756.0,329.2L767.7,330.9L759.5,320.1L752.4,317.4L742.6,291.7L726.3,284.3L726.5,279.3L720.6,280.8L713.3,290.1L710.3,290.6L706.8,286.1L701.4,289.4L697.1,287.9Z",
+  "浙江": "M714.1,382.9L719.7,383.6L721.3,395.4L726.8,396.0L731.9,392.2L734.4,397.8L741.8,395.9L745.3,400.4L749.6,390.7L755.9,390.0L753.9,385.8L763.2,382.2L761.2,377.3L764.7,373.7L762.2,369.6L767.7,371.3L768.2,363.3L765.6,362.2L770.3,358.5L763.9,357.1L754.4,349.2L757.1,346.0L752.9,341.6L745.5,345.5L734.5,339.1L726.3,347.7L728.8,351.3L720.9,352.2L718.9,360.9L708.7,367.7L714.1,382.9Z M770.6,357.2L773.4,356.7L767.5,354.2L770.6,357.2Z M767.3,345.2L770.2,348.0L767.3,345.2Z M770.9,362.3L770.2,360.2L770.9,362.3Z",
+  "安徽": "M686.4,296.2L679.6,300.8L672.1,295.4L671.8,302.7L667.4,303.9L666.5,309.5L660.6,309.6L665.2,317.7L671.6,320.5L675.9,318.1L676.0,329.5L669.6,331.6L667.8,336.5L678.2,341.6L673.7,346.6L679.3,359.7L687.4,355.8L690.9,357.7L688.2,363.6L695.7,358.1L700.6,363.2L710.5,366.1L721.1,357.9L720.9,352.2L728.8,351.3L726.3,347.7L732.3,341.5L728.0,337.3L719.6,338.4L720.6,332.4L713.1,327.7L718.2,321.7L716.2,317.8L724.0,319.8L725.5,314.2L720.4,312.2L719.0,315.5L713.3,315.8L710.9,308.6L706.7,308.1L710.0,300.4L703.8,300.8L702.0,295.9L695.3,295.3L683.8,286.5L680.2,287.7L680.5,290.6L686.1,292.3L686.4,296.2Z",
+  "福建": "M722.8,433.2L721.4,428.8L724.5,432.5L724.7,429.3L728.5,428.9L726.0,425.6L735.8,425.8L734.6,422.6L732.9,425.5L730.0,423.2L733.7,417.4L731.9,415.0L737.2,412.2L731.5,408.1L737.0,405.7L735.3,409.6L740.0,407.9L738.7,404.5L744.9,400.3L741.8,395.9L734.4,397.8L731.9,392.2L726.8,396.0L721.3,395.4L718.5,382.5L693.0,392.3L695.0,398.0L685.6,404.8L686.4,411.9L679.3,419.7L675.3,433.3L683.3,434.6L685.3,438.7L689.6,438.0L692.1,450.1L697.0,454.7L710.0,443.8L709.4,439.2L716.9,440.0L719.5,436.1L717.4,435.1L722.8,433.2Z M713.8,440.1L712.6,442.1L713.8,440.1Z",
+  "江西": "M710.5,366.1L700.6,363.2L695.7,358.1L688.2,363.6L690.9,357.7L687.4,355.8L681.5,360.2L669.9,359.4L663.8,361.7L664.4,364.4L651.6,366.6L646.2,370.7L650.8,382.4L640.6,394.2L641.2,397.2L645.0,396.6L644.9,407.5L648.6,408.9L646.4,415.3L650.6,415.3L645.8,421.5L647.2,428.6L655.2,426.4L658.2,428.6L649.5,437.4L653.5,440.5L668.4,435.9L674.9,439.4L675.1,429.5L686.9,410.3L685.6,404.8L695.0,398.0L692.5,392.9L700.3,387.5L703.6,390.3L713.0,385.9L714.8,382.3L713.1,375.0L708.1,370.6L710.5,366.1Z",
+  "山东": "M682.9,286.7L684.0,282.8L689.2,281.6L694.9,289.8L706.8,286.1L710.3,290.6L713.3,290.1L720.6,280.8L728.4,280.0L732.7,272.3L742.5,266.5L740.6,263.0L743.4,263.1L742.2,265.4L748.7,264.2L748.4,260.2L752.5,259.0L750.7,256.7L768.3,251.5L776.2,252.4L779.0,245.0L770.4,242.5L761.7,244.2L749.0,238.3L741.3,240.4L733.9,248.9L727.7,249.2L721.8,242.9L727.1,237.8L721.3,233.7L715.9,234.9L706.0,231.2L699.1,238.0L689.5,238.1L676.9,245.8L666.3,258.5L669.3,262.3L667.6,269.4L678.8,264.4L662.8,275.5L659.5,281.0L665.4,281.8L670.5,287.8L682.9,286.7Z",
+  "河南": "M627.5,321.3L643.0,320.5L646.8,330.5L655.8,330.3L655.6,333.4L664.6,332.7L667.8,335.7L669.6,331.6L676.0,329.5L675.9,318.1L671.6,320.5L665.2,317.7L660.6,309.6L666.5,309.5L667.4,303.9L671.8,302.7L672.1,295.4L679.6,300.8L687.0,297.9L686.1,292.3L680.5,290.6L680.2,287.7L670.5,287.8L665.4,281.8L659.5,281.0L662.8,275.5L678.8,264.4L667.6,269.4L669.2,263.5L660.8,265.3L643.3,260.5L641.3,271.6L633.7,276.2L617.6,277.0L617.6,280.4L610.2,283.6L591.9,287.8L605.4,313.3L619.0,321.0L627.5,321.3Z",
+  "湖北": "M602.2,309.0L577.9,309.2L589.5,317.1L580.8,317.6L578.7,322.1L580.1,330.8L588.2,335.6L589.0,342.1L576.6,349.6L571.9,347.0L562.5,349.5L564.9,353.1L562.7,360.9L566.1,359.2L574.7,370.3L579.0,362.6L588.1,360.2L592.0,362.5L596.1,360.4L593.9,356.1L597.7,355.3L613.8,358.5L621.1,364.3L632.2,360.4L630.5,362.9L633.0,365.5L640.5,359.3L643.3,365.4L641.1,368.3L645.4,371.7L651.6,366.6L664.4,364.4L663.8,361.7L669.9,359.4L679.3,359.7L673.7,346.6L678.2,341.6L671.0,339.6L664.6,332.7L659.5,334.9L655.5,333.3L655.8,330.3L646.8,330.5L643.0,320.5L621.6,321.8L610.3,317.7L602.2,309.0Z",
+  "湖南": "M617.0,436.7L619.5,430.0L626.7,430.7L629.9,434.3L632.3,429.7L629.6,427.6L635.6,424.9L640.7,428.1L646.1,426.0L647.1,417.3L650.6,415.3L646.4,415.3L648.6,408.9L644.9,407.5L645.0,396.6L641.2,397.2L640.6,394.2L650.8,381.3L649.3,374.7L641.1,368.3L643.3,365.4L640.5,359.3L634.0,365.3L631.1,365.0L630.2,360.3L621.1,364.3L613.8,358.5L599.3,355.1L593.9,356.1L594.9,361.3L584.4,360.4L577.8,364.1L574.1,377.6L578.2,393.8L568.0,401.1L578.4,400.4L580.3,406.1L575.5,407.0L575.3,412.6L578.3,412.8L581.6,419.4L585.9,414.6L590.3,418.2L595.6,412.5L605.7,413.5L604.4,418.3L608.9,419.7L601.0,433.1L605.7,430.4L608.6,432.4L608.4,437.8L617.0,436.7Z",
+  "广东": "M640.3,475.0L642.1,467.2L645.4,471.5L652.7,469.1L656.2,470.9L654.8,468.2L657.7,466.2L660.4,470.0L665.0,465.8L670.8,468.3L672.0,465.1L674.7,467.0L684.9,464.1L695.3,453.5L689.6,438.0L685.3,438.7L683.3,434.6L674.6,434.1L674.9,439.4L668.4,435.9L653.5,440.5L649.5,437.4L658.1,430.9L657.8,427.9L647.6,428.9L647.0,426.0L640.7,428.1L635.6,424.9L629.6,427.6L631.7,433.8L619.5,430.0L615.7,437.5L615.8,448.1L607.6,455.9L607.0,464.7L597.7,469.7L596.6,475.6L591.6,475.2L592.3,479.8L586.4,480.0L582.5,484.0L584.9,486.8L581.1,494.4L585.0,504.9L594.6,502.1L589.2,495.0L592.8,490.4L618.7,481.3L630.8,480.6L633.1,476.3L635.9,480.1L640.3,475.0Z M629.6,482.1L628.4,484.8L629.6,482.1Z M594.2,492.1L589.4,494.3L594.1,494.6L594.2,492.1Z M688.9,496.8L689.3,499.6L691.4,498.2L688.9,496.8Z",
+  "广西壮族": "M578.5,417.1L576.4,421.6L569.6,421.9L572.4,421.8L571.6,425.0L566.5,423.3L565.5,428.1L561.3,424.6L557.8,429.5L552.5,430.8L544.0,423.5L540.5,429.2L528.0,433.4L526.1,438.3L513.8,432.8L506.5,438.5L502.9,438.0L506.2,443.0L512.2,441.6L514.6,446.9L526.5,446.5L527.9,454.4L520.3,456.9L519.3,462.0L538.5,466.0L534.3,471.3L536.3,478.8L546.8,484.3L559.6,485.9L565.6,483.0L573.3,484.7L572.7,487.0L573.3,487.4L583.1,486.4L585.5,480.5L592.3,479.8L591.6,475.2L596.6,475.6L597.7,469.7L607.0,464.7L607.6,455.9L617.6,442.7L617.0,436.7L608.1,437.5L608.1,431.3L601.0,433.1L608.9,419.7L604.4,418.3L605.7,413.5L595.6,412.5L590.3,418.2L585.9,414.6L583.0,419.6L578.5,417.1Z",
+  "海南": "M588.0,508.1L575.1,510.0L565.3,519.4L565.8,531.4L580.1,536.6L593.9,528.9L597.4,517.9L602.6,514.1L601.0,508.2L596.8,506.0L588.0,508.1Z M635.8,688.4L637.2,685.7L635.8,688.4Z M645.4,696.2L652.6,695.7L654.1,690.7L645.4,696.2Z M578.2,700.2L585.6,697.5L582.2,696.7L578.2,700.2Z",
+  "重庆": "M531.4,379.3L533.0,374.7L534.3,379.9L537.1,380.2L538.6,375.4L545.9,375.0L549.6,368.8L554.1,372.7L560.7,370.9L561.1,377.0L565.7,377.9L564.9,382.1L566.8,379.7L567.8,384.0L572.5,384.5L575.4,379.8L576.0,371.1L572.1,366.0L570.0,367.2L566.1,359.2L563.7,361.4L561.7,359.4L564.9,353.1L562.5,349.5L571.9,347.0L576.6,349.6L584.8,343.3L587.6,344.9L589.4,339.4L582.3,331.2L575.5,331.0L563.8,323.6L560.0,327.2L564.4,331.7L559.0,334.4L553.8,345.0L548.2,344.3L541.8,356.4L523.1,350.4L519.0,354.3L521.8,358.6L515.7,365.4L521.1,367.8L522.7,373.1L528.9,373.6L531.4,379.3Z",
+  "四川": "M452.6,399.4L452.1,402.1L457.8,405.9L456.0,408.6L458.9,413.3L466.4,416.6L480.3,411.9L478.6,397.9L487.7,390.4L489.0,383.8L493.6,382.5L493.2,377.2L501.9,377.8L499.4,379.2L502.5,383.6L500.1,386.5L504.2,389.7L511.6,385.8L515.3,391.7L529.4,390.8L528.9,385.2L520.3,382.4L525.3,375.7L531.5,380.0L528.9,373.6L522.7,373.1L521.1,367.8L515.7,365.4L521.8,358.6L519.0,354.3L523.1,350.4L541.8,356.3L548.2,344.3L553.8,345.0L559.0,334.4L564.4,331.7L560.0,327.2L563.8,323.0L555.8,324.5L547.5,318.6L544.1,320.2L541.9,315.9L532.2,317.3L526.4,313.6L519.7,316.1L517.7,312.6L513.4,317.3L505.2,316.6L499.9,314.0L501.8,306.6L498.1,302.4L482.8,299.3L483.0,295.2L479.0,291.6L467.2,296.9L472.4,303.3L468.2,308.1L462.5,309.7L462.8,302.4L459.6,310.0L451.9,308.2L452.4,316.7L445.3,316.4L444.7,318.7L440.9,315.2L436.5,317.0L433.0,310.8L430.6,315.6L417.6,309.2L410.6,295.1L401.7,293.2L395.1,298.8L400.9,305.3L395.1,312.2L395.8,316.0L407.9,321.5L418.0,336.2L413.7,338.9L419.1,345.4L422.2,380.8L425.4,384.5L425.8,379.0L430.6,374.5L437.5,382.3L435.2,385.0L439.6,391.5L445.2,388.4L452.6,399.4Z",
+  "贵州": "M575.4,379.8L572.5,384.5L567.8,384.0L566.8,379.7L564.9,382.1L565.7,377.9L561.1,377.0L560.7,370.9L554.1,372.7L552.3,369.1L547.6,369.0L546.7,374.4L541.2,373.9L536.5,380.4L533.0,374.7L531.5,380.0L525.3,375.7L520.1,379.4L524.2,385.5L529.8,386.3L529.4,390.8L516.0,391.1L513.4,396.9L508.7,398.0L501.0,395.3L498.1,398.4L494.4,395.7L489.4,401.5L491.9,408.7L501.9,406.8L505.8,411.9L500.2,422.9L507.8,428.7L503.6,435.5L506.5,438.5L513.8,432.8L526.1,438.3L528.0,433.4L540.5,429.2L544.0,423.5L548.1,429.5L550.9,427.9L553.6,431.0L560.7,424.8L565.5,428.1L566.5,423.3L571.6,425.0L572.4,421.8L569.6,421.9L576.4,421.6L579.0,415.6L575.3,412.6L575.5,407.0L578.6,406.1L579.1,401.5L568.0,401.1L578.2,393.8L575.4,379.8Z",
+  "云南": "M515.3,391.7L511.6,385.8L503.2,389.1L499.3,381.2L501.9,377.8L493.2,377.2L493.6,382.5L489.0,383.8L487.7,390.4L478.6,397.9L480.0,412.4L462.7,416.9L445.2,388.4L439.6,391.5L435.2,385.0L437.5,382.3L430.6,374.5L425.8,379.0L425.4,384.5L419.4,369.0L419.3,374.7L414.0,372.8L415.4,383.8L410.5,385.5L407.7,381.8L409.4,394.6L411.3,392.3L415.3,394.0L415.3,419.8L407.2,423.3L400.3,431.5L401.5,435.1L397.7,436.7L397.5,441.2L400.9,445.4L397.4,449.0L417.9,445.6L414.7,450.9L417.9,453.6L418.0,459.9L428.3,464.1L422.1,475.8L434.5,477.4L438.4,486.3L451.9,481.6L453.4,489.8L460.7,491.1L462.6,484.0L458.3,474.6L460.2,471.0L469.3,471.8L472.9,466.4L480.8,471.5L485.2,465.9L494.9,470.6L497.3,465.9L506.6,465.7L508.8,460.5L515.6,457.1L518.8,460.2L520.3,456.9L527.9,454.4L525.7,446.0L514.6,446.9L512.2,441.6L504.2,441.4L502.9,438.0L508.0,429.2L500.2,422.9L505.6,411.0L501.9,406.8L492.7,409.5L489.4,401.5L494.4,395.7L498.1,398.4L501.0,395.3L513.4,396.9L515.3,391.7Z",
+  "西藏": "M279.0,264.7L260.2,258.8L244.4,259.6L227.0,263.5L216.9,271.4L208.4,269.8L194.9,275.8L179.3,275.2L176.8,271.1L169.3,270.4L157.4,277.7L138.4,274.4L128.9,289.1L117.3,290.0L111.6,295.1L112.0,301.6L119.0,308.7L121.4,317.6L116.3,321.6L112.8,316.0L108.0,318.1L108.1,323.7L113.1,327.5L113.0,336.4L118.2,341.9L126.9,342.1L132.5,347.8L147.6,353.2L149.0,356.7L153.4,350.6L163.8,351.7L164.9,355.9L181.4,363.5L186.4,369.5L194.2,367.8L199.8,376.1L205.5,378.7L209.5,377.0L209.3,382.1L218.5,381.6L222.8,388.7L225.7,384.7L229.1,388.7L233.4,385.7L241.4,390.1L262.9,385.6L265.8,387.2L264.9,395.3L268.0,399.3L271.8,390.4L280.2,383.6L300.2,389.6L303.2,386.4L307.8,388.9L307.4,394.2L313.8,395.2L315.3,404.6L341.2,402.0L348.2,393.6L371.7,382.8L390.4,391.2L395.3,389.1L398.1,379.1L406.7,385.1L409.1,381.5L410.5,385.5L414.1,384.8L414.0,372.8L419.3,374.7L421.4,368.8L419.1,345.4L413.7,338.9L418.0,336.2L407.9,321.5L401.5,318.8L394.9,318.1L394.1,325.5L385.2,326.5L386.1,331.6L377.1,328.1L376.6,332.7L374.0,329.5L366.9,330.5L365.8,324.3L360.3,322.4L362.4,320.7L353.3,316.5L346.1,320.1L336.7,319.5L288.9,307.3L277.8,295.6L281.4,291.5L279.2,286.4L281.4,284.1L277.0,282.8L275.0,277.8L279.8,273.9L280.4,268.4L274.4,265.8L279.0,264.7Z",
+  "陕西": "M592.1,287.3L589.9,283.0L595.6,271.7L592.2,250.6L598.4,242.5L594.1,232.9L600.1,227.9L605.3,216.0L602.5,214.6L603.6,211.7L597.0,216.5L588.7,213.7L589.7,216.4L584.9,216.5L572.0,229.2L572.3,235.4L568.2,235.1L567.9,240.6L558.1,241.5L551.3,237.5L545.6,241.7L545.6,252.3L565.9,260.2L566.5,265.8L563.6,268.0L565.4,276.2L552.2,276.5L554.0,281.2L548.9,282.6L534.0,280.0L534.5,284.7L530.5,287.6L536.6,290.8L532.0,297.8L534.6,302.8L525.3,302.2L521.4,305.7L525.2,308.4L524.5,311.6L518.1,313.4L519.7,316.1L526.4,313.6L532.2,317.3L541.9,315.9L544.9,320.6L547.5,318.6L555.8,324.5L563.2,322.6L575.5,331.0L580.1,330.8L580.8,317.6L589.5,317.1L579.0,307.9L594.6,307.7L597.0,310.1L601.9,306.5L601.6,302.8L595.3,298.1L592.1,287.3Z",
+  "甘肃": "M533.4,270.1L531.3,277.6L524.2,275.0L526.5,273.7L516.4,269.2L518.4,263.8L513.1,251.0L505.1,247.9L505.8,244.7L498.3,244.8L486.5,237.9L486.6,229.6L498.4,220.8L496.8,214.3L480.4,219.1L472.0,216.8L463.7,218.9L466.3,222.3L461.8,225.8L455.0,224.0L453.5,220.3L449.6,221.4L447.6,214.5L426.4,207.2L437.4,201.3L436.5,192.2L422.4,192.5L416.7,196.3L414.7,193.8L409.8,196.9L409.6,191.6L399.0,183.7L402.3,180.4L392.0,163.1L375.8,166.0L375.1,176.1L363.7,181.8L361.2,178.6L352.1,182.7L340.3,195.4L327.7,196.8L319.2,219.7L330.6,217.9L331.5,221.8L349.6,224.2L352.5,230.4L369.8,229.7L378.3,233.6L384.4,232.3L386.3,226.6L390.3,226.8L388.9,217.6L406.0,223.9L408.8,220.2L416.9,219.3L436.8,232.3L435.3,228.1L448.7,233.1L453.1,238.1L465.2,239.9L474.9,249.4L472.0,251.4L481.3,262.8L478.5,264.8L479.5,268.7L475.6,269.5L476.4,273.7L469.6,274.8L471.3,278.5L463.9,283.1L464.2,287.5L469.1,291.0L464.5,294.7L449.3,290.6L446.5,293.7L452.5,301.5L463.4,302.8L463.1,310.0L472.2,304.7L467.2,296.9L479.0,291.6L483.0,295.2L482.8,299.3L498.1,302.4L501.8,306.6L499.9,314.0L515.1,316.7L516.9,312.7L524.5,311.6L525.2,308.4L521.4,305.7L525.3,302.2L534.6,302.8L532.0,297.8L536.6,290.8L530.5,287.6L534.5,284.7L534.0,280.0L544.7,283.0L553.7,281.5L552.2,276.5L564.9,276.8L563.6,268.0L566.9,264.0L565.4,259.5L545.6,252.3L543.7,248.8L535.1,248.9L535.5,255.1L531.4,257.8L533.4,262.0L540.3,264.7L539.4,269.7L533.4,270.1Z",
+  "青海": "M477.7,260.5L472.0,251.4L474.3,248.3L465.2,239.9L453.1,238.1L448.7,233.1L435.3,228.1L436.8,232.3L416.9,219.3L408.8,220.2L406.0,223.9L388.9,217.6L390.3,226.8L386.3,226.6L384.4,232.3L378.3,233.6L369.8,229.7L352.5,230.4L349.6,224.2L331.5,221.8L330.6,217.9L285.1,228.5L287.6,232.2L291.4,230.9L291.2,239.9L299.6,243.7L303.1,250.7L294.5,253.6L294.6,257.2L299.1,258.1L299.8,264.7L283.4,261.9L282.5,265.1L274.4,265.8L280.4,268.4L279.8,273.9L275.0,277.8L277.0,282.8L281.4,284.1L279.2,286.4L281.4,291.5L277.8,295.6L283.5,303.1L294.0,309.5L306.6,310.0L317.5,315.8L329.1,315.5L336.7,319.5L346.1,320.1L353.3,316.5L362.4,320.7L360.3,322.4L365.8,324.3L366.9,330.5L374.0,329.5L377.4,332.8L377.1,328.1L386.1,331.6L385.2,326.5L394.1,325.5L394.5,318.5L400.5,318.7L394.7,313.1L400.9,305.3L395.1,298.8L401.7,293.2L410.6,295.1L416.1,307.3L423.8,313.4L430.6,315.6L433.0,310.8L438.0,317.5L440.9,315.2L444.7,318.7L445.3,316.4L452.4,316.7L451.9,308.2L459.6,310.0L461.8,303.4L452.5,301.5L447.3,291.6L461.2,295.2L469.1,291.0L464.2,287.5L463.9,283.1L471.3,278.5L469.6,274.8L477.4,272.7L475.6,269.5L479.5,268.7L478.5,264.8L481.3,262.8L477.7,260.5Z",
+  "宁夏": "M545.0,249.4L545.6,241.7L550.9,238.1L533.1,230.9L540.2,221.5L537.2,214.8L530.0,216.7L525.3,222.0L522.1,238.8L499.8,244.4L505.8,244.7L505.1,247.9L513.1,251.0L518.4,263.8L516.4,269.2L531.3,277.6L532.4,270.8L539.8,269.0L539.9,264.0L533.4,262.0L531.3,257.3L535.5,255.1L534.9,249.0L545.0,249.4Z",
+  "新疆": "M380.1,164.2L367.1,144.8L364.1,144.4L365.4,140.4L354.9,139.7L336.5,130.2L296.7,126.8L293.6,120.9L299.0,114.2L297.0,109.8L299.3,103.7L289.2,89.7L276.8,83.7L269.4,84.5L252.7,75.6L254.5,73.4L249.2,70.9L251.7,69.4L250.4,66.5L236.2,67.1L231.6,76.1L219.6,77.9L216.5,81.4L218.2,95.1L215.9,98.6L206.9,101.5L177.7,96.2L166.2,120.3L170.7,126.6L159.0,123.9L130.2,131.1L137.9,135.4L137.8,143.0L144.1,157.3L137.6,159.6L141.0,161.6L135.9,162.6L134.0,174.7L104.1,184.5L98.3,190.0L84.7,189.9L76.3,200.3L66.9,201.2L65.2,195.5L59.8,198.7L53.8,197.6L54.7,200.3L41.3,204.2L39.0,213.3L33.4,214.8L38.6,220.5L37.9,226.5L54.1,228.4L54.5,240.8L58.3,245.5L48.7,247.3L48.5,249.8L62.4,251.6L63.1,255.2L69.3,256.0L73.7,268.7L79.7,267.2L89.4,273.4L103.7,273.7L101.8,277.8L105.8,286.9L117.3,291.3L128.9,289.1L138.4,274.4L157.4,277.7L169.3,270.4L176.8,271.1L179.3,275.2L194.9,275.8L208.4,269.8L216.9,271.4L227.0,263.5L244.4,259.6L260.2,258.8L279.8,265.0L283.4,261.9L299.8,264.7L299.1,258.1L294.6,257.2L294.5,253.6L303.1,250.7L302.8,248.4L291.2,239.9L291.4,230.9L287.6,232.2L285.1,228.5L320.0,220.5L318.8,217.0L323.4,212.8L327.7,196.8L340.3,195.4L352.1,182.7L361.2,178.6L363.7,181.8L375.1,176.1L377.0,171.9L373.9,168.6L380.1,164.2Z",
+  "台湾": "M744.6,471.5L751.1,479.7L768.4,432.7L761.9,428.0L753.4,432.1L739.4,452.4L738.1,461.9L744.6,471.5Z",
+  "香港": "M647.4,470.5L644.7,475.3L652.9,472.7L647.4,470.5Z",
+  "澳门": "",
+};
+
+/* ---------------- 基础 ---------------- */
+function $(sel, root){ return (root||document).querySelector(sel); }
+function el(tag, attrs, html){
+  const e = document.createElement(tag);
+  if(attrs) for(const k in attrs){ if(k === "class") e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+  if(html !== undefined) e.innerHTML = html;
+  return e;
+}
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(msg, kind){
+  const box = $("#toast");
+  const t = el("div", {class:"t " + (kind||"")}, esc(msg));
+  box.appendChild(t);
+  setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .4s"; }, 2600);
+  setTimeout(() => t.remove(), 3100);
+}
+function nf(n){ n = Number(n||0); return n.toLocaleString("en-US"); }
+function fmtTok(n){ n = Number(n||0);
+  if(n >= 1e9) return (n/1e9).toFixed(2) + "B";
+  if(n >= 1e6) return (n/1e6).toFixed(2) + "M";
+  if(n >= 1e4) return (n/1e4).toFixed(2) + "万";
+  return nf(n);
+}
+function fmtMs(n){ n = Number(n||0); return n >= 1000 ? (n/1000).toFixed(2)+"s" : n+"ms"; }
+function shortTs(ts){ return (ts||"").replace("T"," ").slice(5,19); }
+function fullTs(ts){ return (ts||"").replace("T"," ").slice(0,16); }   // 带年：2026-11-03 14:32
+
+/* 站点可能挂在子目录（nginx: /llmrelay/ → 网关）。这里算出前缀，
+   所有请求都带上它，页面挪位置也不用改代码。 */
+const BASE = (function(){
+  let p = location.pathname;
+  if(!p.endsWith("/")) p = p.replace(/\/[^\/]*$/, "/");
+  return p.replace(/\/$/, "");
+})();
+
+/* 管理员看别的账号时，给数据类接口自动带上 tenant */
+function withTenant(path){
+  if(!S.tenant) return path;
+  if(!/^\/api\/(overview|stats|models|providers|health)/.test(path)) return path;
+  return path + (path.indexOf("?") >= 0 ? "&" : "?") + "tenant=" + encodeURIComponent(S.tenant);
+}
+
+async function api(path, opts){
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if(opts.body && typeof opts.body !== "string") headers["Content-Type"] = "application/json";
+  const res = await fetch(BASE + withTenant(path), Object.assign({}, opts, { headers, credentials: "same-origin",
+    body: opts.body && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body }));
+  if(res.status === 401){ showLogin(); throw new Error("未登录或 API Key 无效"); }
+  if(!res.ok){
+    let msg = res.status + " " + res.statusText;
+    try { const j = await res.json(); msg = j.detail || j.error && (j.error.message || j.error) || JSON.stringify(j); } catch(e){}
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+}
+
+/* ---------------- 登录 ---------------- */
+function showLogin(){
+  $("#login").style.display = "flex";
+  $("#app").style.display = "none";
+}
+function toggleAuthMode(){
+  S.authMode = S.authMode === "login" ? "register" : "login";
+  const reg = S.authMode === "register";
+  $("#loginBtn").textContent = reg ? "注册并登录" : "登录";
+  $("#loginHint").textContent = reg ? "注册一个新账号（第一个账号是管理员，其余账号需点邮件确认链接激活）" : "登录你的账号";
+  $("#loginSwitch").textContent = reg ? "已经有账号？去登录" : "没有账号？注册";
+  $("#firstTip").style.display = reg ? "inline" : "none";
+  $("#resendVerify").style.display = "none";
+  $("#pendingNote").style.display = "none";
+}
+/* 注册成功但邮箱未确认：不能登录，引导点邮件里的确认链接 / 重发 */
+function showPending(email, mailMode){
+  S.authMode = "login";
+  $("#loginEmail").value = email;
+  $("#loginPass").value = "";
+  $("#loginBtn").textContent = "登录";
+  $("#loginHint").textContent = "账号已注册！确认邮件已发往 " + email + "，点击邮件里的链接（30 分钟内有效）完成确认后即可正常登录。";
+  $("#loginSwitch").textContent = "已经有账号？去登录";
+  $("#firstTip").style.display = "none";
+  $("#resendVerify").style.display = "block";
+  $("#pendingNote").style.display = "block";
+  $("#pendingNote").textContent = mailMode === "log"
+    ? "当前为日志模式：确认链接写在服务器日志里（搜 [mail/log] 拿链接），浏览器打开该链接即完成确认。"
+    : "若 1 分钟没收到邮件，请查垃圾邮件箱，或点击下方按钮重发。";
+}
+async function resendVerify(){
+  const email = $("#loginEmail").value.trim();
+  if(!email) return toast("先填上你注册的邮箱", "err");
+  try{
+    const r = await api("/api/auth/resend-verify", { method: "POST", body: { email } });
+    toast(r.message || "已重发确认邮件", "ok");
+    $("#resendVerify").style.display = "block";
+    $("#pendingNote").style.display = "block";
+    $("#pendingNote").textContent = r.message;   // 服务端消息会带模式说明（日志模式提示去日志拿链接）
+  }catch(e){ toast("重发失败：" + e.message, "err"); }
+}
+async function doAuth(){
+  const email = $("#loginEmail").value.trim();
+  const password = $("#loginPass").value;
+  if(!email || !password) return toast("邮箱和密码都要填", "err");
+  const path = S.authMode === "register" ? "/api/auth/register" : "/api/auth/login";
+  try{
+    const r = await api(path, { method: "POST", body: { email, password } });
+    if(r.pending){ showPending(email, r.mail_mode || "smtp"); return; }   // 邮箱未确认：注册成功但不放行登录
+    S.user = r.user;
+    localStorage.removeItem("relay_key");
+    await enterApp();
+  }catch(e){
+    if(String(e.message).includes("email_unverified")){   // 登录被邮箱确认拦住
+      showPending(email, "smtp");
+      toast("邮箱未确认：请点邮件里的确认链接，或重发确认邮件", "err");
+      return;
+    }
+    toast((S.authMode === "register" ? "注册失败：" : "登录失败：") + e.message, "err");
+  }
+}
+async function logout(){
+  try{ await api("/api/auth/logout", { method: "POST" }); }catch(e){}
+  S.user = null; S.tenant = "";
+  localStorage.removeItem("relay_key");
+  $("#loginEmail").value = ""; $("#loginPass").value = "";
+  showLogin();
+}
+async function enterApp(){
+  const st = S.user ? null : await api("/api/auth/status");
+  if(st && !st.user) return showLogin();
+  if(st) S.user = st.user;
+  $("#who").textContent = S.user.email + (S.user.role === "admin" ? " · 管理员" : "");
+  $("#navUsers").style.display = S.user.role === "admin" ? "" : "none";
+  $("#login").style.display = "none";
+  $("#app").style.display = "block";
+  await buildTenantPicker();
+  await refreshAll();
+}
+async function buildTenantPicker(){
+  const sel = $("#tenantSel");
+  if(S.user.role !== "admin"){ sel.style.display = "none"; return; }
+  const r = await api("/api/users");
+  const opts = [`<option value="">只看我的数据</option>`, `<option value="all">全部账号（汇总）</option>`]
+    .concat((r.data || []).map(u => `<option value="${u.id}">${esc(u.email)}</option>`));
+  sel.innerHTML = opts.join("");
+  sel.value = S.tenant;
+  sel.style.display = "";
+}
+
+/* ---------------- 图表 ---------------- */
+
+function lineChart(series, opts){
+  opts = opts || {};
+  const yFmt = opts.yFmt || fmtTok;
+  const labels = opts.labels || {};
+  const rows = series.rows || [];
+  const allKeys = series.keys || series.platforms || [];
+  if(!rows.length) return '<div class="empty">还没有数据，先去发一个请求吧</div>';
+  const keys = allKeys.filter(k => !opts.selected || opts.selected.length === 0
+                                   || opts.selected.indexOf(k) >= 0);
+  if(!keys.length) return '<div class="empty">没有选中的曲线 —— 点上面的列表选中几项</div>';
+  const W = 900, H = 240, P = {l:52, r:14, t:14, b:26};
+  let maxV = 1;
+  rows.forEach(r => keys.forEach(k => { maxV = Math.max(maxV, Number(r[k]||0)); }));
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const x = i => P.l + (rows.length <= 1 ? iw/2 : iw * i / (rows.length - 1));
+  const y = v => P.t + ih - ih * (v / maxV);
+  let g = "";
+  for(let i = 0; i <= 4; i++){
+    const yy = P.t + ih * i / 4, val = maxV * (1 - i/4);
+    g += `<line x1="${P.l}" y1="${yy}" x2="${W-P.r}" y2="${yy}" stroke="#1c2836" stroke-width="1"/>`;
+    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${yFmt(val)}</text>`;
+  }
+  const step = Math.max(1, Math.ceil(rows.length / 8));
+  rows.forEach((r, i) => {
+    if(i % step === 0 || i === rows.length-1)
+      g += `<text x="${x(i)}" y="${H-8}" fill="#5c7387" font-size="10" text-anchor="middle">${r.day.slice(5)}</text>`;
+  });
+  const colorOf = k => PALETTE[Math.max(0, allKeys.indexOf(k)) % PALETTE.length];
+  let paths = "", legend = "";
+  keys.forEach(k => {
+    const color = colorOf(k);
+    const pts = [];
+    rows.forEach((r, i) => {
+      const v = Number(r[k] || 0);
+      if(v === 0 && !pts.length) return;      // 跳过前导 0
+      pts.push([x(i), y(v)]);
+    });
+    if(pts.length === 1){
+      // 只有一个数据点：画个圆点，路径只有 M 指令是画不出线的
+      paths += `<circle cx="${pts[0][0].toFixed(1)}" cy="${pts[0][1].toFixed(1)}" r="4" fill="${color}"/>`;
+    } else if(pts.length > 1){
+      const d = pts.map((pt, i) => (i ? " L" : "M") + pt[0].toFixed(1) + " " + pt[1].toFixed(1)).join("");
+      paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>`;
+    }
+    legend += `<span><i style="background:${color}"></i>${esc(labels[k] || k)}</span>`;
+  });
+  let total = "";
+  if(keys.length > 1 && !opts.noTotal){
+    const tp = rows.map((r, i) => [x(i), y(Number(r.total || 0))]);
+    if(tp.length === 1){
+      total = `<circle cx="${tp[0][0].toFixed(1)}" cy="${tp[0][1].toFixed(1)}" r="3" fill="#ffffff40"/>`;
+    } else {
+      const d = tp.map((pt, i) => (i ? " L" : "M") + pt[0].toFixed(1) + " " + pt[1].toFixed(1)).join("");
+      total = `<path d="${d}" fill="none" stroke="#ffffff26" stroke-width="1.2" stroke-dasharray="4 4"/>`;
+    }
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${g}${total}${paths}</svg>
+          <div class="legend">${legend}${keys.length>1?'<span><i style="background:#ffffff26"></i>合计（虚线）</span>':""}</div>`;
+}
+
+function _pick(dim){
+  S.pick = S.pick || {};
+  return (S.pick[dim] = S.pick[dim] || []);
+}
+
+/* 点用量表行 → 选中或取消，曲线立刻跟着变 */
+function togglePick(el){
+  const dim = el.dataset.dim, k = el.dataset.k;
+  if(dim !== "usage") return;
+  const cur = _pick(dim);
+  const i = cur.indexOf(k);
+  if(i >= 0) cur.splice(i, 1); else cur.push(k);
+  const box = $("#usageChart");
+  if(box) box.innerHTML = usageChartHtml();
+  el.classList.toggle("sel", i < 0);
+}
+
+function usageChartHtml(){
+  const ds = (S.ds && S.ds.usage) || {days: [], rows: [], keys: []};
+  const sel = _pick("usage");
+  return lineChart(ds, {selected: sel});
+}
+
+/* 延迟曲线：每日 平均 / P95 / TTFT 三线（y 轴 ms，无合计线） */
+function latencyChartHtml(data){
+  const ds = data || {days: [], rows: [], keys: ["avg","p95","ttft"]};
+  return lineChart(ds, {yFmt: fmtMs, noTotal: true,
+    labels: {avg: "平均", p95: "P95", ttft: "TTFT 平均"}});
+}
+
+/* 每日 tokens 堆叠柱（按平台）；图例可点选：S.pick.platStack 非空时只显示选中平台的堆叠 */
+function stackedBarHtml(series){
+  const rows = series.rows || [], keys = series.keys || [];
+  if(!rows.length || !keys.length) return '<div class="empty">这个区间还没有请求记录</div>';
+  const sel = _pick("platStack");
+  const totals = keys.map(k => rows.reduce((a, r) => a + Number(r[k] || 0), 0));
+  const order = keys.map((k, i) => [k, totals[i]])
+    .filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).map(x => x[0]);
+  const active = sel.length ? order.filter(k => sel.indexOf(k) >= 0) : order;
+  const color = k => PALETTE[order.indexOf(k) % PALETTE.length];
+  const W = 900, H = 220, P = {l: 52, r: 14, t: 14, b: 26};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const n = rows.length, bw = iw / n;
+  const maxV = Math.max(1, ...rows.map(r => active.reduce((a, k) => a + Number(r[k] || 0), 0)));
+  const y = v => P.t + ih - ih * (v / maxV);
+  let g = "";
+  for(let i = 0; i <= 3; i++){
+    const yy = P.t + ih * i / 3, val = maxV * (1 - i / 3);
+    g += `<line x1="${P.l}" y1="${yy}" x2="${W-P.r}" y2="${yy}" stroke="#1c2836" stroke-width="1"/>`;
+    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${fmtTok(val)}</text>`;
+  }
+  const step = Math.max(1, Math.ceil(n / 8));
+  rows.forEach((r, i) => {
+    if(i % step === 0 || i === n - 1)
+      g += `<text x="${P.l + i*bw + bw/2}" y="${H-8}" fill="#5c7387" font-size="10" text-anchor="middle">${r.day.slice(5)}</text>`;
+  });
+  let bars = "";
+  rows.forEach((r, i) => {
+    let cum = 0;
+    const x = P.l + i*bw + 1, w = Math.max(2, bw - 2);
+    active.forEach(k => {
+      const v = Number(r[k] || 0);
+      if(!v) return;
+      const y1 = y(cum + v), h = y(cum) - y1;
+      bars += `<rect x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${w}" height="${h.toFixed(1)}"
+        fill="${color(k)}" opacity="0.85">
+        <title>${r.day} · ${esc(k)} · ${fmtTok(v)} tokens</title></rect>`;
+      cum += v;
+    });
+  });
+  const legend = order.map(k => {
+    const on = !sel.length || sel.indexOf(k) >= 0;
+    return `<span style="cursor:pointer;opacity:${on ? 1 : 0.4}" title="点一下只看该平台"
+      onclick="togglePlatStack('${esc(k)}')"><i style="background:${color(k)}"></i>${esc(k)}</span>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${g}${bars}</svg>
+    <div class="legend">${legend}</div>
+    ${sel.length ? `<div class="dim" style="font-size:11.5px;margin-top:4px">已按选中平台过滤 · 再点图例可增减</div>` : ""}`;
+}
+function togglePlatStack(k){
+  const sel = _pick("platStack");
+  const i = sel.indexOf(k);
+  if(i >= 0) sel.splice(i, 1); else sel.push(k);
+  renderUsage();
+}
+
+/* 环形图：Top N + 其他，中心显合计 */
+function donutHtml(items, centerLabel){
+  const total = items.reduce((a, x) => a + Number(x.v || 0), 0);
+  if(!total) return '<div class="empty">这个区间还没有请求记录</div>';
+  const R = 55, C = 2 * Math.PI * R;
+  let off = 0, segs = "";
+  items.forEach((it, i) => {
+    const frac = Number(it.v) / total, color = PALETTE[i % PALETTE.length];
+    segs += `<circle cx="80" cy="80" r="${R}" fill="none" stroke="${color}" stroke-width="26"
+      stroke-dasharray="${(frac*C).toFixed(1)} ${C.toFixed(1)}" stroke-dashoffset="${(-off*C).toFixed(1)}"
+      transform="rotate(-90 80 80)"><title>${esc(it.k)} · ${fmtTok(it.v)} · ${Math.round(frac*100)}%</title></circle>`;
+    off += frac;
+  });
+  const legend = items.map((it, i) =>
+    `<div class="row" style="gap:8px;margin:4px 0"><i style="width:10px;height:10px;border-radius:3px;
+      background:${PALETTE[i % PALETTE.length]};flex:none"></i>
+      <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.k)}">${esc(it.k)}</span>
+      <span class="dim" style="font-size:12px">${Math.round(100 * Number(it.v) / total)}%</span></div>`).join("");
+  return `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+    <svg width="160" height="160" viewBox="0 0 160 160" style="flex:none">${segs}
+      <text x="80" y="76" text-anchor="middle" fill="#fff" font-size="15" font-weight="600">${centerLabel || fmtTok(total)}</text>
+      <text x="80" y="94" text-anchor="middle" fill="#5c7387" font-size="10">合计</text></svg>
+    <div style="flex:1;min-width:220px;max-width:420px">${legend}</div></div>`;
+}
+
+/* 星期 × 小时 请求量热力图 */
+function heatmapHtml(data){
+  const mx = data.max || 0;
+  if(!mx) return '<div class="empty">这个区间还没有请求记录</div>';
+  const cell = 19, gap = 3;
+  const HOURS = [...Array(24).keys()];
+  let head = `<div style="display:grid;grid-template-columns:40px repeat(24, ${cell}px);gap:${gap}px;margin-bottom:2px">
+    <span></span>${HOURS.map(h => `<span style="font-size:9.5px;color:var(--dim);text-align:center">${h % 3 === 0 ? h : ""}</span>`).join("")}</div>`;
+  let grid = data.matrix.map((row, wd) =>
+    `<div style="display:grid;grid-template-columns:40px repeat(24, ${cell}px);gap:${gap}px">
+      <span style="font-size:11px;color:var(--dim);line-height:${cell}px">${data.labels[wd]}</span>
+      ${row.map((v, h) => {
+        const a = v ? 0.18 + 0.82 * Math.sqrt(v / mx) : 0;
+        return `<i title="${data.labels[wd]} ${String(h).padStart(2, "0")}:00 · ${nf(v)} 次"
+          style="width:${cell}px;height:${cell}px;border-radius:4px;display:block;
+          background:${v ? `rgba(79,140,255,${a.toFixed(2)})` : "var(--panel2)"}"></i>`;
+      }).join("")}</div>`).join("");
+  return `<div style="overflow-x:auto"><div style="min-width:fit-content">${head}${grid}</div>
+    <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该星期几该小时的请求量（近 ${data.days} 天合并）</div></div>`;
+}
+
+/* 结构组成：小组横向条形（协议/流式/状态/思考策略/错误码） */
+function mixBarRow(title, obj){
+  const total = Object.values(obj).reduce((a, v) => a + Number(v || 0), 0) || 1;
+  const rows = Object.entries(obj).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+    `<div class="row" style="gap:8px;margin:4px 0"><span style="width:92px;font-size:12px">${esc(k)}</span>
+      <div class="bar" style="flex:1"><i style="width:${Math.max(2, Math.round(100 * v / total))}%"></i></div>
+      <span class="num dim" style="font-size:12px;width:110px;text-align:right">${nf(v)} · ${Math.round(100 * v / total)}%</span></div>`).join("");
+  return `<div style="margin-bottom:12px"><div style="font-size:12.5px;color:var(--dim);margin-bottom:2px">${title}</div>
+    ${rows || '<div class="dim" style="font-size:12px">无记录</div>'}</div>`;
+}
+function mixPanelHtml(mix){
+  mix = mix || {};
+  return mixBarRow("下游协议", mix.by_in_format) +
+         mixBarRow("流式 / 普通", mix.by_stream) +
+         mixBarRow("请求状态", mix.by_status) +
+         mixBarRow("思考策略", mix.by_reasoning) +
+         mixBarRow("错误 HTTP 码", mix.by_http_error);
+}
+
+/* 错误摘要：Top 原因列表 */
+function errorsHtml(list){
+  if(!list.length) return '<div class="empty">这个区间没有错误，稳得很</div>';
+  const rows = list.map(e => `<tr>
+      <td><span class="pill err">${esc(e.http_status || "?")}</span></td>
+      <td class="mono" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.reason)}">${esc(e.reason)}</td>
+      <td class="num"><b>${nf(e.c)}</b></td>
+      <td class="num dim">${esc(String(e.last || "").replace("T", " ").slice(5, 16))}</td></tr>`).join("");
+  return `<table><thead><tr><th>HTTP</th><th>错误原因</th><th class="num">次数</th><th class="num">末次出现</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="dim" style="font-size:11.5px;margin-top:6px">按次数取 Top ${list.length}，同一原因不同 HTTP 码分开列</div>`;
+}
+
+/* 活动柱状图：柱高=该桶 tokens；该桶有错误则红色；悬浮看明细。
+   xLabel/tipLabel 出 x 轴标签与悬浮文案，every 是标签间隔（桶数）。 */
+function hourlyBarHtml(buckets, xLabel, tipLabel, every){
+  const W = 760, H = 170, P = {l: 52, r: 8, t: 12, b: 24};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const n = buckets.length || 1;
+  const maxV = Math.max(1, ...buckets.map(h => Number(h.tokens || 0)));
+  const bw = iw / n;
+  let g = "";
+  for(let i = 0; i <= 3; i++){
+    const yy = P.t + ih * i / 3, val = maxV * (1 - i / 3);
+    g += `<line x1="${P.l}" y1="${yy}" x2="${W-P.r}" y2="${yy}" stroke="#1c2836" stroke-width="1"/>`;
+    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${fmtTok(val)}</text>`;
+  }
+  buckets.forEach((h, i) => { if(i % every === 0)
+    g += `<text x="${P.l + i*bw + bw/2}" y="${H-8}" fill="#5c7387" font-size="10" text-anchor="middle">${xLabel(h)}</text>`; });
+  let bars = "";
+  buckets.forEach((h, i) => {
+    const v = Number(h.tokens || 0), r = Number(h.requests || 0), e = Number(h.errors || 0);
+    if(!v && !r) return;
+    const bh = Math.max(3, ih * (v / maxV));
+    const x = P.l + i*bw + 2.5, y = P.t + ih - bh, w = Math.max(2, bw - 5);
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w}" height="${bh.toFixed(1)}" rx="2"
+      fill="${e ? "var(--err)" : "var(--accent)"}" fill-opacity="0.75">
+      <title>${tipLabel(h)} · ${nf(r)} 请求 · ${fmtTok(v)} tokens${e ? ` · ${e} 错误` : ""}</title></rect>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${g}${bars}</svg>
+    <div class="dim" style="font-size:11.5px;margin-top:4px">柱高 = 该时段 tokens 总量 · 红色 = 该时段出现错误 · 悬浮看明细</div>`;
+}
+
+/* 近期活动：每桶按 平台/模型 堆叠（Top 6 + 其他），配色与图例同 stackedBarHtml；
+   图例可点选：S.pick.ovStack 非空时只显示选中维度的堆叠 */
+function hourlyStackedHtml(buckets, skey, xLabel, tipLabel, every){
+  const keyTot = {};
+  for (const b of buckets){
+    const m = b[skey] || {};
+    for (const [k, v] of Object.entries(m)) keyTot[k] = (keyTot[k] || 0) + Number(v || 0);
+  }
+  const all = Object.entries(keyTot).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const top = all.slice(0, 6).map(x => x[0]);
+  const rest = all.slice(6).map(x => x[0]);
+  const order = rest.length ? [...top, "其他"] : top.slice();
+  const sel = _pick("ovStack");
+  const active = sel.length ? order.filter(k => sel.indexOf(k) >= 0) : order;
+  const colorOf = k => PALETTE[order.indexOf(k) % PALETTE.length];
+  const W = 760, H = 170, P = {l: 52, r: 8, t: 12, b: 24};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const n = buckets.length || 1;
+  const bw = iw / n;
+  const valOf = (b, k) => {
+    const m = b[skey] || {};
+    return k === "其他" ? rest.reduce((a, kk) => a + Number(m[kk] || 0), 0) : Number(m[k] || 0);
+  };
+  const maxV = Math.max(1, ...buckets.map(b => active.reduce((a, k) => a + valOf(b, k), 0)));
+  let g = "";
+  for(let i = 0; i <= 3; i++){
+    const yy = P.t + ih * i / 3, val = maxV * (1 - i / 3);
+    g += `<line x1="${P.l}" y1="${yy}" x2="${W-P.r}" y2="${yy}" stroke="#1c2836" stroke-width="1"/>`;
+    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${fmtTok(val)}</text>`;
+  }
+  buckets.forEach((h, i) => { if(i % every === 0)
+    g += `<text x="${P.l + i*bw + bw/2}" y="${H-8}" fill="#5c7387" font-size="10" text-anchor="middle">${xLabel(h)}</text>`; });
+  let bars = "";
+  buckets.forEach((h, i) => {
+    let cum = 0;
+    const total = active.reduce((a, k) => a + valOf(h, k), 0);
+    if(!total) return;
+    const x = P.l + i*bw + 2.5, w = Math.max(2, bw - 5);
+    for (const k of active){
+      const v = valOf(h, k);
+      if(!v) continue;
+      const y1 = P.t + ih * (1 - (cum + v) / maxV), hgt = ih * (v / maxV);
+      bars += `<rect x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${w}" height="${hgt.toFixed(1)}"
+        fill="${colorOf(k)}" opacity="0.85">
+        <title>${tipLabel(h)} · ${esc(k)} · ${fmtTok(v)} tokens（占该时段 ${(100 * v / total).toFixed(0)}%）</title></rect>`;
+      cum += v;
+    }
+  });
+  const legend = order.map(k => {
+    const on = !sel.length || sel.indexOf(k) >= 0;
+    return `<span style="cursor:pointer;opacity:${on ? 1 : 0.4}" title="点一下只看该维度"
+      onclick="toggleOvStack('${esc(k)}')"><i style="background:${colorOf(k)}"></i>${esc(k)}</span>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${g}${bars}</svg>
+    <div class="legend">${legend}</div>
+    ${sel.length ? `<div class="dim" style="font-size:11.5px;margin-top:4px">已按选中维度过滤 · 再点图例可增减</div>` : ""}`;
+}
+function toggleOvStack(k){
+  const sel = _pick("ovStack");
+  const i = sel.indexOf(k);
+  if(i >= 0) sel.splice(i, 1); else sel.push(k);
+  renderOverview();
+}
+
+/* 活跃情况（概览）：所选年份的「星期 × 月份」日历（纵轴=星期、横轴=1~12 月），
+   格子深浅 = 该月该星期几的请求量合计；颜色为绿色深浅（主题 --ok），
+   与用量统计「星期 × 时段」蓝色热力图区分；
+   d 为 /api/stats/year 响应 {year, cells[12][7]{requests,tokens,errors},
+   total_requests, total_tokens, active_days, years[]}，cells 恒为完整 12×7 */
+function yearlyActivityHtml(d){
+  if(!d || !Array.isArray(d.cells)) return '<div class="empty">这一年还没有请求记录</div>';
+  const Y = d.year;
+  const maxV = Math.max(1, ...d.cells.flat().map(c => Number(c.requests || 0)));
+  const cellH = 26, gap = 3;
+  const cols = "34px repeat(12, minmax(20px, 1fr))";   // 月份列弹性：格子随 panel 宽度伸缩
+  const names = ["一", "二", "三", "四", "五", "六", "日"];   // 纵轴：星期
+  const colHead = `<div style="display:grid;grid-template-columns:${cols};gap:${gap}px;margin-bottom:2px">
+    <span></span>${[...Array(12).keys()].map(m =>
+      `<span style="font-size:10px;color:var(--dim);text-align:center">${m + 1}月</span>`).join("")}</div>`;
+  const grid = names.map((nm, w) => {
+    const cells = d.cells.map((mc, m) => {
+      const c = mc[w];
+      const req = Number(c.requests || 0);
+      if(!req) return `<i style="width:100%;height:${cellH}px;border-radius:4px;display:block;background:var(--panel2)"></i>`;
+      const a = 0.18 + 0.82 * Math.sqrt(req / maxV);
+      return `<i title="${Y} 年 ${m + 1} 月 · 周${nm} · ${nf(req)} 次 · ${fmtTok(c.tokens)} tokens${c.errors ? " · " + nf(c.errors) + " 错误" : ""}"
+        style="width:100%;height:${cellH}px;border-radius:4px;display:block;
+        background:rgba(52,211,153,${a.toFixed(2)})"></i>`;
+    }).join("");
+    return `<div style="display:grid;grid-template-columns:${cols};gap:${gap}px">
+      <span style="font-size:11px;color:var(--dim);line-height:${cellH}px">周${nm}</span>${cells}</div>`;
+  }).join("");
+  return `<div style="overflow-x:auto"><div style="min-width:fit-content">${colHead}${grid}</div>
+    <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该月该星期的请求量（${Y} 年 · 活跃 ${nf(d.active_days || 0)} 天 · 共 ${nf(d.total_requests || 0)} 次 / ${fmtTok(d.total_tokens || 0)} tokens）</div></div>`;
+}
+/* 年份下拉框：选项 = 有数据的年份 ∪ 浏览器当前年（倒序），onchange 触发重新取数 */
+function ovYearSelectHtml(d, yr){
+  const set = new Set(d && d.years ? d.years : []);
+  set.add(String(new Date().getFullYear()));
+  const opts = [...set].sort((a, b) => Number(b) - Number(a)).map(y =>
+    `<option value="${y}" ${String(y) === String(yr) ? "selected" : ""}>${y} 年</option>`).join("");
+  return `<select id="ovYear" style="width:100px" onchange="ovYearPick(this.value)">${opts}</select>`;
+}
+/* 地域访问地图：点击省份下钻城市排名（S.regPick 记忆选中省；再点同一省取消） */
+function pickProv(p){ S.regPick = S.regPick === p ? "" : p; renderOverview(); }
+/* 地域访问地图：中国省级 SVG 着色（深浅=该省请求数）+ 右侧境外/局域网侧栏 */
+function regionMapHtml(rg){
+  if(!rg) return "";
+  if(rg.db === "missing"){
+    return '<div class="dim" style="padding:14px 0;font-size:12.5px;line-height:1.7">'
+      + '未配置 GeoIP 数据库，地域地图暂不显示。'
+      + '下载 <span class="mono">GeoLite2-City.mmdb</span>（MaxMind 免费）放入数据目录（'
+      + '<span class="mono">RELAY_DATA_DIR</span>）或设置 <span class="mono">RELAY_GEOIP_DB</span> 后重启即可；'
+      + '国内 IP 城市级定位更准可再放一份 <span class="mono">IP2Region.xdb</span>（开源免费，RELAY_IP2REGION_XDB）。<div>';
+  }
+  const byProv = {}; const world = []; let localN = 0, unkN = 0, cnFallN = 0;
+  for(const d of rg.data){
+    if(d.kind === "cn"){
+      // 只有匹配地图省份键的才上着色；「中国大陆」等兜底桶进侧栏
+      if(CHINA_PROVINCE_PATHS[d.region]) byProv[d.region] = (byProv[d.region] || 0) + d.count;
+      else cnFallN += d.count;
+    }
+    else if(d.kind === "world") world.push(d);
+    else if(d.kind === "local") localN += d.count;
+    else unkN += d.count;
+  }
+  const max = Math.max(1, ...Object.values(byProv));
+  const sel = S.regPick || "";
+  let paths = "";
+  for(const p of Object.keys(CHINA_PROVINCE_PATHS)){
+    const d = CHINA_PROVINCE_PATHS[p];
+    if(!d) continue;
+    const v = byProv[p] || 0;
+    const fill = v > 0 ? "rgba(79,140,255," + (0.25 + 0.75 * Math.sqrt(v / max)).toFixed(2) + ")" : "";
+    const tip = "<title>" + esc(p) + (v > 0 ? " · " + nf(v) + " 次" : " · 区间内无请求")
+      + (sel === p ? "（再点取消）" : "（点击查看城市排名）") + "</title>";
+    paths += '<path d="' + d + '"'
+      + (v > 0 ? ' fill="' + fill + '"' : ' fill="var(--panel2)"')
+      + ' style="cursor:pointer" onclick="pickProv(\'' + p + '\')"'
+      + (sel === p ? ' stroke="#ff8a5c" stroke-width="1.8"' : ' stroke="var(--line)" stroke-width="0.8"')
+      + '>' + tip + '</path>';
+  }
+  // 城市热点层：后端 lat/lon 用与省路径同一套等距圆柱投影（15.14964 px/度）落到同一 viewBox
+  const cts = (rg.cities || []).filter(c => c.kind === "cn" && isFinite(c.lat) && isFinite(c.lon));
+  let dots = "";
+  if(cts.length){
+    const cmax = Math.max.apply(null, cts.map(c => c.count));
+    const top = cts.slice(0, 30);
+    top.forEach((c, i) => {
+      const x = 15.14964 * c.lon - 1080.1038;
+      const y = -15.14966 * c.lat + 811.477;
+      if(x < 0 || x > 1000 || y < 0 || y > 760) return;
+      const ratio = Math.sqrt(c.count / cmax);
+      const r = 3 + 9 * ratio;
+      dots += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="' + r.toFixed(1) + '"'
+        + ' fill="#ff8a5c" fill-opacity="' + (0.5 + 0.5 * ratio).toFixed(2)
+        + '" stroke="#ffd9c2" stroke-width="0.8"><title>'
+        + esc(c.name) + " · " + nf(c.count) + " 次</title></circle>";
+      if(i < 3) dots += '<text x="' + (x + r + 4).toFixed(1) + '" y="' + (y + 4).toFixed(1)
+        + '" font-size="14" fill="var(--fg)" stroke="none">' + esc(c.name) + "</text>";
+    });
+  }
+  const side = [];
+  // 省/城排名横条：默认省份 Top10；点了某省 → 该省城市排名（cities 带 region 字段，前端过滤）
+  // 排位（用户拍板）：境外/局域网/未识别 → 色深说明 → 区间总次数 → 中国大陆（未解析到省） → 排名图表
+  const barRow = (rank, name, cnt, m, color) =>
+    '<div class="row" style="gap:6px;margin:3px 0"><span style="width:16px;font-size:11px;color:var(--dim);text-align:right;flex:none">' + rank + '</span>'
+    + '<span style="width:64px;font-size:12px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(name) + '">' + esc(name) + '</span>'
+    + '<span style="flex:1;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;display:block"><i style="display:block;height:100%;width:'
+    + Math.max(4, Math.round(100 * cnt / m)) + '%;background:' + color + ';font-style:normal"></i></span>'
+    + '<span style="font-size:12px" class="dim">' + nf(cnt) + "</span></div>";
+  if(world.length){
+    const top = world.slice(0, 10);
+    const wmax = Math.max.apply(null, top.map(x => x.count));
+    side.push('<div style="font-size:12px;margin:10px 0 4px">境外 · Top ' + top.length + "</div>"
+      + top.map(x => '<div class="row" style="gap:6px;margin:3px 0"><span style="width:64px;font-size:12px;flex:none">'
+        + esc(x.region) + '</span><span style="flex:1;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;display:block">'
+        + '<i style="display:block;height:100%;width:' + Math.max(4, Math.round(100 * x.count / wmax)) + '%;background:#4f8cff;font-style:normal"></i></span>'
+        + '<span style="font-size:12px" class="dim">' + nf(x.count) + "</span></div>").join(""));
+  }
+  if(localN) side.push('<div class="dim" style="font-size:12px;margin-top:8px">局域网 / 代理出口 ' + nf(localN) + " 次</div>");
+  if(unkN) side.push('<div class="dim" style="font-size:12px">未识别 ' + nf(unkN) + " 次</div>");
+  // 色深说明放最上（在排名图表之上）
+  side.push('<div class="dim" style="font-size:11.5px;margin-top:10px;line-height:1.6">色深 = 该省请求次数 · 橙点 = 城市热点（面积 ∝ 请求数，仅显 Top 30）· 按客户端 IP 定位（公司出口 / 代理 IP 会合并到同一地区）</div>');
+  // 区间总次数：色深说明之下（用户拍板）
+  side.push('<div style="font-size:12px" class="dim">区间内带 IP 记录请求 <b style="color:var(--fg)">' + nf(rg.total) + "</b> 次</div>");
+  // 中国大陆（未解析到省）行：紧接总次数之下
+  if(cnFallN) side.push('<div class="dim" style="font-size:12px;margin-top:8px">中国大陆（未解析到省）' + nf(cnFallN) + " 次</div>");
+  // 排名图表放最底部：默认省份 Top10；点了某省 → 该省城市排名
+  if(sel){
+    const pc = (rg.cities || []).filter(c => c.kind === "cn" && c.region === sel);
+    const pm = Math.max(1, ...pc.map(c => c.count));
+    side.push('<div style="font-size:12px;margin:10px 0 4px">' + esc(sel) + " · 城市 Top " + pc.length
+      + ' <button class="btn sm" style="margin-left:8px;padding:1px 8px" onclick="pickProv(\'' + sel + '\')">取消</button></div>');
+    if(pc.length) side.push(pc.map((c, i) => barRow(i + 1, c.name, c.count, pm, "#ff8a5c")).join(""));
+    else side.push('<div class="dim" style="font-size:12px">'
+      + ((byProv[sel] || 0) ? "该省暂无城市级数据（IP 未解析到城市名）"
+                             : "该省在所选区间内没有请求记录") + "</div>");
+  } else {
+    const provTop = Object.entries(byProv).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    if(provTop.length){
+      side.push('<div style="font-size:12px;margin:10px 0 4px">省份 · Top ' + provTop.length
+        + ' <span class="dim" style="font-size:11px">· 点省份看城市排名</span></div>');
+      side.push(provTop.map(([n, c], i) => barRow(i + 1, n, c, provTop[0][1], "#4f8cff")).join(""));
+    }
+  }
+  return '<div class="regionmap"><svg viewBox="0 0 1000 760" style="width:100%;max-width:620px;height:auto;'
+    + 'background:var(--panel);border:1px solid var(--line);border-radius:10px">' + paths + dots + "</svg>"
+    + '<div style="min-width:0">' + side.join("") + "</div></div>";
+}
+
+function ovYearPick(v){ S.ovYear = v; renderOverview(); }
+
+/* 概览活动图的时间范围：今日按小时 / 7 天按天 / 30 天按天 */
+function setOvPeriod(p){ S.ovPeriod = p; if(S.pick) S.pick.ovStack = []; renderOverview(); }
+function bucketOpts(p){
+  if(p === 1) return {every: 3, x: h => String(h.h), tip: h => String(h.h) + ":00"};
+  if(p === 7) return {every: 1, x: h => String(h.h).slice(5), tip: h => String(h.h)};
+  return {every: 5, x: h => String(h.h).slice(5), tip: h => String(h.h)};
+}
+
+/* ---------------- 概览 ---------------- */
+
+async function renderOverview(){
+  const box = $("#tab-overview");
+  const ov = S.overview;
+  if(!ov) return;
+  const t = ov.totals;
+  const p = S.ovPeriod || 1;
+  const split = S.ovSplit || "platform";
+  // 活跃情况：选定的年份（默认浏览器当前年），按 ts 年份前缀精确取数
+  const curYear = String(new Date().getFullYear());
+  const yr = S.ovYear || curYear;
+  const yearUrl = `/api/stats/year?year=${yr}`;
+  // KPI 永远基于今日；活动图按所选时间范围（今日按小时，7/30 天按天）+ 平台/模型维度堆叠；
+  // 年度活跃固定取所选年份按「星期 × 月份」的请求量
+  const h1 = await api(`/api/stats/hourly?days=1&group=hour&split=${split}`);
+  const hd = h1.today || h1.total || {requests: 0, errors: 0, avg_latency_ms: 0};
+  const rgRange = p === 1 ? "today" : (p === 7 ? "7d" : "30d");
+  const [chart, act, rg] = p === 1
+    ? await Promise.all([h1, api(yearUrl), api(`/api/stats/regions?range=${rgRange}`)])
+    : await Promise.all([
+        api(`/api/stats/hourly?days=${p}&group=day&split=${split}`),
+        api(yearUrl),
+        api(`/api/stats/regions?range=${rgRange}`),
+      ]);
+  const oc = bucketOpts(p);
+  const gran = p === 1 ? "按小时" : (p === 7 ? "近 7 天 · 按天" : "近 30 天 · 按天");
+  const okRate = hd.requests ? (100 * (hd.requests - hd.errors) / hd.requests).toFixed(1) : "100.0";
+  const splitChart = split === "none"
+    ? hourlyBarHtml(chart.buckets || [], oc.x, oc.tip, oc.every)
+    : hourlyStackedHtml(chart.buckets || [], split === "platform" ? "by_platform" : split === "dkey" ? "by_dkey" : "by_model",
+                        oc.x, oc.tip, oc.every);
+  const actChart = yearlyActivityHtml(act);
+  box.innerHTML = `
+    <div class="grid kpis" style="margin-bottom:16px">
+      <div class="kpi"><div class="k">今日请求</div><div class="v">${nf(t.today_requests)}</div>
+        <div class="s">累计 ${nf(t.total_requests)} 次</div></div>
+      <div class="kpi"><div class="k">今日 tokens</div><div class="v">${fmtTok(t.today_tokens)}</div>
+        <div class="s">入 ${fmtTok(t.today_prompt_tokens)} / 出 ${fmtTok(t.today_completion_tokens)}</div></div>
+      <div class="kpi"><div class="k">成功率</div><div class="v">${okRate}<span class="dim" style="font-size:14px">%</span></div>
+        <div class="s">今日错误 ${nf(hd.errors)}</div></div>
+      <div class="kpi"><div class="k">平均耗时</div><div class="v">${fmtMs(hd.avg_latency_ms)}</div>
+        <div class="s">今日均值 · 整体 ${fmtMs(t.avg_latency_ms)}</div></div>
+      <div class="kpi"><div class="k">累计 tokens</div><div class="v">${fmtTok(t.total_tokens)}</div>
+        <div class="s">其中缓存命中 ${fmtTok(t.total_cached_tokens)}</div></div>
+      <div class="kpi"><div class="k">上游平台</div><div class="v">${nf(ov.enabled_providers)}<span class="dim" style="font-size:14px"> / ${nf(ov.providers)}</span></div>
+        <div class="s">可用模型 ${nf(ov.models)} 个</div></div>
+    </div>
+    <div class="split ov">
+      <div class="panel">
+        <h2>活跃情况 <small>请求量日历 · 纵轴为星期、横轴为月份 · 格子深浅 = 该月该星期请求次数</small>
+          <span style="flex:1"></span>
+          ${ovYearSelectHtml(act, yr)}
+        </h2>
+        ${actChart}
+      </div>
+      <div class="panel">
+      <h2>近期活动 <small>${gran} · 纵轴为 tokens · ${{"none":"合计","platform":"按上游平台堆叠","model":"按模型堆叠","dkey":"按下游 key 堆叠"}[split] || "合计"}${(S.pick && S.pick.ovStack || []).length ? " · 已选 " + S.pick.ovStack.length + " 项" : ""}</small>
+        <span style="flex:1"></span>
+        ${(S.pick && S.pick.ovStack || []).length ? '<button class="btn sm" onclick="S.pick.ovStack=[];renderOverview()">重置</button>' : ""}
+        <select id="ovSplit" style="width:150px" onchange="S.ovSplit=this.value;if(S.pick)S.pick.ovStack=[];renderOverview()">
+          <option value="none" ${split==="none"?"selected":""}>显示合计</option>
+          <option value="platform" ${split==="platform"?"selected":""}>按平台堆叠</option>
+          <option value="model" ${split==="model"?"selected":""}>按模型堆叠</option>
+          <option value="dkey" ${split==="dkey"?"selected":""}>按下游 key 堆叠</option>
+        </select>
+        <span class="chips" style="margin:0">
+          <button class="chip${p === 1 ? " on" : ""}" onclick="setOvPeriod(1)">今日</button>
+          <button class="chip${p === 7 ? " on" : ""}" onclick="setOvPeriod(7)">近 7 天</button>
+          <button class="chip${p === 30 ? " on" : ""}" onclick="setOvPeriod(30)">近 30 天</button>
+        </span>
+      </h2>
+      ${splitChart}
+      </div>
+    </div>
+    <div class="panel">
+      <h2>地域访问地图 <small>按客户端 IP 定位 · ${gran}</small></h2>
+      ${regionMapHtml(rg)}
+    </div>`;
+}
+
+function clearPicks(){
+  S.pick = {platform: [], model: [], usage: [], platStack: [], ovStack: []};
+  const us = $("#usageChart");
+  if(us) us.innerHTML = usageChartHtml();
+}
+
+/* ---------------- 上游平台 ---------------- */
+function reasoningPill(p){
+  const mr = (p.extra && p.extra.model_reasoning) || {};
+  const offs = Object.keys(mr).filter(k => mr[k] === "off");
+  if(!offs.length) return '<span class="dim" style="font-size:12px">跟随客户端</span>';
+  const label = offs.length === 1 ? `${offs[0]} 已关闭` : `${offs.length} 个模型已关闭`;
+  return `<span class="pill warn" title="${esc(offs.join(", "))}">${esc(label)}</span>`;
+}
+
+function editProvider(platform){
+  const p = platform ? S.providers.find(x => x.platform === platform) : null;
+  const ex = (p && p.extra) || {};
+  S.editingPlatform = platform;
+  S.editModels = (p && p.models || []).slice();
+  S.editModelMap = Object.assign({}, (p && p.model_map) || {});
+  S.editAlias = {};
+  for (const [a, t] of Object.entries(S.editModelMap)) if (!S.editAlias[t]) S.editAlias[t] = a;
+  S.availFetched = false;
+  $("#modalBody").innerHTML = `
+    <h3>${p ? "编辑平台 · " + esc(p.platform) : "新增上游平台"}</h3>
+    ${p ? "" : `<div class="field"><label>选择平台模板（下拉框）</label>
+      <select id="f_preset" onchange="applyPreset(this.value)" style="max-width:340px">
+        <option value="">— 不用模板，自定义 —</option>
+        ${S.presets.map(x => `<option value="${esc(x.platform)}">${esc(x.name)}</option>`).join("")}
+      </select>
+      <div class="dim" style="font-size:11.5px;margin-top:4px">选中后自动填 平台id / 显示名 / 协议 / Base URL / 模型，可再逐项改。</div>
+    </div>`}
+    <div class="split" style="gap:14px">
+      <div class="field"><label>平台 id（下游用 platform/model 前缀）</label>
+        <input id="f_platform" value="${esc(p ? p.platform : "")}" ${p ? "disabled" : ""} placeholder="deepseek"></div>
+      <div class="field"><label>显示名</label>
+        <input id="f_name" value="${esc(p ? p.name : "")}" placeholder="DeepSeek"></div>
+    </div>
+    <div class="split" style="gap:14px">
+      <div class="field"><label>协议类型</label>
+        <select id="f_type">
+          <option value="openai" ${p && p.type==="openai" ? "selected":""}>openai（OpenAI 兼容）</option>
+          <option value="anthropic" ${p && p.type==="anthropic" ? "selected":""}>anthropic（Messages 原生）</option>
+        </select></div>
+      <div class="field"><label>超时（秒）</label>
+        <input id="f_timeout" type="number" value="${p ? p.timeout_s : 300}"></div>
+    </div>
+    <div class="field"><label>Base URL（网页类型填聊天页地址，例如 https://chat.deepseek.com/）</label>
+      <input id="f_base" class="mono" value="${esc(p ? p.base_url : "")}" placeholder="https://api.deepseek.com/v1"></div>
+    <div class="field"><label>出口代理（可选，仅该平台走代理；服务器直连 Google 不通时在这里填）</label>
+      <input id="f_proxy" class="mono" value="${esc(p ? p.proxy || "" : "")}" placeholder="留空=直连；如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808"></div>
+    <div class="field"><label>API Key（一行一个，支持多 key 轮换）</label>
+      <textarea id="f_keys" rows="3" placeholder="sk-...">${esc((p && p.api_keys || []).join("\n"))}</textarea>
+      ${p && p.key_count ? '<div class="dim" style="font-size:11.5px;margin-top:6px">已保存的 key 显示为掩码；不改动就保持原样，输入新 key 会整体替换。</div>' : ""}
+    </div>
+    <div class="field"><label>模型（下拉框选择添加，聚焦自动拉取上游模型列表；也可手动输入）</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="f_addmodel" onfocus="fetchAvailableModels()" onchange="addModel(this.value)"
+          style="flex:1;min-width:220px;padding:6px 8px;font-size:12.5px">
+          <option value="">— 选择要添加的模型 —</option>
+        </select>
+        <button class="btn sm" onclick="fetchAvailableModels(true)">重新拉取</button>
+        <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
+        <button class="btn sm" onclick="addManualModel()">＋添加</button>
+      </div></div>
+    <div class="field"><label>模型级设置：「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求；点 × 删除该模型</label>
+      <div id="f_modelrows" class="modelrows"></div>
+    </div>
+    <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由上面「别名」列自动生成，不必手写）</label>
+      <textarea id="f_extra" rows="3" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
+    <div class="field"><label><input type="checkbox" id="f_enabled" ${(!p || p.enabled) ? "checked":""} style="width:auto;margin-right:6px">启用该平台</label></div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveProvider(${p ? "'" + esc(p.platform) + "'" : "null"})">保存</button>
+    </div>
+    <div id="presetNote" style="display:none;margin-top:10px;padding:8px 10px;border:1px solid var(--border,#333);border-radius:6px;background:rgba(127,127,127,0.08);font-size:12px;line-height:1.6"></div>`;
+  $("#modal").classList.add("on");
+  renderModelReasoning();
+}
+
+async function renderProviders(){
+  const box = $("#tab-providers");
+  const data = await api("/api/providers");
+  S.providers = data.data || []; S.presets = data.presets || [];
+  const rows = S.providers.map(p => {
+    const keys = (p.api_keys || []).join("<br>") || '<span class="dim">网页登录</span>';
+    const models = (p.models || []).length + Object.keys(p.model_map || {}).length;
+    const state = !p.enabled ? '<span class="pill">已停用</span>'
+      : (p.key_count ? '<span class="pill ok">启用</span>' : '<span class="pill warn">缺 key</span>');
+    return `<tr>
+      <td><b>${esc(p.platform)}</b><div class="dim" style="font-size:11.5px">${esc(p.name||"")}</div></td>
+      <td><span class="pill">${esc(p.type)}</span></td>
+      <td class="mono dim" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${esc(p.base_url)}${p.proxy ? `<div style="font-size:11px">代理 ${esc(p.proxy)}</div>` : ""}</td>
+      <td class="mono" style="font-size:11.5px">${keys}</td>
+      <td class="num">${models}</td>
+      <td>${reasoningPill(p)}</td>
+      <td>${state}</td>
+      <td class="num">
+        <button class="btn sm" onclick="testProvider('${esc(p.platform)}')">测试</button>
+        <button class="btn sm" onclick="refreshModels('${esc(p.platform)}')">拉模型</button>
+        <button class="btn sm" onclick="editProvider('${esc(p.platform)}')">编辑</button>
+        <button class="btn sm danger" onclick="delProvider('${esc(p.platform)}')">删除</button>
+      </td></tr>`;
+  }).join("");
+  box.innerHTML = `
+    <div class="panel">
+      <h2>上游平台 <small>所有客户端请求都从这里转发出去</small>
+        <span style="flex:1"></span>
+        <button class="btn primary sm" onclick="editProvider(null)">+ 新增平台</button>
+      </h2>
+      ${S.providers.length ? `<table><thead><tr>
+        <th>平台</th><th>类型</th><th>Base URL</th><th>API Key</th>
+        <th class="num">模型</th><th>思考</th><th>状态</th><th class="num">操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>`
+      : '<div class="empty">还没有上游平台，点右上角「新增平台」开始</div>'}
+      <div class="dim" style="font-size:12px;margin-top:12px;line-height:1.7">
+        提示：下游用 <span class="mono">platform/model</span> 指定平台与模型（例如
+        <span class="mono">deepseek/deepseek-chat</span>）；也可以只写模型名，中转站按登记顺序自动挑平台。
+        「思考」= 该平台是否允许模型输出思考过程，<b>已关闭</b> 时会要求上游别思考、并把思考内容挡在下游之外。
+      </div>
+    </div>
+    <div class="panel">
+      <h2>全部可用模型 <small>${nf(S.models.length)} 个</small></h2>
+      <div class="chips">${(S.models||[]).map(m => `<span class="chip mono">${esc(m)}</span>`).join("") || '<span class="dim">暂无</span>'}</div>
+    </div>
+`;
+
+}
+
+const MR_OPTS = [["auto","跟随客户端"],["off","关闭思考"],["low","低"],["medium","中"],["high","高"]];
+const OFF_FIELDS = [["auto","自动（按平台，同 Hermes）"],
+                    ["reasoning_effort",'reasoning_effort:"none"'],
+                    ["think",'reasoning_effort:"none" + think:false'],
+                    ["enable_thinking","enable_thinking:false"],
+                    ["thinking_type",'thinking:{"type":"disabled"}'],
+                    ["thinking_object",'reasoning:{"enabled":false}'],
+                    ["chat_template","chat_template_kwargs"],
+                    ["none","不注入字段"]];
+
+function _modalExtra(){
+  try { const raw = $("#f_extra").value.trim(); return raw ? JSON.parse(raw) : {}; }
+  catch(e){ return null; }
+}
+
+function syncRowField(sel){
+  const row = sel.closest(".mrow");
+  const f = row && row.querySelector(".mrf");
+  if(f) f.style.display = (sel.value === "off") ? "" : "none";
+}
+
+function renderModelReasoning(){
+  const box = $("#f_modelrows");
+  if(!box) return;
+  const extra = _modalExtra() || {};
+  const mr = (extra.model_reasoning && typeof extra.model_reasoning === "object") ? extra.model_reasoning : {};
+  if(!S.editModels.length){
+    box.innerHTML = '<div class="dim" style="font-size:12px">还没有模型：在上方下拉框选择（聚焦自动拉取）或手动输入添加</div>';
+    return;
+  }
+  box.innerHTML = S.editModels.map(m => {
+    const v = mr[m];
+    const pol = (typeof v === "string" ? v : (v && v.policy)) || "auto";
+    const fld = (v && typeof v === "object" && v.field) || "auto";
+    const opts = MR_OPTS.map(([k,l]) => `<option value="${k}" ${pol === k ? "selected" : ""}>${l}</option>`).join("");
+    const fopts = OFF_FIELDS.map(([k,l]) => `<option value="${k}" ${fld === k ? "selected" : ""}>${l}</option>`).join("");
+    return `<div class="mrow" data-model="${esc(m)}">
+      <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
+      <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
+      <select class="mrs" onchange="syncRowField(this)">${opts}</select>
+      <select class="mrf" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
+      <button class="mdel" title="删除这个模型" onclick="delModel('${esc(m)}')">×</button>
+    </div>`;
+  }).join("");
+  buildAddOptions();
+}
+
+/* ---- 模型列表：下拉选择 + 别名 + 删除 ---- */
+const _availList = {};   // platform -> 拉取到的模型名列表
+
+function buildAddOptions(){
+  const sel = $("#f_addmodel"); if(!sel) return;
+  const list = _availList[S.editingPlatform] || [];
+  sel.innerHTML = '<option value="">— 选择要添加的模型 —</option>' +
+    list.filter(m => S.editModels.indexOf(m) < 0)
+        .map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+}
+
+async function fetchAvailableModels(force){
+  const platform = S.editingPlatform;
+  if(!platform) return toast("先保存平台，再拉取模型列表", "err");
+  if(!force && S.availFetched) return;
+  toast("正在拉取 " + platform + " 的模型列表…");
+  try{
+    const r = await api("/api/providers/" + encodeURIComponent(platform) + "/available-models");
+    _availList[platform] = r.models || [];
+    S.availFetched = true;
+    buildAddOptions();
+    toast("拉取到 " + r.count + " 个模型", "ok");
+  }catch(e){
+    if(_availList[platform] && !force) return;   // 拉失败但下拉里还有旧列表，不打扰
+    toast("拉取失败：" + e.message, "err");
+  }
+}
+
+function addModel(name){
+  name = (name || "").trim();
+  if(!name) return;
+  if(S.editModels.indexOf(name) >= 0) return;
+  S.editModels.push(name);
+  buildAddOptions();
+  renderModelReasoning();
+}
+
+function addManualModel(){
+  const inp = $("#f_manualmodel");
+  if(inp && inp.value.trim()) addModel(inp.value);
+  if(inp) inp.value = "";
+}
+
+function delModel(name){
+  S.editModels = S.editModels.filter(m => m !== name);
+  delete S.editAlias[name];
+  buildAddOptions();
+  renderModelReasoning();
+}
+
+function aliasChanged(input){
+  const row = input.closest(".mrow");
+  const m = row && row.dataset.model;
+  if(!m) return;
+  const a = (input.value || "").trim();
+  // 清掉所有指向该模型旧别名，再写入新别名
+  for (const k of Object.keys(S.editModelMap)) if (S.editModelMap[k] === m) delete S.editModelMap[k];
+  if (a && a !== m) S.editModelMap[a] = m;
+  S.editAlias[m] = a || "";
+}
+
+function collectModelReasoning(extra){
+  const mr = {};
+  document.querySelectorAll("#f_modelrows .mrow").forEach(row => {
+    const m = row.dataset.model;
+    const pol = row.querySelector("select.mrs").value;
+    const fSel = row.querySelector("select.mrf");
+    const fld = fSel ? fSel.value : "auto";
+    if(pol === "auto") return;
+    mr[m] = (fld === "auto") ? pol : {policy: pol, field: fld};
+  });
+  if(Object.keys(mr).length) extra.model_reasoning = mr; else delete extra.model_reasoning;
+  return extra;
+}
+
+function applyPreset(platform){
+  const x = S.presets.find(v => v.platform === platform);
+  const note = document.getElementById("presetNote");
+  if (note) note.style.display = "none";     // 切到自定义/无提示的模板时收起
+  if(!x) return;
+  $("#f_platform").value = x.platform;
+  $("#f_name").value = x.name;
+  $("#f_type").value = x.type;
+  $("#f_base").value = x.base_url;
+  $("#f_proxy").value = x.proxy || "";
+  S.editModels = (x.models || []).slice();
+  S.editModelMap = {}; S.editAlias = {};
+  $("#f_extra").value = JSON.stringify(x.extra || {}, null, 2);
+  renderModelReasoning();
+  if(x.thinking_off && x.thinking_off !== "auto"){
+    document.querySelectorAll("#f_modelrows select.mrf").forEach(s => { s.value = x.thinking_off; });
+  }
+  // 模板提示常驻在「取消/保存」按钮下方，不自动消失
+  if (note && x.note){
+    note.innerHTML = `<b>${esc(x.name)}</b>：${esc(x.note)}`;
+    note.style.display = "block";
+  }
+}
+
+function closeModal(){ $("#modal").classList.remove("on"); }
+
+async function saveProvider(platform){
+  let extra = {};
+  try { const raw = $("#f_extra").value.trim(); if(raw) extra = JSON.parse(raw); }
+  catch(e){ return toast("高级配置不是合法 JSON", "err"); }
+  extra = collectModelReasoning(extra);
+  delete extra.reasoning;        // 平台级思考开关已取消：默认永远跟随客户端
+  delete extra.thinking_off;     // 平台级"关闭写法"也取消：改到模型级
+  const keys = $("#f_keys").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const models = S.editModels.slice();
+  const body = {
+    platform: platform || $("#f_platform").value.trim(),
+    name: $("#f_name").value.trim(),
+    type: $("#f_type").value,
+    base_url: $("#f_base").value.trim(),
+    proxy: $("#f_proxy").value.trim(),
+    api_keys: keys,
+    models: models,
+    model_map: Object.assign({}, S.editModelMap),
+    enabled: $("#f_enabled").checked,
+    timeout_s: Number($("#f_timeout").value || 300),
+    extra: extra
+  };
+  if(!body.platform) return toast("平台 id 不能为空", "err");
+  if(!body.base_url) return toast("Base URL 不能为空", "err");
+  try{
+    await api("/api/providers", { method:"POST", body: body });
+    toast("已保存 " + body.platform, "ok");
+    closeModal();
+    await refreshAll();
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+
+async function delProvider(platform){
+  if(!confirm("删除平台 " + platform + "？该平台的模型将不可用。")) return;
+  try { await api("/api/providers/" + encodeURIComponent(platform), { method:"DELETE" });
+    toast("已删除", "ok"); await refreshAll(); }
+  catch(e){ toast("删除失败：" + e.message, "err"); }
+}
+
+async function testProvider(platform){
+  toast("正在测试 " + platform + " …");
+  try{
+    const r = await api("/api/providers/" + encodeURIComponent(platform) + "/test", { method:"POST" });
+    if(r.ok) toast(`${platform} 可用 · ${fmtMs(r.latency_ms)} · ${JSON.stringify(r.usage||{})}`, "ok");
+    else toast(`${platform} 失败：${r.error}`, "err");
+  }catch(e){ toast("测试失败：" + e.message, "err"); }
+}
+
+async function refreshModels(platform){
+  toast("正在拉取 " + platform + " 的模型列表…");
+  try{
+    const r = await api("/api/providers/" + encodeURIComponent(platform) + "/refresh-models", { method:"POST" });
+    toast(`拉取到 ${r.count} 个模型`, "ok");
+    await refreshAll();
+  }catch(e){ toast("拉取失败：" + e.message, "err"); }
+}
+
+/* ---------------- 用量统计 ---------------- */
+function usageGroups(){
+  const g = [["platform","按平台"],["model","按平台+模型"],["model_only","按模型"],
+             ["key","按 API Key"],["dkey","按下游 key"],["day","按天"],["format","按下游协议"]];
+  if(S.user && S.user.role === "admin") g.splice(3, 0, ["account","按账号"]);
+  return g;
+}
+
+async function renderUsage(){
+  const box = $("#tab-usage");
+  const days = S.usageDays || 30, group = S.usageGroup || "platform";
+  const seriesGroup = ["platform","model","key","dkey","account"].indexOf(group) >= 0 ? group : "total";
+  const [sum, series, period, latency, heatmap, mix, errors, byModel, seriesPlat] = await Promise.all([
+    api(`/api/stats/summary?days=${days}&group_by=${group}`),
+    api(`/api/stats/series?days=${days}&group_by=${seriesGroup}`),
+    api(`/api/stats/period?days=${days}`),
+    api(`/api/stats/latency?days=${days}`),
+    api(`/api/stats/heatmap?days=${days}`),
+    api(`/api/stats/mix?days=${days}`),
+    api(`/api/stats/errors?days=${days}&limit=8`),
+    api(`/api/stats/summary?days=${days}&group_by=model_only`),
+    api(`/api/stats/series?days=${days}&group_by=platform`),
+  ]);
+  S.ds = S.ds || {};
+  S.ds.usage = series;
+  const pickBox = _pick("usage");
+  if(S.usagePickGroup !== group){ pickBox.length = 0; S.usagePickGroup = group; }
+  const sel = pickBox;
+  const pickable = seriesGroup === group;
+  const rows = sum.data || [];
+  const totals = sum.totals || {};
+  const totalTok = Math.max(1, rows.reduce((a, r) => a + Number(r.total_tokens||0), 0));
+  const p = period || {};
+  const pct = (x) => ((Number(x) || 0) * 100).toFixed(1);
+  const mrows = byModel.data || [];
+  const donutItems = mrows.slice(0, 8).map(r => ({k: String(r.k || ""), v: r.total_tokens}));
+  const restTok = mrows.slice(8).reduce((a, r) => a + Number(r.total_tokens || 0), 0);
+  if(restTok > 0) donutItems.push({k: "其他", v: restTok});
+  const table = rows.map(r => {
+    const k = String(r.k == null ? "" : r.k);
+    const on = sel.indexOf(k) >= 0;
+    const attrs = pickable
+      ? `class="${on ? "sel" : ""}" style="cursor:pointer" data-dim="usage" data-k="${esc(k)}" onclick="togglePick(this)" title="点一下只看这条曲线"`
+      : "";
+    return `<tr ${attrs}><td class="mono">${esc(k)}</td>
+      <td class="num">${nf(r.requests)}</td>
+      <td class="num">${nf(r.prompt_tokens)}</td>
+      <td class="num">${nf(r.completion_tokens)}</td>
+      <td class="num">${nf(r.cached_tokens)}</td>
+      <td class="num"><b>${nf(r.total_tokens)}</b></td>
+      <td style="width:16%"><div class="bar"><i style="width:${Math.max(2,Math.round(r.total_tokens/totalTok*100))}%"></i></div></td>
+      <td class="num">${fmtMs(r.avg_latency_ms)}</td>
+      <td class="num">${r.errors ? '<span class="pill err">'+r.errors+'</span>' : '<span class="pill ok">0</span>'}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `
+    <div class="panel">
+      <h2>用量统计 <small>近 ${days} 天 · 多维分析</small>
+        <span style="flex:1"></span>
+        <select id="uDays" style="width:120px" onchange="S.usageDays=this.value;renderUsage()">
+          ${[1,7,30,90,365].map(d => `<option value="${d}" ${Number(days)===d?"selected":""}>最近 ${d} 天</option>`).join("")}
+        </select>
+        <a class="btn sm" href="${BASE}/api/stats/export.csv?days=${days}" onclick="return downloadCsv(event)">导出 CSV</a>
+      </h2>
+      <div class="grid kpis">
+        <div class="kpi"><div class="k">区间请求</div><div class="v">${nf(p.requests)}</div>
+          <div class="s">累计 ${nf(totals.total_requests)}</div></div>
+        <div class="kpi"><div class="k">区间 tokens</div><div class="v">${fmtTok(p.tokens)}</div>
+          <div class="s">缓存命中 ${fmtTok(p.cached_tokens)} · 推理 ${fmtTok(p.reasoning_tokens)}</div></div>
+        <div class="kpi"><div class="k">平均耗时</div><div class="v">${fmtMs(p.avg_latency_ms)}</div>
+          <div class="s">P95 ${fmtMs(p.p95_latency_ms)} · TTFT ${fmtMs(p.avg_ttft_ms)}</div></div>
+        <div class="kpi"><div class="k">缓存命中率</div><div class="v">${pct(p.cache_rate)}<span class="dim" style="font-size:14px">%</span></div>
+          <div class="s">cached / total tokens</div></div>
+        <div class="kpi"><div class="k">成功率</div><div class="v">${pct(p.success_rate)}<span class="dim" style="font-size:14px">%</span></div>
+          <div class="s">错误 ${nf(p.errors)} 次</div></div>
+        <div class="kpi"><div class="k">流式占比</div><div class="v">${pct(p.stream_rate)}<span class="dim" style="font-size:14px">%</span></div>
+          <div class="s">流式 ${nf(p.stream_requests)} 次</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>聚合明细 <small>按平台 / 模型 / API Key / 账号 / 天 / 协议</small>
+        <span style="flex:1"></span>
+        <select id="uGroup" style="width:150px" onchange="S.usageGroup=this.value;S.usagePickGroup=null;renderUsage()">
+          ${usageGroups().map(([v,l]) => `<option value="${v}" ${group===v?"selected":""}>${l}</option>`).join("")}
+        </select>
+      </h2>
+      ${rows.length ? `<table><thead><tr><th>${{day:"日期",format:"协议",key:"平台 · API Key",account:"账号",model_only:"模型"}[group] || "平台 / 模型"}</th>
+        <th class="num">请求</th><th class="num">输入</th><th class="num">输出</th>
+        <th class="num">缓存命中</th><th class="num">合计</th><th>占比</th>
+        <th class="num">平均耗时</th><th class="num">错误</th></tr></thead><tbody>${table}</tbody></table>`
+        : '<div class="empty">这个区间还没有请求记录</div>'}
+      ${pickable && rows.length ? '<div class="dim" style="font-size:12px;margin-top:8px">点表格任意一行可以只看那条曲线，点多行同时对比；再点一次取消。</div>' : ""}
+    </div>
+    <div class="panel"><h2>每日 token 曲线
+        <small>${sel.length ? "已选 " + sel.length + " 条" : "点上面聚合明细的行来筛选"}</small>
+        <span style="flex:1"></span>
+        <button class="btn sm" onclick="S.pick.usage.length=0;renderUsage()">显示全部</button>
+      </h2>
+      <div id="usageChart">${usageChartHtml()}</div></div>
+    <div class="split">
+      <div class="panel">
+        <h2>每日 tokens <small>按上游平台堆叠 · 点图例只看该平台</small>
+          ${(S.pick && S.pick.platStack || []).length ? '<button class="btn sm" onclick="S.pick.platStack=[];renderUsage()">重置</button>' : ""}
+        </h2>
+        ${stackedBarHtml(seriesPlat)}
+      </div>
+      <div class="panel">
+        <h2>模型分布 <small>按 tokens · Top 8</small></h2>
+        ${donutHtml(donutItems)}
+      </div>
+    </div>
+    <div class="split">
+      <div class="panel">
+        <h2>延迟曲线 <small>每日 平均 / P95 / TTFT · 仅成功请求</small></h2>
+        ${latencyChartHtml(latency)}
+      </div>
+      <div class="panel">
+        <h2>星期 × 时段 <small>近 ${days} 天请求分布</small></h2>
+        ${heatmapHtml(heatmap)}
+      </div>
+    </div>
+    <div class="split">
+      <div class="panel">
+        <h2>结构组成 <small>协议 / 流式 / 状态 / 思考策略 / 错误码</small></h2>
+        ${mixPanelHtml(mix)}
+      </div>
+      <div class="panel">
+        <h2>错误摘要 <small>近 ${days} 天 Top 8</small></h2>
+        ${errorsHtml(errors.data || [])}
+      </div>
+    </div>`;
+}
+
+async function downloadCsv(ev){
+  ev.preventDefault();
+  const days = S.usageDays || 30;
+  try{
+    const txt = await api("/api/stats/export.csv?days=" + days);
+    const blob = new Blob(["\ufeff" + txt], { type:"text/csv;charset=utf-8" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: `relay-usage-${days}d.csv` });
+    document.body.appendChild(a); a.click(); a.remove();
+  }catch(e){ toast("导出失败：" + e.message, "err"); }
+}
+
+/* ---------------- 请求日志 ---------------- */
+const LOG_PAGE = 100;   // 每页 100 条
+const LOG_RANGES = [["15m", "近15分钟"], ["30m", "近30分钟"], ["1h", "近1小时"], ["6h", "近6小时"], ["today", "当日"]];
+function quickLogRange(r){   // 快捷相对区间：锚定服务端当前时间，由后端计算边界
+  S.logRange = r; S.logDateFrom = S.logDateTo = "";
+  S.logPage = 1; renderLogs(1);
+}
+function quickRangeBtn(r, label){
+  return `<button class="btn sm${S.logRange === r ? " on" : ""}" onclick="quickLogRange('${r}')">${label}</button>`;
+}
+async function renderLogs(page){
+  if (!S.logFilters) S.logFilters = {};
+  if (S.logRange === undefined && !S.logDateFrom && !S.logDateTo){
+    S.logRange = "1h";   // 默认展现最近 1 小时的请求日志
+  }
+  if (page != null) S.logPage = Math.max(1, page);
+  if (S.logTotal && S.logPage > Math.max(1, Math.ceil(S.logTotal / LOG_PAGE)))
+    S.logPage = Math.ceil(S.logTotal / LOG_PAGE);   // 数据变少时钳到最后一页
+  const f = S.logFilters || {};
+  const off = ((S.logPage || 1) - 1) * LOG_PAGE;
+  // 筛选条件发给后端，作用于全量记录（不是当前页）；多选值逗号分隔
+  const q = new URLSearchParams({ limit: String(LOG_PAGE), offset: String(off) });
+  for (const k of ["status", "platform", "model", "key", "ip"])
+    if ((f[k] || []).length) q.set(k, f[k].join(","));
+  if ((f.type || []).length) q.set("stream", f.type.map(v => v === "流式" ? "1" : "0").join(","));
+  if ((f.account || []).length && S.logAcctMap){
+    const ids = f.account.map(e => S.logAcctMap[e]).filter(v => v != null);
+    if (ids.length) q.set("users", ids.join(","));
+  }
+  if (S.logRange) q.set("range", S.logRange);
+  else { if (S.logDateFrom) q.set("from", S.logDateFrom); if (S.logDateTo) q.set("to", S.logDateTo); }
+  const [r, fc] = await Promise.all([
+    api("/api/stats/records?" + q.toString()),
+    api("/api/stats/logs/facets"),
+  ]);
+  S.logRows = r.data || [];
+  S.logTotal = r.total || 0;
+  S.logFacets = fc || {};
+  if (fc.accounts) S.logAcctMap = Object.fromEntries(fc.accounts.map(a => [a.email, a.id]));
+  // 剔除全局 facets 里已不存在的筛选值，避免显示与生效条件不一致
+  const valid = {
+    status: new Set(fc.status || []), platform: new Set(fc.platform || []),
+    model: new Set(fc.model || []), key: new Set(fc.key_hint || []),
+    ip: new Set(fc.client_ip || []),
+    account: new Set((fc.accounts || []).map(a => a.email).filter(Boolean)),
+  };
+  for (const field of ["status", "platform", "model", "key", "ip", "account"]){
+    if (!(S.logFilters[field] || []).length) continue;
+    const keep = S.logFilters[field].filter(v => valid[field].has(v));
+    if (keep.length) S.logFilters[field] = keep; else delete S.logFilters[field];
+  }
+  drawLogsPanel();
+}
+
+function logType(x){ return x.stream ? "流式" : "普通"; }
+
+function uniqSorted(vals){
+  const s = new Set();
+  for (const v of vals) if (v !== "" && v != null) s.add(v);
+  return [...s].sort();
+}
+
+/* 筛选项来自全量记录（log_facets），不是当前页 */
+function logFilterValues(field){
+  const fc = S.logFacets;
+  if (field === "type"){
+    const sv = fc ? (fc.stream || []) : (S.logRows || []).map(x => x.stream ? 1 : 0);
+    const out = [];
+    if (sv.includes(1)) out.push("流式");
+    if (sv.includes(0)) out.push("普通");
+    return out;
+  }
+  if (fc){
+    if (field === "status")   return fc.status || [];
+    if (field === "platform") return fc.platform || [];
+    if (field === "model")    return fc.model || [];
+    if (field === "key")      return fc.key_hint || [];
+    if (field === "ip")       return fc.client_ip || [];
+    if (field === "account")  return (fc.accounts || []).map(a => a.email).filter(Boolean);
+  }
+  const rows = S.logRows || [];   // facets 未就绪时的回退
+  if (field === "status")   return uniqSorted(rows.map(x => x.status));
+  if (field === "platform") return uniqSorted(rows.map(x => x.platform));
+  if (field === "model")    return uniqSorted(rows.map(x => x.model));
+  if (field === "key")      return uniqSorted(rows.map(x => x.key_hint || "-"));
+  if (field === "ip")       return uniqSorted(rows.map(x => x.client_ip || "-"));
+  if (field === "account")  return uniqSorted(rows.map(x => x.user_email || "-"));
+  return [];
+}
+
+const LOG_FILTER_FIELDS = {
+  status: "状态", platform: "平台", model: "上游模型", type: "类型",
+  account: "账号", key: "API Key", ip: "来源 IP",
+};
+
+/* 表头内联箭头筛选：列标题旁只显一个小箭头，选中后追加值/"N 项"并高亮；点开 checkbox 面板可多选 */
+function logFilterBtn(field){
+  const sel = (S.logFilters || {})[field] || [];
+  const extra = sel.length === 1 ? `<span class="thfv">${esc(sel[0])}</span>`
+    : (sel.length ? `<span class="thfv">${sel.length} 项</span>` : "");
+  return `<button class="thfb${sel.length ? " on" : ""}" title="按${LOG_FILTER_FIELDS[field]}筛选" onclick="thfToggle(event,'${field}')">▾</button>${extra}`;
+}
+
+/* 页码条：≤7 页全列；更多页用窗口式 1 … p-1 p p+1 … N */
+function logPageBar(page, maxPage){
+  if (maxPage <= 1) return "";
+  let nums;
+  if (maxPage <= 7) nums = Array.from({length: maxPage}, (_, i) => i + 1);
+  else {
+    const set = new Set([1, 2, maxPage - 1, maxPage, page - 1, page, page + 1]
+      .filter(n => n >= 1 && n <= maxPage));
+    nums = [...set].sort((a, b) => a - b);
+  }
+  let html = ""; let last = 0;
+  for (const n of nums){
+    if (n - last > 1) html += `<span class="pgell">…</span>`;
+    html += `<button class="btn sm pg${n === page ? " on" : ""}" onclick="renderLogs(${n})">${n}</button>`;
+    last = n;
+  }
+  return `<span class="pgs">${html}</span>`;
+}
+
+function thfToggle(ev, field){
+  ev.stopPropagation();
+  if (S.thfPop === field){ thfPopClose(); return; }
+  document.getElementById("thfpop")?.remove();   // 换一个列时先收起旧面板
+  const sel = (S.logFilters || {})[field] || [];
+  const pop = document.createElement("div");
+  pop.id = "thfpop"; pop.className = "thfpop";
+  pop.innerHTML =
+    `<div class="thfph">${LOG_FILTER_FIELDS[field] || field}</div>` +
+    logFilterValues(field).map(v =>
+      `<label class="thfopt"><input type="checkbox" value="${esc(v)}" ${sel.includes(v) ? "checked" : ""}
+        onchange="thfPopChange('${field}', this)"><span>${esc(v)}</span></label>`).join("") +
+    (sel.length ? `<button class="btn sm" style="width:100%;margin-top:6px" onclick="thfPopClear('${field}')">清空此项</button>` : "");
+  document.body.appendChild(pop);
+  const r = ev.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)) + "px";
+  pop.style.top = (r.bottom + 4) + "px";
+  if (pop.offsetTop + pop.offsetHeight > window.innerHeight - 8)
+    pop.style.top = Math.max(8, window.innerHeight - pop.offsetHeight - 8) + "px";
+  S.thfPop = field;
+}
+
+function thfPopChange(field, input){
+  if (!S.logFilters) S.logFilters = {};
+  let sel = (S.logFilters || {})[field] || [];
+  if (input.checked){ if (!sel.includes(input.value)) sel = [...sel, input.value]; }
+  else sel = sel.filter(v => v !== input.value);
+  if (sel.length) S.logFilters[field] = sel; else delete S.logFilters[field];
+  S.thfPop = null;                        // 重绘会重建弹出面板
+  document.getElementById("thfpop")?.remove();
+  S.logPage = 1;
+  renderLogs(1);                          // 筛选发后端，作用于全量记录
+}
+
+function thfPopClear(field){
+  if (S.logFilters) delete S.logFilters[field];
+  thfPopClose();
+  S.logPage = 1;
+  renderLogs(1);
+}
+
+function thfPopClose(){
+  document.getElementById("thfpop")?.remove();
+  S.thfPop = null;
+}
+
+// 点面板外 / 滚动 → 收起筛选面板
+document.addEventListener("click", ev => {
+  if (S.thfPop == null) return;
+  if (document.getElementById("thfpop")?.contains(ev.target)) return;
+  if (ev.target.closest && ev.target.closest(".thfb")) return;   // 列头按钮交给它自己的 onclick 切换
+  thfPopClose();
+});
+document.addEventListener("scroll", () => { if (S.thfPop != null) thfPopClose(); }, true);
+
+function clearLogFilters(){
+  S.logFilters = {};
+  S.logRange = "1h"; S.logDateFrom = S.logDateTo = "";   // 恢复默认：最近 1 小时
+  renderLogs(1);
+}
+
+/* 日志行状态徽章点击 → 弹层显示该请求的元数据 + 上游报错原文（requests.error） */
+function logDetail(i){
+  const x = (window.__logRows || [])[i];
+  if(!x) return;
+  const meta = [
+    ["时间", fullTs(x.ts)],
+    ["平台", x.platform || "-"],
+    ["上游模型", x.model || "-"],
+    ["类型", logType(x) + " / " + (x.in_format || "openai")],
+    ["输入 / 输出 / 合计", nf(x.prompt_tokens) + " / " + nf(x.completion_tokens) + " / " + nf(x.total_tokens) + (x.estimated ? "（估算）" : "")],
+    ["耗时 / 首字", fmtMs(x.latency_ms) + " / " + (x.ttft_ms ? fmtMs(x.ttft_ms) : "-")],
+    ["下游 Key", x.dkey_label || "-"],
+    ["来源 IP", x.client_ip || "-"],
+  ];
+  if(S.user && S.user.role === "admin") meta.push(["账号", x.user_email || "-"]);
+  const pill = x.status === "ok" ? "ok" : x.status === "aborted" ? "warn" : "err";
+  const errBody = x.error
+    ? `<pre class="mono" style="margin:0;padding:10px 12px;background:var(--panel2);border:1px solid #4a2530;border-radius:8px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;color:#ffb4b4">${esc(x.error)}</pre>`
+    : '<div class="empty">这条请求没有记录上游报错细节（可能是客户端中断或超时）</div>';
+  $("#modalBody").innerHTML = `
+    <h3>请求详情 <span class="pill ${pill}">${esc(x.status)}</span></h3>
+    <table style="width:100%;font-size:12.5px;margin-bottom:14px">
+      ${meta.map(([k, v]) => `<tr>
+        <td class="dim" style="padding:3px 14px 3px 0;white-space:nowrap;vertical-align:top">${k}</td>
+        <td class="mono" style="padding:3px 0;word-break:break-all">${esc(String(v ?? "-"))}</td>
+      </tr>`).join("")}
+    </table>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:6px">报错信息（上游返回 / 鉴权拦截）</div>
+    ${errBody}
+    <div style="margin-top:14px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>`;
+  $("#modal").classList.add("on");
+}
+
+function drawLogsPanel(){
+  const box = $("#tab-logs");
+  const admin = S.user.role === "admin";
+  const rows = S.logRows || [];
+  const f = S.logFilters || {};
+  const nFilters = Object.values(f).filter(a => Array.isArray(a) && a.length)
+    + ((S.logRange || S.logDateFrom || S.logDateTo) ? 1 : 0);
+  const page = S.logPage || 1;
+  const maxPage = Math.max(1, Math.ceil((S.logTotal || 0) / LOG_PAGE));
+
+  window.__logRows = rows;   // 供状态徽章点击弹详情用
+  const trs = rows.map((x, i) => {
+    const st = x.status === "ok" ? '<span class="pill ok">ok</span>'
+      : x.status === "aborted" ? '<span class="pill warn">aborted</span>'
+      : `<span class="pill err" title="点击查看上游报错" style="cursor:pointer;text-decoration:underline dotted" onclick="logDetail(${i})">${esc(x.status)}</span>`;
+    return `<tr>
+      <td>${st}</td>
+      <td class="mono dim">${esc(fullTs(x.ts))}</td>
+      <td class="mono">${esc(x.platform || "-")}</td>
+      <td class="mono">${esc(x.model)}</td>
+      <td><span class="pill">${logType(x)}</span><span class="pill">${esc(x.in_format||"openai")}</span></td>
+      <td class="num">${nf(x.prompt_tokens)}</td>
+      <td class="num">${nf(x.completion_tokens)}</td>
+      <td class="num">${nf(x.total_tokens)}${x.estimated ? '<span class="dim" title="估算值"> est</span>' : ""}</td>
+      <td class="num">${fmtMs(x.latency_ms)}</td>
+      <td class="num">${x.ttft_ms ? fmtMs(x.ttft_ms) : "-"}</td>
+      ${admin ? `<td class="mono dim">${esc(x.user_email || "-")}</td>` : ""}
+      <td class="mono dim">${esc(x.key_hint || "-")}</td>
+      <td class="mono dim">${esc(x.dkey_label || "-")}</td>
+      <td class="mono dim">${esc(x.client_ip || "-")}</td>
+    </tr>`;
+  }).join("");
+
+  const thCell = (label, ctrl, num) => `<th${num ? ' class="num"' : ""}><div class="thf"><span>${label}</span>${ctrl || ""}</div></th>`;
+  const head = [
+    thCell("状态", logFilterBtn("status")),
+    thCell("时间"),
+    thCell("平台", logFilterBtn("platform")),
+    thCell("上游模型", logFilterBtn("model")),
+    thCell("类型", logFilterBtn("type")),
+    thCell("输入", null, true), thCell("输出", null, true), thCell("合计", null, true),
+    thCell("耗时", null, true), thCell("首字", null, true),
+    ...(admin ? [thCell("账号", logFilterBtn("account"))] : []),
+    thCell("API Key", logFilterBtn("key")),
+    thCell("下游 Key"),
+    thCell("来源 IP", logFilterBtn("ip")),
+  ].join("");
+
+  const dateInput = (id, val, key) =>
+    `<input type="datetime-local" step="1" id="${id}" value="${val || ""}"
+      onchange="S.${key} = this.value || ''; S.logRange = ''; S.logPage = 1; renderLogs(1)"
+      style="font-size:11.5px;width:170px;padding:2px 4px">`;
+  box.innerHTML = `<div class="panel">
+    <h2>请求日志 <small>第 ${page} / ${maxPage} 页 · 共 ${nf(S.logTotal)} 条${nFilters ? ` · ${nFilters} 组筛选（全量生效）` : ""}</small>
+      <span style="flex:1"></span>
+      <span style="display:flex;gap:5px;align-items:center;flex:none">
+        ${LOG_RANGES.map(([r, l]) => quickRangeBtn(r, l)).join("")}
+        <span class="dim" style="font-size:12px">开始</span>${dateInput("logFrom", S.logDateFrom, "logDateFrom")}
+        <span class="dim" style="font-size:12px">~</span>${dateInput("logTo", S.logDateTo, "logDateTo")}
+        <span class="dim" style="font-size:12px">结束</span>
+      </span>
+      <button class="btn sm" ${page <= 1 ? "disabled" : ""} onclick="renderLogs(${page - 1})">上一页</button>
+      ${logPageBar(page, maxPage)}
+      <button class="btn sm" ${page >= maxPage ? "disabled" : ""} onclick="renderLogs(${page + 1})">下一页</button>
+      ${nFilters ? `<button class="btn sm" onclick="clearLogFilters()">清除筛选</button>` : ""}
+      <button class="btn sm" onclick="renderLogs()">刷新</button></h2>
+    ${(() => {
+      const nCols = 12 + (admin ? 1 : 0);   // 与 head 的列数一致（管理员多一列「账号」）
+      const emptyRow = rows.length ? "" :
+        `<tr><td colspan="${nCols}" style="text-align:center;padding:28px 8px;color:var(--dim)">没有符合条件的记录${nFilters ? '（试试清除筛选或调整日期区间）' : ''}</td></tr>`;
+      return `<div class="tw"><table class="logtable"><thead><tr>${head}</tr></thead><tbody>${trs}${emptyRow}</tbody></table></div>`;
+    })()}
+  </div>`;
+}
+
+/* ---------------- 账号管理（管理员） ---------------- */
+async function renderUsers(){
+  const box = $("#tab-users");
+  if(!S.user || S.user.role !== "admin"){ box.innerHTML = '<div class="empty">只有管理员能看这个页面</div>'; return; }
+  const r = await api("/api/users");
+  const rows = (r.data || []).map(u => `<tr>
+    <td class="mono">${esc(u.email)}${u.id === r.me ? ' <span class="pill">我</span>' : ""}</td>
+    <td>${u.role === "admin" ? '<span class="pill warn">管理员</span>' : '<span class="pill">普通</span>'}</td>
+    <td>${u.status === "active" ? '<span class="pill ok">正常</span>'
+          : u.status === "pending" ? '<span class="pill warn">待确认邮箱</span>'
+          : '<span class="pill err">已禁用</span>'}</td>
+    <td class="num">${nf(u.requests)}</td>
+    <td class="num">${fmtTok(u.total_tokens)}</td>
+    <td class="mono dim">${esc((u.last_login||"-").replace("T"," ").slice(0,19))}</td>
+    <td class="num">
+      <button class="btn sm" onclick="viewTenant(${u.id})">看数据</button>
+      <button class="btn sm" onclick="resetUserPw(${u.id})">改密码</button>
+      ${u.id === r.me
+        ? '<span class="dim" style="font-size:12px">当前登录</span>'
+        : `<button class="btn sm" onclick="toggleRole(${u.id}, '${u.role}')">${u.role === "admin" ? "取消管理员" : "设为管理员"}</button>
+           <button class="btn sm ${u.status === "active" ? "danger" : ""}" onclick="toggleUser(${u.id}, '${u.status}')">${u.status === "active" ? "禁用" : "启用"}</button>
+           <button class="btn sm danger" onclick="delUser(${u.id})">删除</button>`}
+    </td>
+  </tr>`).join("");
+  box.innerHTML = `
+    <div class="panel">
+      <h2>账号 <small>共 ${(r.data||[]).length} 个 · 每个账号的 key 和数据互相隔离</small>
+        <span style="flex:1"></span>
+        <button class="btn primary sm" onclick="newUser()">+ 新建账号</button>
+      </h2>
+      ${(r.data||[]).length ? `<table><thead><tr><th>邮箱</th><th>角色</th><th>状态</th>
+        <th class="num">请求</th><th class="num">Tokens</th><th>最近登录</th><th class="num">操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">还没有账号</div>'}
+      <div class="dim" style="font-size:12px;margin-top:10px;line-height:1.8">
+        点「看数据」= 把顶部的数据视角切到该账号（概览/用量/日志/上游平台都跟着变）。
+        新建账号时会生成一把该账号的 API Key，只在那一次弹窗里显示明文。
+        自己的账号不能禁用/降级；最后一个管理员也不能被降级（至少保留一个管理员）。
+      </div>
+    </div>`;
+}
+
+function jumpAccount(email){
+  const sel = $("#tenantSel");
+  if(!sel) return;
+  const opt = Array.from(sel.options).find(o => o.textContent === email);
+  if(!opt) return toast("找不到这个账号", "err");
+  S.tenant = opt.value;
+  sel.value = S.tenant;
+  refreshAll();
+}
+
+function viewTenant(id){
+  S.tenant = String(id);
+  const sel = $("#tenantSel");
+  if(sel) sel.value = S.tenant;
+  switchTab("overview");
+}
+
+async function newUser(){
+  const email = prompt("新账号邮箱：");
+  if(!email) return;
+  const password = prompt("初始密码（至少 8 位）：");
+  if(!password) return;
+  const role = confirm("设为管理员？（确定=管理员，取消=普通账号）") ? "admin" : "user";
+  try{
+    const r = await api("/api/users", { method: "POST", body: { email, password, role } });
+    alert("账号已创建。\n\nAPI Key（只显示这一次，请立刻保存）：\n" + r.api_key);
+    renderUsers();
+  }catch(e){ toast("创建失败：" + e.message, "err"); }
+}
+
+async function resetUserPw(id){
+  const pw = prompt("输入新密码（至少 8 位）：");
+  if(!pw) return;
+  try{ await api(`/api/users/${id}`, { method: "PATCH", body: { password: pw } });
+    toast("密码已重置，对方需要重新登录", "ok"); renderUsers(); }
+  catch(e){ toast("失败：" + e.message, "err"); }
+}
+
+async function toggleRole(id, role){
+  const next = role === "admin" ? "user" : "admin";
+  if(!confirm(next === "admin" ? "把该账号设为管理员？他将能看到所有账号的数据。" : "取消该账号的管理员身份？")) return;
+  try{ await api(`/api/users/${id}`, { method: "PATCH", body: { role: next } });
+    toast(next === "admin" ? "已设为管理员" : "已取消管理员", "ok"); renderUsers(); }
+  catch(e){ toast("失败：" + e.message, "err"); }
+}
+
+async function toggleUser(id, status){
+  const next = status === "active" ? "disabled" : "active";
+  if(next === "disabled" && !confirm("禁用后该账号立即无法登录、API Key 也会失效，确定？")) return;
+  try{ await api(`/api/users/${id}`, { method: "PATCH", body: { status: next } });
+    toast(next === "active" ? "已启用" : "已禁用", "ok"); renderUsers(); }
+  catch(e){ toast("失败：" + e.message, "err"); }
+}
+
+async function delUser(id){
+  if(!confirm("彻底删除该账号？\n它的会话和 API Key 立即失效，邮箱可被重新注册；请求历史保留作审计。")) return;
+  try{ await api(`/api/users/${id}`, { method: "DELETE" });
+    toast("账号已删除", "ok"); renderUsers(); }
+  catch(e){ toast("删除失败：" + e.message, "err"); }
+}
+
+/* 新建 Key：弹窗（备注 + 过期日期日历，精确到日；留空 = 永不过期）。
+   点「取消」只关弹窗、不生成 key；点「确定」才 POST 创建。 */
+async function newKey(){
+  const body = $("#modalBody");
+  body.innerHTML = `
+    <h3>新建 Key</h3>
+    <div class="field"><label>备注（可留空，会显示在统计/日志的「下游 Key」里）</label>
+      <input id="nkLabel" maxlength="60" placeholder="例如：Hermes 桌面端 / 定时任务" style="max-width:340px"></div>
+    <div class="field"><label>过期时间（日历选择，精确到日；留空 = 永不过期。选中的当天仍可用，次日失效）</label>
+      <input id="nkExpire" type="date" style="max-width:220px"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="createKey()">确定</button>
+    </div>`;
+  $("#modal").classList.add("on");
+}
+
+async function createKey(){
+  const label = $("#nkLabel").value.trim();
+  const exp = $("#nkExpire").value;   // "YYYY-MM-DD" 或 ""（永不过期）
+  try{
+    const r = await api("/api/keys", { method: "POST", body: { label, expires_at: exp } });
+    closeModal();
+    copyText(r.key);
+    alert("新 Key 已创建（并尝试复制到剪贴板）：\n\n" + r.key
+      + (r.expires_at ? "\n\n过期时间：" + r.expires_at.slice(0,10) + "（当天仍可用）" : "\n\n永不过期"));
+    renderSettings();
+  }catch(e){ toast("创建失败：" + e.message, "err"); }
+}
+
+/* 改过期：弹窗日历控件，精确到日；cur = 当前过期日（YYYY-MM-DD，无则空） */
+function editKeyExpire(id, cur){
+  const body = $("#modalBody");
+  body.innerHTML = `
+    <h3>改过期时间</h3>
+    <div class="field"><label>过期时间（日历选择，精确到日；留空 = 永不过期。选中的当天仍可用，次日失效）</label>
+      <input id="ekExpire" type="date" value="${cur || ""}"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveKeyExpire(${id})">确定</button>
+    </div>`;
+  $("#modal").classList.add("on");
+}
+
+async function saveKeyExpire(id){
+  const exp = $("#ekExpire").value;   // "YYYY-MM-DD" 或 ""（永不过期）
+  try{
+    const r = await api(`/api/keys/${id}`, { method: "PATCH", body: { expires_at: exp } });
+    closeModal();
+    toast(r.expires_at ? "已设置过期时间 " + r.expires_at.slice(0,10) + "（当天仍可用）" : "已设为永不过期", "ok");
+    renderSettings();
+  }catch(e){ toast("修改失败：" + e.message, "err"); }
+}
+
+async function copyKey(id){
+  try{
+    const r = await api(`/api/keys/${id}/reveal`);
+    copyText(r.key);
+  }catch(e){ toast("获取 key 失败：" + e.message, "err"); }
+}
+
+async function delKey(id){
+  if(!confirm("删除后这把 key 立即失效、记录也一起删掉（客户端要换成新 key），确定？")) return;
+  try{ await api(`/api/keys/${id}`, { method: "DELETE" }); toast("已删除", "ok"); renderSettings(); }
+  catch(e){ toast("删除失败：" + e.message, "err"); }
+}
+
+async function changePassword(){
+  const oldPw = $("#oldPw").value, newPw = $("#newPw").value;
+  if(!oldPw || !newPw) return toast("原密码和新密码都要填", "err");
+  try{
+    await api("/api/auth/password", { method: "POST", body: { old_password: oldPw, new_password: newPw } });
+    toast("密码已修改，请重新登录", "ok");
+    setTimeout(() => logout(), 800);
+  }catch(e){ toast("失败：" + e.message, "err"); }
+}
+
+/* ---------------- 设置 ---------------- */
+async function renderSettings(){
+  const box = $("#tab-settings");
+  const s = await api("/api/settings");
+  const base = location.origin + BASE;
+  const code = (t) => `<div class="code">${esc(t)}</div>`;
+  const bpPanel = !s.is_admin ? "" : `
+    <div class="panel">
+      <h2>访问路径（反向代理子目录）</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="bp" class="mono" value="${esc(s.base_path || "")}" placeholder="/llmrelay（留空 = 根目录）" style="max-width:260px" ${s.base_path_env_locked ? "disabled" : ""}>
+        <button class="btn sm primary" onclick="saveBasePath()" ${s.base_path_env_locked ? "disabled" : ""}>保存</button>
+        <span class="dim" style="font-size:12px">当前生效：<b class="mono">${esc(s.base_path || "（根目录）")}</b></span>
+      </div>
+      ${s.base_path_env_locked ? '<div class="dim" style="font-size:12px;color:#fbbf24;margin-bottom:8px">当前由环境变量 RELAY_BASE_PATH 决定，这里改了不生效。</div>' : ""}
+      <div class="dim" style="font-size:12px;line-height:1.8">
+        站点不是挂在域名根目录时填这里。例如对外地址是<br>
+        <span class="mono">https://your-domain.com/llmrelay</span>，就填 <span class="mono">/llmrelay</span>。<br>
+        保存后这两种地址都能用（原路径继续保留，本地直连不受影响）：<br>
+        <span class="mono">${esc(location.origin + (s.base_path || "") + "/v1/models")}</span><br>
+        <span class="mono">${esc(location.origin + "/v1/models")}</span><br>
+        控制台本身也搬到 <span class="mono">${esc(location.origin + (s.base_path || "") + "/")}</span>。
+      </div>
+      <div class="dim" style="font-size:12px;margin-top:10px">nginx 对应写法（proxy_pass 结尾的 / 会顺手去掉前缀）：</div>
+      <div class="code">location ${esc((s.base_path || "/llmrelay") + "/")} {
+    proxy_pass http://127.0.0.1:8800/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 600s;
+}</div>
+    </div>`;
+  /* 邮箱发信（SMTP）设置：管理员可以在页面上配置发信账号，优先级高于环境变量 */
+  let mail = { mode: "log", host: "", port: 587, user: "", from: "", starttls: true,
+               has_pass: false, pass_masked: "" };
+  if(s.is_admin){ try{ mail = await api("/api/settings/mail"); }catch(e){} }
+  const mailPanel = !s.is_admin ? "" : `
+    <div class="panel">
+      <h2>邮箱发信设置（SMTP）<small>邮箱确认链接从这里发出</small></h2>
+      <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.8">
+        在这里配置 SMTP（你的邮箱账号，如 QQ 邮箱 / 企业邮箱 / Gmail）后，新注册用户会收到
+        带确认链接的邮件。这里保存的配置<b>优先于</b>环境变量 RELAY_SMTP_*。<br>
+        也可以选「日志模式」：确认链接直接打进服务器日志（<span class="mono">[mail/log]</span>），
+        内网 / 没有邮箱账号时也能完成引导。
+      </div>
+      <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:8px;align-items:center">
+        <span class="dim" style="font-size:12px">发信模式</span>
+        <select id="mailMode" style="width:auto">
+          <option value="smtp" ${mail.mode === "smtp" ? "selected" : ""}>smtp（真实发信）</option>
+          <option value="log" ${mail.mode === "log" ? "selected" : ""}>log（写服务器日志）</option>
+        </select>
+        <span class="dim" style="font-size:12px">端口</span>
+        <input id="mailPort" class="mono" value="${esc(mail.port)}" style="width:84px">
+        <label style="font-size:12px;white-space:nowrap"><input type="checkbox" id="mailTls" ${mail.starttls ? "checked" : ""}> STARTTLS</label>
+      </div>
+      <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:8px">
+        <input id="mailHost" class="mono" placeholder="SMTP 服务器，如 smtp.qq.com" value="${esc(mail.host || "")}" style="max-width:240px">
+        <input id="mailUser" class="mono" placeholder="账号（一般是邮箱地址）" value="${esc(mail.user || "")}" style="max-width:220px">
+        <input id="mailPass" type="password" class="mono" style="max-width:220px" autocomplete="new-password"
+          placeholder="${mail.has_pass ? "密码 / 授权码（当前 " + esc(mail.pass_masked) + "，留空保持不变）" : "密码 / 授权码"}">
+        <input id="mailFrom" class="mono" placeholder="发件人（可选，留空用账号）" value="${esc(mail.from || "")}" style="max-width:220px">
+      </div>
+      <div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:8px;align-items:center">
+        <button class="btn sm primary" onclick="saveMailSettings()">保存</button>
+        <span class="dim" style="font-size:12px">当前生效：<b class="mono">${esc(mail.mode)}</b>${mail.mode === "smtp" && mail.host ? " · " + esc(mail.host) + ":" + esc(mail.port) : ""}</span>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+        <span class="dim" style="font-size:12px">发测试邮件</span>
+        <input id="mailTestTo" type="email" placeholder="收件人邮箱" style="max-width:240px">
+        <button class="btn sm" onclick="testMail()">测试</button>
+      </div>
+    </div>`;
+  box.innerHTML = `
+    <div class="panel">
+      <h2>我的 API Key <small>下游客户端用这个连中转站</small>
+        <span style="flex:1"></span>
+        <button class="btn sm primary" onclick="newKey()">+ 新建 Key</button>
+      </h2>
+      <div class="dim" style="font-size:12px;margin-bottom:10px">
+        每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。
+        ${s.is_admin ? "<br>你是管理员，在「账号」页新建用户时也能直接拿到对方的 key。" : ""}
+      </div>
+      ${(s.api_keys||[]).length ? `<table><thead><tr>
+        <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th>
+      </tr></thead><tbody>${(s.api_keys||[]).map(k => {
+        const expired = k.expires_at && new Date(k.expires_at) < new Date();
+        return `<tr>
+        <td class="mono">${esc(k.key)}
+          <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button></td>
+        <td>${esc(k.label || "-")}</td>
+        <td class="mono dim">${esc((k.created_at||"").replace("T"," ").slice(0,19))}</td>
+        <td class="mono ${expired ? "num" : "dim"}">${k.expires_at
+          ? `<span style="color:${expired ? "var(--red,#f87171)" : "inherit"}">${esc(k.expires_at.replace("T"," ").slice(0,16))}${expired ? " · 已过期" : ""}</span>`
+          : "永不过期"}</td>
+        <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
+        <td class="num"><button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
+          <button class="btn sm danger" onclick="delKey(${k.id})">删除</button></td>
+      </tr>`;
+      }).join("")}</tbody></table>` : '<div class="empty">还没有 key，点右上角新建</div>'}
+    </div>
+
+    <div class="panel">
+      <h2>修改密码</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="oldPw" type="password" placeholder="原密码" style="max-width:220px" autocomplete="current-password">
+        <input id="newPw" type="password" placeholder="新密码（至少 8 位）" style="max-width:240px" autocomplete="new-password">
+        <button class="btn sm primary" onclick="changePassword()">保存</button>
+      </div>
+      <div class="dim" style="font-size:12px">改完密码后，其他设备的登录会失效，需要重新登录。</div>
+    </div>
+
+    ${bpPanel}
+    ${mailPanel}
+        <div class="panel">
+          <h2>客户端接入示例</h2>
+      <div class="dim" style="margin-bottom:6px">OpenAI SDK / 任何 OpenAI 兼容客户端</div>
+      ${code(`export OPENAI_BASE_URL=${base}/v1\nexport OPENAI_API_KEY=sk-relay-你的key\n\n# 用 "平台/模型" 选上游\ncurl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer sk-relay-你的key" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"deepseek/deepseek-chat","stream":true,"messages":[{"role":"user","content":"你好"}]}'`)}
+      <div class="dim" style="margin:14px 0 6px">Anthropic 协议（Claude Code / Anthropic SDK）</div>
+      ${code(`export ANTHROPIC_BASE_URL=${base}\nexport ANTHROPIC_AUTH_TOKEN=sk-relay-你的key\nexport ANTHROPIC_MODEL=anthropic/claude-sonnet-4-5-20250929\n\ncurl ${base}/v1/messages \\\n  -H "x-api-key: sk-relay-你的key" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -d '{"model":"anthropic/claude-haiku-4-5-20251001","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'`)}
+      <div class="dim" style="margin:14px 0 6px">Claude Code 直接用（写入 ~/.claude/settings.json 的 env 里）</div>
+      ${code(`{\n  "env": {\n    "ANTHROPIC_BASE_URL": "${base}",\n    "ANTHROPIC_AUTH_TOKEN": "sk-relay-你的key"\n  }\n}`)}
+    </div>
+    <div class="panel">
+      <h2>运行信息</h2>
+      <table><tbody>
+        <tr><td class="dim">版本</td><td class="mono">${esc(s.version)}</td></tr>
+        <tr><td class="dim">Base URL</td><td class="mono">${esc(base + "/v1")}</td></tr>
+        <tr><td class="dim">OpenAI 协议</td><td class="mono">POST ${esc(base)}/v1/chat/completions</td></tr>
+        <tr><td class="dim">Anthropic 协议</td><td class="mono">POST ${esc(base)}/v1/messages</td></tr>
+      </tbody></table>
+    </div>`;
+}
+
+async function saveBasePath(){
+  const v = $("#bp").value.trim();
+  try{
+    const r = await api("/api/settings/base-path", { method: "POST", body: { base_path: v } });
+    toast("已保存：" + (r.base_path || "根目录") + "，正在跳到新地址…", "ok");
+    setTimeout(() => { location.href = (r.base_path || "") + "/"; }, 700);
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+async function saveMailSettings(){
+  const body = {
+    mode: $("#mailMode").value,
+    host: $("#mailHost").value.trim(),
+    port: $("#mailPort").value.trim(),
+    user: $("#mailUser").value.trim(),
+    password: $("#mailPass").value,      // 留空 = 保持原密码
+    from: $("#mailFrom").value.trim(),
+    starttls: $("#mailTls").checked,
+  };
+  try{
+    const r = await api("/api/settings/mail", { method: "POST", body });
+    toast("已保存。当前生效发信模式：" + r.mode, "ok");
+    $("#mailPass").value = "";
+    $("#mailPass").placeholder = r.has_pass
+      ? "密码 / 授权码（当前 " + r.pass_masked + "，留空保持不变）"
+      : "密码 / 授权码";
+    renderSettings();   // 刷新「当前生效」提示
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+async function testMail(){
+  const to = $("#mailTestTo").value.trim();
+  if(!to) return toast("先填收件人邮箱", "err");
+  try{
+    const r = await api("/api/settings/mail/test", { method: "POST", body: { to } });
+    r.ok ? toast(r.message || "测试已发送（" + r.mode + "）", "ok")
+         : toast("发送失败：" + r.error, "err");
+  }catch(e){ toast("发送失败：" + e.message, "err"); }
+}
+
+function copyText(t){
+  const done = () => toast("已复制到剪贴板", "ok");
+  const fallback = () => {                    // 局域网 http 下 clipboard API 不可用时的兜底
+    const ta = el("textarea", { style: "position:fixed;top:-1000px;opacity:0" });
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try{ ok = document.execCommand("copy"); }catch(e){ ok = false; }
+    ta.remove();
+    ok ? done() : toast("复制失败，请手动选中复制", "err");
+  };
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(t).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+}
+
+/* 表格比 panel 宽时，让 panel 自己横向滚动，而不是撑破圆角边框 */
+function fitTables(){
+  document.querySelectorAll("table").forEach(t => {
+    const par = t.parentElement;
+    if(!par || par.classList.contains("tw")) return;
+    const w = document.createElement("div");
+    w.className = "tw";
+    par.insertBefore(w, t);
+    w.appendChild(t);
+  });
+}
+new MutationObserver(fitTables).observe(document.body, { childList: true, subtree: true });
+
+/* ---------------- 导航 ---------------- */
+const RENDERERS = { overview: renderOverview, providers: renderProviders, usage: renderUsage,
+                    logs: renderLogs, settings: renderSettings, users: renderUsers };
+async function switchTab(tab){
+  S.tab = tab;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll("main section").forEach(s => { s.hidden = s.id !== "tab-" + tab; });
+  try{ await RENDERERS[tab](); }catch(e){ toast("加载失败：" + e.message, "err"); }
+}
+async function refreshAll(){
+  try{
+    S.overview = await api("/api/overview");
+    const m = await api("/api/models");
+    S.models = m.ids || [];
+    $("#hMeta").textContent = `v${S.overview.version} · ${S.overview.enabled_providers} 个平台 · ${S.overview.models} 个模型 · 累计 ${fmtTok(S.overview.totals.total_tokens)} tokens`;
+    await RENDERERS[S.tab]();
+  }catch(e){ toast("刷新失败：" + e.message, "err"); }
+}
+
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+["loginEmail", "loginPass"].forEach(id => $(`#${id}`).addEventListener("keydown", e => { if(e.key === "Enter") doAuth(); }));
+$("#modal").addEventListener("click", e => { if(e.target.id === "modal") closeModal(); });
+
+(function boot(){
+  api("/api/auth/status").then(st => {
+    if(st.user){ S.user = st.user; enterApp().catch(() => showLogin()); }
+    else {
+      showLogin();
+      if(!st.has_users){
+        S.authMode = "login"; toggleAuthMode();   // 一个账号都没有 → 直接进注册态
+      }
+    }
+  }).catch(() => showLogin());
+})();
+</script>
+</body>
+</html>

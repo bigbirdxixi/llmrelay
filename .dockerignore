@@ -1,0 +1,23 @@
+# 构建镜像时排除的东西（镜像里只留代码 + 依赖）
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+tests/
+data/
+config/
+deploy/
+*.db
+*.db-wal
+*.db-shm
+*.log
+.git/
+.gitignore
+README.md
+start.bat
+docker-compose*.yaml
+Dockerfile
+.dockerignore
