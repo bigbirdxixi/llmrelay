@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import contextlib
 import html as html_mod
+import json
 import time
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -130,7 +132,7 @@ PRESETS: list[dict[str, Any]] = [
     {"platform": "google", "name": "Google AI Studio（Gemini）", "type": "openai",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models": [],
      "extra": {}, "thinking_off": "auto",
-     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖"},
+     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖。注意 Gemini 3/4 思考模型：思考关不彻底（最低档 minimal），工具调用的 thought_signature 由中转自动补齐（历史 assistant 工具调用缺签名时填官方哨兵值，避免 400）；不想自动补可 extra.thought_signature_bypass=false" },
     {"platform": "volcark", "name": "火山方舟（豆包）", "type": "openai",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
      "models": ["deepseek-v3.2", "doubao-seed-1-6", "doubao-1.5-pro"],
@@ -197,6 +199,87 @@ def _public(up: Upstream) -> dict:
 async def list_providers(request: Request, _: None = Depends(auth)):
     reg = _reg(request)
     return {"data": [_public(u) for u in reg.upstreams], "presets": PRESETS}
+
+
+@router.get("/aggregates")
+async def list_aggregates(request: Request, _: None = Depends(auth)):
+    reg = _reg(request)
+    return {"data": reg.aggregate_info()}
+
+
+@router.post("/aggregates")
+async def save_aggregate(request: Request, _: None = Depends(auth)):
+    reg = _reg(request)
+    data = await request.json()
+    name = str(data.get("name") or "").strip()
+    entries = [str(e).strip() for e in (data.get("entries") or []) if str(e).strip()]
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9._-]{2,64}", name):
+        raise HTTPException(400, "聚合名只允许字母/数字/._-，2-64 位")
+    if "/" in name:
+        raise HTTPException(400, "聚合名不能包含 /（会被当成平台/模型前缀）")
+    if not entries:
+        raise HTTPException(400, "至少需要一个「平台/模型」条目")
+    if len(entries) > 20:
+        raise HTTPException(400, "单个聚合最多 20 个条目")
+    if len(set(entries)) != len(entries):
+        raise HTTPException(400, "条目有重复")
+    bad = [e for e in entries if not reg.resolve(e)]
+    if bad:
+        raise HTTPException(400, f"这些条目解析不到已启用的上游模型（平台未启用或模型未登记）：{', '.join(bad)}")
+    reg.upsert_aggregate(name, entries)
+    return {"name": name, "entries": entries}
+
+
+@router.delete("/aggregates/{name}")
+async def delete_aggregate(name: str, request: Request, _: None = Depends(auth)):
+    reg = _reg(request)
+    if not reg.remove_aggregate(name):
+        raise HTTPException(404, f"聚合模型 {name!r} 不存在")
+    return {"ok": True}
+
+
+@router.get("/providers/reasoning-preview")
+async def reasoning_preview(request: Request, _: None = Depends(auth),
+                            platform: str = "", model: str = "",
+                            out_fmt: str = "openai", field: str = "auto",
+                            base_url: str = "", extra: str = ""):
+    """「关闭思考」解析预览：中转实际发给上游的顶层字段 + 说明。
+
+    UI 在模型级 off 行下面展示它——用户只选「关闭思考」就不用管写法（Hermes 单开关体验）。
+    正在编辑的新平台可以带表单里的 base_url/extra(JSON) 直接预览；已存平台可省略。
+    走的是和 gateway 完全相同的解析代码（_thinking_off_payload + extra_body 摊平），预览即实发。
+    """
+    from . import reasoning as R
+    from .gateway import Gateway
+    ex = {}
+    if extra:
+        with contextlib.suppress(json.JSONDecodeError):
+            ex = json.loads(extra) or {}
+    reg = _reg(request)
+    row = next((u for u in reg.upstreams if u.platform == platform), None)
+    if not extra and row is not None:
+        ex = row.extra or {}
+    up = SimpleNamespace(platform=platform, name=platform,
+                         base_url=base_url or (row.base_url if row else ""),
+                         extra=ex or {}, type="openai")
+    wire = dict(Gateway._thinking_off_payload(up, out_fmt, field=field, model=model))
+    if out_fmt == "openai" and isinstance(wire.get("extra_body"), dict):
+        eb = wire.pop("extra_body")
+        for k, v in eb.items():
+            wire.setdefault(k, v)
+    m = (model or "").lower()
+    looks_google = bool(R.is_gemini_family(up)) or "gemini" in m
+    sig = looks_google and ("gemini-3" in m or "gemini-4" in m)
+    notes = []
+    if sig:
+        notes.append("Gemini 3/4 思考关不彻底（low 是下限），思考内容对客户端隐藏；"
+                     "带工具调用时历史里的 thought_signature 由中转自动补齐（官方哨兵值）")
+    elif looks_google and "gemini" in m:
+        notes.append("Gemini 2.x：thinking_budget=0 可以完全关掉思考")
+    if not wire and out_fmt == "anthropic":
+        notes.append("Anthropic 原生协议没有「关」的写法：省略 thinking 字段本身就是关")
+    return {"wire": wire, "notes": notes, "sig_autofill": sig}
 
 
 @router.post("/providers")

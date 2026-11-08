@@ -81,6 +81,10 @@ class Registry:
         self._raw: list[dict] = []
         self.client_map: dict[str, str] = {}
         self._mtime: Optional[float] = None
+        # 聚合模型：{聚合名: ["平台/模型", ...]}，条目在文件里以 {"_kind":"aggregates"} 标记项存放
+        self.aggregates: dict[str, list[str]] = {}
+        self._agg_rr: dict[str, int] = {}
+        self._agg_cd: dict[tuple[str, str], float] = {}
         self.reload()
 
     # ---------- 加载 / 热重载 ----------
@@ -92,7 +96,15 @@ class Registry:
                 if text:
                     raw = json.loads(text)
             self._raw = raw
-            self.upstreams = [Upstream.model_validate(x) for x in raw]
+            marker = [x for x in raw if isinstance(x, dict) and x.get("_kind") == "aggregates"]
+            self.upstreams = [Upstream.model_validate(x) for x in raw
+                              if not (isinstance(x, dict) and x.get("_kind") == "aggregates")]
+            aggs = {}
+            for mk in marker:
+                if isinstance(mk.get("aggregates"), dict):
+                    aggs.update({str(k): [str(e) for e in v]
+                                 for k, v in mk["aggregates"].items() if isinstance(v, list)})
+            self.aggregates = aggs
             cmap: dict[str, str] = {}
             if self.clients_file.exists():
                 text = self.clients_file.read_text(encoding="utf-8").strip()
@@ -124,13 +136,16 @@ class Registry:
                 pass
 
     # ---------- 持久化 ----------
-    def save(self, upstreams: list[dict]) -> None:
+    def _write(self, rows: list[dict]) -> None:
         with self._lock:
             self.upstreams_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.upstreams_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(upstreams, ensure_ascii=False, indent=2), "utf-8")
+            tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), "utf-8")
             tmp.replace(self.upstreams_file)
         self.reload()
+
+    def save(self, upstreams: list[dict]) -> None:
+        self._write(upstreams)
 
     def raw(self) -> list[dict]:
         with self._lock:
@@ -158,6 +173,80 @@ class Registry:
             return False
         self.save(left)
         return True
+
+    # ---------- 聚合模型（一个聚合名 -> 多个 平台/模型 条目，轮询 + 失败冷却自动切换） ----------
+    def _persist_aggregates(self) -> None:
+        with self._lock:
+            base = [x for x in self._raw
+                   if not (isinstance(x, dict) and x.get("_kind") == "aggregates")]
+            if self.aggregates:
+                base.append({"_kind": "aggregates", "aggregates": self.aggregates})
+            self._write(base)
+
+    def upsert_aggregate(self, name: str, entries: list[str]) -> None:
+        with self._lock:
+            self.aggregates[name] = entries
+        self._persist_aggregates()
+
+    def remove_aggregate(self, name: str) -> bool:
+        with self._lock:
+            if name not in self.aggregates:
+                return False
+            del self.aggregates[name]
+            self._agg_rr.pop(name, None)
+            for k in [k for k in self._agg_cd if k[0] == name]:
+                self._agg_cd.pop(k, None)
+        self._persist_aggregates()
+        return True
+
+    def aggregate_entries(self, name: str) -> list[str]:
+        return list(self.aggregates.get(name) or [])
+
+    def next_aggregate(self, name: str) -> Optional[tuple[Upstream, str, str]]:
+        """轮询取一个可用条目：跳过冷却中的；全冷却则从头再试（宁可试错）。
+        返回 (upstream, 上游真实模型名, 条目串)；没有可解析条目返回 None。"""
+        resolved: list[tuple[str, tuple[Upstream, str]]] = []
+        for e in self.aggregate_entries(name):
+            r = self.resolve(e)
+            if r:
+                resolved.append((e, r))
+        n = len(resolved)
+        if n == 0:
+            return None
+        with self._lock:
+            now = time.time()
+            start = self._agg_rr.get(name, 0) % n
+            for k in range(n):
+                idx = (start + k) % n
+                if self._agg_cd.get((name, resolved[idx][0]), 0.0) <= now:
+                    self._agg_rr[name] = idx + 1
+                    up, up_model = resolved[idx][1]
+                    return up, up_model, resolved[idx][0]
+            idx = start % n
+            self._agg_rr[name] = idx + 1
+            up, up_model = resolved[idx][1]
+            return up, up_model, resolved[idx][0]
+
+    def report_aggregate(self, name: str, entry: str, ok: bool) -> None:
+        with self._lock:
+            if not ok:
+                self._agg_cd[(name, entry)] = time.time() + 60.0
+            else:
+                self._agg_cd.pop((name, entry), None)
+
+    def aggregate_info(self) -> list[dict]:
+        """给 UI / API：每个聚合名 + 各条目的解析状态。"""
+        out = []
+        for name, entries in self.aggregates.items():
+            rows = []
+            for e in entries:
+                r = self.resolve(e)
+                rows.append({"entry": e, "ok": bool(r),
+                             "up_model": r[1] if r else "",
+                             "platform": r[0].platform if r else e.split("/", 1)[0]})
+            out.append({"name": name, "entries": rows,
+                       "usable": sum(1 for r in rows if r["ok"])})
+        return out
 
     def set_models(self, platform: str, models: list[str]) -> None:
         rows = self.raw()
@@ -219,7 +308,8 @@ class Registry:
         return list(up.models or [])
 
     def all_model_ids(self) -> list[str]:
-        """给下游 /v1/models 用：既给 "model"，也给 "platform/model"，别名也列出来。"""
+        """给下游 /v1/models 用：既给 "model"，也给 "platform/model"，别名也列出来，
+        外加聚合模型名（聚合名以裸名暴露）。"""
         ids: list[str] = []
         seen: set[str] = set()
         for up in self.enabled():
@@ -229,6 +319,10 @@ class Registry:
                     if i not in seen:
                         seen.add(i)
                         ids.append(i)
+        for name in self.aggregates:
+            if name not in seen:
+                seen.add(name)
+                ids.append(name)
         return ids
 
     def model_index(self) -> list[dict]:

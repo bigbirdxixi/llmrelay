@@ -147,9 +147,9 @@ tbody tr:hover td{background:#101a28}
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
 .mrow{display:flex;align-items:center;gap:8px}
-.mrow .mono.mname{flex:0 1 40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--fg)}
-.mrow select{width:132px;padding:5px 8px;font-size:12.5px}
-.mrow input.mal{flex:1;min-width:130px;padding:5px 8px;font-size:12.5px}
+.mrow .mono.mname{flex:0 0 auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
+.mrow select{width:128px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
+.mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
 .mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
 </style>
@@ -963,10 +963,16 @@ function clearPicks(){
 /* ---------------- 上游平台 ---------------- */
 function reasoningPill(p){
   const mr = (p.extra && p.extra.model_reasoning) || {};
-  const offs = Object.keys(mr).filter(k => mr[k] === "off");
+  // 字符串 "off"（写法自动）和对象 {policy:"off",field:...}（指定写法）都算关闭
+  const offs = Object.keys(mr).filter(k =>
+    mr[k] === "off" || (mr[k] && typeof mr[k] === "object" && mr[k].policy === "off"));
   if(!offs.length) return '<span class="dim" style="font-size:12px">跟随客户端</span>';
-  const label = offs.length === 1 ? `${offs[0]} 已关闭` : `${offs.length} 个模型已关闭`;
-  return `<span class="pill warn" title="${esc(offs.join(", "))}">${esc(label)}</span>`;
+  // 无论几个模型都显示具体名字，措辞统一「关闭思考」
+  const label = offs.length === 1
+    ? `${offs[0]} 关闭思考`
+    : `${offs.slice(0, 2).join("、")}${offs.length > 2 ? "…" : ""} 等${offs.length}个关闭思考`;
+  const detail = offs.map(k => mr[k] === "off" ? k : `${k}（写法：${mr[k].field || "auto"}）`).join(", ");
+  return `<span class="pill warn" title="${esc(detail)}">${esc(label)}</span>`;
 }
 
 function editProvider(platform){
@@ -1020,7 +1026,7 @@ function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求；点 × 删除该模型</label>
+    <div class="field"><label>模型级设置：「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由上面「别名」列自动生成，不必手写）</label>
@@ -1039,6 +1045,8 @@ async function renderProviders(){
   const box = $("#tab-providers");
   const data = await api("/api/providers");
   S.providers = data.data || []; S.presets = data.presets || [];
+  const agData = await api("/api/aggregates");
+  S.aggregates = agData.data || [];
   const rows = S.providers.map(p => {
     const keys = (p.api_keys || []).join("<br>") || '<span class="dim">网页登录</span>';
     const models = (p.models || []).length + Object.keys(p.model_map || {}).length;
@@ -1076,11 +1084,12 @@ async function renderProviders(){
         「思考」= 该平台是否允许模型输出思考过程，<b>已关闭</b> 时会要求上游别思考、并把思考内容挡在下游之外。
       </div>
     </div>
+    ${aggregatePanelHtml()}
     <div class="panel">
       <h2>全部可用模型 <small>${nf(S.models.length)} 个</small></h2>
       <div class="chips">${(S.models||[]).map(m => `<span class="chip mono">${esc(m)}</span>`).join("") || '<span class="dim">暂无</span>'}</div>
     </div>
-`;
+  `;
 
 }
 
@@ -1103,6 +1112,7 @@ function syncRowField(sel){
   const row = sel.closest(".mrow");
   const f = row && row.querySelector(".mrf");
   if(f) f.style.display = (sel.value === "off") ? "" : "none";
+  if(row && sel.value === "off" && f) previewOffRow(f);
 }
 
 function renderModelReasoning(){
@@ -1124,11 +1134,35 @@ function renderModelReasoning(){
       <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
       <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
       <select class="mrs" onchange="syncRowField(this)">${opts}</select>
-      <select class="mrf" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
+      <select class="mrf" onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
       <button class="mdel" title="删除这个模型" onclick="delModel('${esc(m)}')">×</button>
     </div>`;
   }).join("");
   buildAddOptions();
+  document.querySelectorAll("#f_modelrows .mrow").forEach(row => {
+    if(row.querySelector(".mrf") && row.querySelector(".mrs").value === "off") previewOffRow(row.querySelector(".mrf"));
+  });
+}
+
+/* 「关闭思考」解析预览：结果写进「关闭写法」下拉框的 title（悬停显示），不占版面。
+   只选 off 就够了（Hermes 单开关体验）——实际发给上游什么字段，悬停一眼看到。 */
+async function previewOffRow(sel){
+  if(!sel) return;
+  const row = sel.closest(".mrow"); if(!row) return;
+  const model = row.dataset.model;
+  const field = sel.value || "auto";
+  const outFmt = ($("#f_type") && $("#f_type").value) || "openai";
+  const base = (($("#f_base") || {}).value) || "";
+  const extraObj = _modalExtra() || {};
+  sel.title = "解析中…";
+  try{
+    const j = await api(`/api/providers/reasoning-preview?platform=${encodeURIComponent(S.editingPlatform||"")}` +
+      `&model=${encodeURIComponent(model)}&out_fmt=${outFmt}&field=${encodeURIComponent(field)}` +
+      `&base_url=${encodeURIComponent(base)}&extra=${encodeURIComponent(JSON.stringify(extraObj))}`);
+    const wire = (j.wire && Object.keys(j.wire).length) ? "发送 " + JSON.stringify(j.wire) : "不注入任何字段";
+    sel.title = "自动解析 → " + wire + (j.sig_autofill ? "\n· thought_signature 自动补齐" : "") +
+      ((j.notes && j.notes.length) ? ("\n" + j.notes.join("\n")) : "");
+  }catch(e){ sel.title = "解析失败：" + e.message; }
 }
 
 /* ---- 模型列表：下拉选择 + 别名 + 删除 ---- */
@@ -1262,6 +1296,109 @@ async function saveProvider(platform){
     closeModal();
     await refreshAll();
   }catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+
+/* ---------------- 聚合模型：一个名字 -> 多个 平台/模型，轮询 + 失败冷却自动切换 ---------------- */
+function aggregatePanelHtml(){
+  const list = S.aggregates || [];
+  return `<div class="panel">
+    <h2>聚合模型 <small>一个名字挂多个「平台/模型」，调用时自动轮换/切换（类似多 key）</small>
+      <span style="flex:1"></span>
+      <button class="btn primary sm" onclick="editAggregate(null)">+ 新增聚合</button>
+    </h2>
+    ${list.length ? `<table><thead><tr><th>聚合名</th><th>条目（按配置顺序轮询）</th><th class="num">可用</th><th class="num">操作</th></tr></thead><tbody>
+      ${list.map(a => `<tr>
+        <td><b class="mono">${esc(a.name)}</b></td>
+        <td>${a.entries.map(e => e.ok
+            ? `<span class="chip mono" title="解析到 ${esc(e.platform)} / ${esc(e.up_model)}">${esc(e.entry)}</span>`
+            : `<span class="chip mono dim" style="text-decoration:line-through" title="解析不到（平台停用或模型未登记）">${esc(e.entry)}</span>`).join(" ")}</td>
+        <td class="num">${a.usable}/${a.entries.length}</td>
+        <td class="num">
+          <button class="btn sm" onclick="editAggregate('${esc(a.name)}')">编辑</button>
+          <button class="btn sm danger" onclick="delAggregate('${esc(a.name)}')">删除</button>
+        </td></tr>`).join("")}
+      </tbody></table>`
+      : '<div class="dim" style="font-size:12.5px">还没有聚合模型。例：把 <span class="mono">google/gemini-2.5-flash</span> 和 <span class="mono">ollama/llama3.2:13b</span> 挂到 <span class="mono">Aggregation</span>，下游直接调 <span class="mono">Aggregation</span> 即可。</div>'}
+  </div>`;
+}
+
+function aggEntryOptions(){
+  const out = [];
+  for(const p of (S.providers || [])){
+    const names = [...(p.models || []), ...Object.keys(p.model_map || {})];
+    for(const m of [...new Set(names)]) out.push(`${p.platform}/${m}`);
+  }
+  return out;
+}
+
+function editAggregate(name){
+  S.aggEdit = name
+    ? (() => { const a = (S.aggregates||[]).find(x => x.name === name);
+        return {name, entries: a ? a.entries.map(e => e.entry) : []}; })()
+    : {name: "", entries: []};
+  const opts = aggEntryOptions();
+  $("#modalBody").innerHTML = `
+    <h3>${name ? "编辑聚合模型 · " + esc(name) : "新增聚合模型"}</h3>
+    <div class="field"><label>聚合名（下游直接当模型名调用）</label>
+      <input id="ag_name" class="mono" value="${esc(name || "")}" placeholder="例如 Aggregation" ${name ? "readonly" : ""} style="max-width:320px"/></div>
+    <div class="field"><label>选择要挂的「平台/模型」条目（可多选后点「加入」，顺序 = 优先顺序）</label>
+      <select id="ag_pick" multiple size="6" style="max-width:420px;width:100%">
+        ${opts.map(o => `<option value="${esc(o)}" ${S.aggEdit.entries.includes(o) ? "selected" : ""}>${esc(o)}</option>`).join("")}
+      </select>
+      <div style="margin-top:6px;display:flex;gap:6px">
+        <button class="btn sm" onclick="agAddPicks()">+ 加入选中</button>
+        <span class="dim" style="font-size:11.5px;align-self:center">已有 ${S.aggEdit.entries.length} 条（最多 20）</span>
+      </div></div>
+    <div class="field"><label>条目顺序（轮询顺序，失败冷却 60s 自动跳过）</label>
+      <div id="ag_rows" style="display:flex;flex-direction:column;gap:4px;max-width:460px"></div></div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveAggregate()">保存</button>
+    </div>`;
+  agRenderRows();
+  $("#modal").classList.add("on");
+}
+function agRenderRows(){
+  const box = $("#ag_rows"); if(!box) return;
+  box.innerHTML = S.aggEdit.entries.length ? S.aggEdit.entries.map((e, i) =>
+    `<div style="display:flex;gap:6px;align-items:center">
+      <span class="dim mono" style="font-size:11px;width:18px">${i + 1}</span>
+      <span class="chip mono" style="flex:1">${esc(e)}</span>
+      <button class="btn sm" title="上移" onclick="agMove(${i},-1)">↑</button>
+      <button class="btn sm" title="下移" onclick="agMove(${i},1)">↓</button>
+      <button class="btn sm danger" title="移除" onclick="agDel(${i})">×</button>
+    </div>`).join("") : '<span class="dim" style="font-size:12px">还没有条目，从上方选择加入</span>';
+}
+function agAddPicks(){
+  const sel = $("#ag_pick"); if(!sel) return;
+  for(const o of sel.selectedOptions){
+    const v = o.value;
+    if(!S.aggEdit.entries.includes(v) && S.aggEdit.entries.length < 20) S.aggEdit.entries.push(v);
+  }
+  agRenderRows();
+}
+function agMove(i, d){
+  const j = i + d;
+  if(j < 0 || j >= S.aggEdit.entries.length) return;
+  [S.aggEdit.entries[i], S.aggEdit.entries[j]] = [S.aggEdit.entries[j], S.aggEdit.entries[i]];
+  agRenderRows();
+}
+function agDel(i){ S.aggEdit.entries.splice(i, 1); agRenderRows(); }
+
+async function saveAggregate(){
+  const name = ($("#ag_name") ? $("#ag_name").value : "").trim();
+  const entries = S.aggEdit.entries;
+  if(!name || !entries.length){ alert("需要聚合名和至少一个条目"); return; }
+  try{
+    await api("/api/aggregates", {method: "POST", body: {name, entries}});
+    closeModal();
+    await renderProviders();
+  }catch(e){ alert("保存失败：" + e.message); }
+}
+async function delAggregate(name){
+  if(!confirm(`删除聚合模型 ${name}？下游调用该名会立刻 404。`)) return;
+  try{ await api("/api/aggregates/" + encodeURIComponent(name), {method: "DELETE"}); await renderProviders(); }
+  catch(e){ alert(e.message); }
 }
 
 async function delProvider(platform){

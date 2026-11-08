@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -16,8 +16,38 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from . import config
 from . import translate as T
 from .config import ANTHROPIC_VERSION, CONNECT_TIMEOUT_S, VERSION
+from . import reasoning as R
 from .registry import Registry, Upstream
 from .storage import Store
+
+# Google 官方提供的 thought_signature 哨兵值：签名确实拿不到（客户端把 extra_content 丢了、
+# 跨模型迁移历史等）时填这个，Google 跳过校验（代价是模型上下文里少了那段思考）。
+THOUGHT_SIGNATURE_BYPASS = "skip_thought_signature_validator"
+
+
+def inject_thought_signatures(payload: dict) -> int:
+    """Google 思考模型（Gemini 3/4）工具调用要求：当前轮每个 step 第一个 functionCall 必须
+    带 thought_signature，缺了直接 400。客户端（OpenAI SDK/httpx）经常把响应里的
+    extra_content.google.thought_signature 丢掉，这里给缺签名的 assistant tool_calls 补哨兵值。
+    真实签名一律保留。返回补齐的数量。"""
+    n = 0
+    for m in payload.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            sig = ((tc.get("extra_content") or {}).get("google") or {}).get("thought_signature") \
+                or tc.get("thought_signature")
+            if sig:
+                continue
+            extra = tc.get("extra_content") if isinstance(tc.get("extra_content"), dict) else {}
+            gg = extra.get("google") if isinstance(extra.get("google"), dict) else {}
+            gg["thought_signature"] = THOUGHT_SIGNATURE_BYPASS
+            extra["google"] = gg
+            tc["extra_content"] = extra
+            n += 1
+    return n
 
 SSE_HEADERS = {
     "cache-control": "no-cache",
@@ -219,6 +249,50 @@ class Gateway:
                 break
         raise UpstreamError(last_status, last_body, up.platform, key_hint=hint)
 
+    async def relay_aggregate(self, *, in_fmt: str, kind: str, body: dict,
+                              agg_name: str, client_model: str,
+                              request_id: str, started_at: float, stream: bool,
+                              est_prompt: int, client_ip: str = "",
+                              user_id: int | None = None, client: str = "",
+                              dkey_id: int | None = None):
+        """聚合模型转发：在配置的多个「平台/模型」条目之间轮询 + 失败冷却自动切换
+        （和多 key 轮换同一套语义：可重试错误冷却该条目 60s 并换下一个，
+        不可重试错误直接返回）。"""
+        reg = self.tenants.get(user_id) if user_id is not None else None
+        chosen = reg.next_aggregate(agg_name) if reg else None
+        if chosen is None:
+            return error_response(in_fmt, 404,
+                                  f"聚合模型 {agg_name!r} 没有可用条目：配置为空、条目指向上游已删的模型，"
+                                  f"或全部条目都在冷却中。请检查控制台「聚合模型」卡片", "aggregate_empty")
+        up, up_model, entry = chosen
+        last_exc: Optional[UpstreamError] = None
+        while True:
+            try:
+                return await self.relay(
+                    in_fmt=in_fmt, kind=kind, body=body, upstream=up, up_model=up_model,
+                    client_model=client_model or agg_name, request_id=request_id,
+                    started_at=started_at, stream=stream, est_prompt=est_prompt,
+                    client_ip=client_ip, user_id=user_id, client=client, dkey_id=dkey_id,
+                    propagate_upstream_error=True,
+                )
+            except UpstreamError as exc:
+                reg.report_aggregate(agg_name, entry, False)
+                retryable = exc.status in (401, 403, 408, 409, 425, 429) or exc.status >= 500
+                if not retryable:
+                    raise  # 不可重试（如 400 参数错）：换条目也没用，交给 main 的统一错误处理
+                last_exc = exc
+                nxt = reg.next_aggregate(agg_name)
+                if nxt is None or nxt[2] == entry:
+                    break  # 没有别的健康条目（或全冷却回到同一个）
+                up, up_model, entry = nxt
+                continue
+        log.warning("聚合模型 [%s] 所有条目均失败，最后错误: %s", agg_name,
+                    last_exc.status if last_exc else "?")
+        if last_exc is not None:
+            return error_response(in_fmt, last_exc.status if last_exc.status >= 400 else 502,
+                                  f"[{agg_name}] 所有条目均失败：{last_exc.message()}", "aggregate_exhausted")
+        return error_response(in_fmt, 502, f"[{agg_name}] 没有可用条目", "aggregate_exhausted")
+
     # ---------------- 记账 ----------------
     def record(self, resp=None, **kw) -> None:
         if resp is not None:
@@ -248,6 +322,7 @@ class Gateway:
         user_id: int | None = None,
         client: str = "",
         dkey_id: int | None = None,
+        propagate_upstream_error: bool = False,
     ):
         reg = self.tenants.get(user_id) if user_id is not None else None
         out_fmt = upstream.type
@@ -261,6 +336,20 @@ class Gateway:
         payload, url = self._build_payload(in_fmt, out_fmt, kind, body, upstream, up_model,
                                           est_prompt=est_prompt, policy=policy,
                                           off_field=off_field)
+        # extra_body 只是 OpenAI SDK 客户端侧的载体键：raw HTTP 打上游前要摊平到请求体顶层。
+        # Google 的 google.thinking_config（关思考等）必须挂在顶层，原样嵌套发出去上游会直接忽略。
+        if out_fmt == "openai" and isinstance(payload.get("extra_body"), dict):
+            extra = payload.pop("extra_body")
+            for k, v in extra.items():
+                payload.setdefault(k, v)
+        # Google 思考模型：历史里缺 thought_signature 的 assistant 工具调用自动补哨兵值，
+        # 避免 400 "Function call is missing a thought_signature"。平台 extra
+        # thought_signature_bypass: false 可关闭补齐。
+        if out_fmt == "openai" and (R.is_gemini_family(upstream)
+                                     or "gemini" in (up_model or "").lower()) \
+                and upstream.extra.get("thought_signature_bypass", True) is not False:
+            if inject_thought_signatures(payload):
+                pass  # 静默补齐；真实签名已带时不动
         try:
             resp = await self.send(reg, upstream, url, payload, stream=stream)
         except UpstreamError as exc:
@@ -274,6 +363,9 @@ class Gateway:
                 key_hint=getattr(exc, "key_hint", ""),
                 user_id=user_id, client=client or "master", dkey_id=dkey_id,
             )
+            # 聚合模型 failover：让调用方（relay_aggregate）决定换不换下一个条目
+            if propagate_upstream_error:
+                raise
             return error_response(in_fmt, exc.status if exc.status >= 400 else 502,
                                   f"[{upstream.platform}] {exc.message()}", "upstream_error")
 

@@ -1441,6 +1441,7 @@ def test_r61_stats_year(client, hdr):
     12 列（1~12 月）× 7 行（周一~周日），格子 = 该月该星期几的请求合计；
     按 ts 年份前缀精确取数。复用 R60 的独立账号思路隔离数据。"""
     from datetime import datetime, timedelta
+    import calendar
     import app.auth as auth_mod
 
     store = client.app.state.store
@@ -1452,8 +1453,11 @@ def test_r61_stats_year(client, hdr):
     now = datetime.now()
     cy, cm, cd = now.year, now.month, now.day
     py = cy - 1   # 显式取去年（11 月的「上月」还在今年，不能用 prev.year）
-    # 今年：今天 2 条；本月另一天 1 条（与今天错开）；去年 1 条
-    day2 = 1 if cd != 1 else 2
+    dow_today = datetime(cy, cm, cd).weekday()
+    # 今年：今天 2 条；本月另一天 1 条（与今天错开，且星期不同，避免同月同星期的格子撞车）；去年 1 条
+    last = calendar.monthrange(cy, cm)[1]
+    day2 = next((c for c in range(1, min(last, 28) + 1)
+                 if c != cd and datetime(cy, cm, c).weekday() != dow_today), 1)
     tz = now.astimezone().tzinfo
     store.record(platform="fake", model="fake-gpt", status="ok", user_id=u["id"],
                  ts=f"{cy:04d}-{cm:02d}-{cd:02d}T08:00:00{tz}", client_ip="r61",
@@ -1476,7 +1480,6 @@ def test_r61_stats_year(client, hdr):
     d = q(cy)
     assert d["year"] == cy
     assert len(d["cells"]) == 12 and all(len(row) == 7 for row in d["cells"]), "12×7 完整网格"
-    dow_today = datetime(cy, cm, cd).weekday()
     assert d["cells"][cm - 1][dow_today]["requests"] == 2, "今天所在 (月,星期) 格子 = 2"
     dow2 = datetime(cy, cm, day2).weekday()
     c2 = d["cells"][cm - 1][dow2]
@@ -2060,6 +2063,158 @@ def test_r76_nvidianim_preset(client, hdr):
     assert pf[0]["type"] == "openai"
     assert pf[0]["base_url"].startswith("https://integrate.api.nvidia.com/v1")
     assert "meta/llama-3.3-70b-instruct" in pf[0]["models"], "模型名应是 组织/模型名 形式"
+
+
+# ---------------------------------------------------------------- R78 Google 平台关思考：extra_body.google 摊平到顶层
+def test_r78_google_thinking_off_flattened(client, hdr, upstream_port):
+    """model_reasoning=off 时，Google 的关思考写法（google.thinking_config.thinking_budget=0）
+    必须摊平到请求体顶层发给上游；extra_body 只是 SDK 载体键，原样发出去上游会忽略（思考关不掉，
+    带 tools 的 Gemini 3 会 400 thought_signature）。"""
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "gemini", "name": "Gemini(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["***"],
+        "models": ["fake-gpt"], "extra": {"model_reasoning": {"fake-gpt": "off"}}})
+    assert r.status_code == 200, r.text
+    try:
+        rr = client.post("/v1/chat/completions", headers=hdr,
+                        json={"model": "gemini/fake-gpt", "messages": [{"role": "user", "content": "hi"}]})
+        assert rr.status_code == 200, rr.text
+        from tests import fake_upstream
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+        # Google OpenAI 兼容端点不再收顶层 google 扩展字段（400 Unknown name "google"），
+        # 关思考改走 OpenAI 系 reasoning_effort（gemini-3.1 实测 none 真关上）
+        assert sent.get("reasoning_effort") == "none", f"Google 关思考应用 reasoning_effort=none: {sent.get('reasoning_effort')}"
+        assert "google" not in sent and "extra_body" not in sent, "不能再发顶层 google / extra_body 字段"
+    finally:
+        assert client.delete("/api/providers/gemini", headers=hdr).status_code == 200
+
+
+# ---------------------------------------------------------------- R81 聚合模型：一个名字挂多个 平台/模型，自动轮换 + 失败切换
+def test_r81_aggregate_model_failover(client, hdr, upstream_port):
+    """聚合名 MyAgg -> [坏平台, 好平台]：坏平台连接失败后冷却 60s 自动跳过，
+    后续请求直接打到好平台；/v1/models 暴露聚合名；条目解析不到要 400。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "aggok", "name": "聚合-好(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1",
+        "api_keys": ["***"], "models": ["m2"]})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "aggdead", "name": "聚合-坏(连不上)", "type": "openai",
+        "base_url": "http://127.0.0.1:9/v1", "api_keys": ["***"], "models": ["m1"]})
+    assert r2.status_code == 200, r2.text
+    try:
+        pa = client.post("/api/aggregates", headers=hdr,
+                        json={"name": "MyAgg", "entries": ["aggdead/m1", "aggok/m2"]})
+        assert pa.status_code == 200, pa.text
+
+        # /v1/models 暴露聚合名
+        ml = client.get("/v1/models", headers=hdr)
+        assert ml.status_code == 200, ml.text
+        ids = [d["id"] for d in ml.json()["data"]]
+        assert "MyAgg" in ids, "聚合名应出现在 /v1/models"
+
+        # 第一次调用：轮询到坏平台 → 失败冷却 → 切到好平台 → 200
+        body = {"model": "MyAgg", "messages": [{"role": "user", "content": "hi"}]}
+        rr1 = client.post("/v1/chat/completions", headers=hdr, json=body)
+        assert rr1.status_code == 200, rr1.text
+        # 第二次调用：坏平台在冷却中，直接好平台 → 依然 200
+        rr2 = client.post("/v1/chat/completions", headers=hdr, json=body)
+        assert rr2.status_code == 200, rr2.text
+
+        # 聚合条目解析不到 → 400
+        pb = client.post("/api/aggregates", headers=hdr,
+                        json={"name": "Bad", "entries": ["nope/x"]})
+        assert pb.status_code == 400, pb.text
+    finally:
+        client.delete("/api/aggregates/MyAgg", headers=hdr)
+        client.delete("/api/providers/aggok", headers=hdr)
+        client.delete("/api/providers/aggdead", headers=hdr)
+
+
+# ---------------------------------------------------------------- R80 「关闭思考」解析预览：预览 = 实发（同一条代码路径）
+def test_r80_reasoning_preview_endpoint(client, hdr, upstream_port):
+    """GET /api/providers/reasoning-preview 走 gateway 同款解析：
+    Gemini 3/4 → low+隐藏思考（摊平到顶层 google）+ 签名自动补齐；Gemini 2.x → budget 0；
+    Anthropic 原生 → 不注入字段（省略即关）。"""
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "gemv", "name": "GeminiV(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["***"],
+        "models": ["gemini-3.1-flash-lite", "gemini-2.5-flash"]})
+    assert r.status_code == 200, r.text
+    try:
+        p1 = client.get("/api/providers/reasoning-preview", headers=hdr,
+                       params={"platform": "gemv", "model": "gemini-3.1-flash-lite",
+                               "out_fmt": "openai", "field": "auto"})
+        assert p1.status_code == 200, p1.text
+        j1 = p1.json()
+        assert j1["wire"].get("reasoning_effort") == "none", j1
+        assert j1["sig_autofill"] is True, "Gemini 3 应提示签名自动补齐"
+        assert "google" not in j1["wire"], "Google 端点不收顶层 google 扩展字段"
+
+        p2 = client.get("/api/providers/reasoning-preview", headers=hdr,
+                       params={"platform": "gemv", "model": "gemini-2.5-flash",
+                               "out_fmt": "openai", "field": "auto"})
+        j2 = p2.json()
+        assert j2["wire"].get("reasoning_effort") == "none", j2
+        assert j2["sig_autofill"] is False
+
+        p3 = client.get("/api/providers/reasoning-preview", headers=hdr,
+                       params={"platform": "gemv", "model": "gemini-3.1-flash-lite",
+                               "out_fmt": "anthropic", "field": "auto"})
+        j3 = p3.json()
+        assert j3["wire"] == {}, "Anthropic 原生省略即关"
+    finally:
+        assert client.delete("/api/providers/gemv", headers=hdr).status_code == 200
+
+
+# ---------------------------------------------------------------- R79 Google 思考模型：thought_signature 自动补齐 + Gemini 3 最低档
+def test_r79_google_thought_signature_bypass(client, hdr, upstream_port):
+    """Gemini 3/4 思考模型工具调用：历史 assistant tool_calls 缺 thought_signature 时，
+    中转发上游前自动补官方哨兵值（skip_thought_signature_validator），真实签名不覆盖；
+    Gemini 3 模型 off 写法是 thinking_level=minimal（不吃 thinking_budget）。"""
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "gemini2", "name": "Gemini2(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["***"],
+        "models": ["fake-gpt", "gemini-3.1-flash-lite"],
+        "extra": {"model_reasoning": {"gemini-3.1-flash-lite": "off"}}})
+    assert r.status_code == 200, r.text
+    try:
+        body = {
+            "model": "gemini2/fake-gpt",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}},
+                    {"id": "call_2", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\":\"London\"}"},
+                     "extra_content": {"google": {"thought_signature": "REAL_SIG"}}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "15C"},
+            ],
+            "tools": [{"type": "function", "function": {"name": "get_weather",
+                     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
+        }
+        rr = client.post("/v1/chat/completions", headers=hdr, json=body)
+        assert rr.status_code == 200, rr.text
+        from tests import fake_upstream
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+        amsgs = [m for m in sent["messages"] if m.get("role") == "assistant"]
+        assert amsgs, "assistant 历史应透传到上游"
+        tc1, tc2 = amsgs[0]["tool_calls"][0], amsgs[0]["tool_calls"][1]
+        assert tc1.get("extra_content", {}).get("google", {}).get("thought_signature") == \
+            "skip_thought_signature_validator", "缺签名的工具调用要补官方哨兵值"
+        assert tc2["extra_content"]["google"]["thought_signature"] == "REAL_SIG", "真实签名不能覆盖"
+
+        # Gemini 3 模型 off：thinking_level=minimal（摊平到顶层 google），不是 thinking_budget
+        rr2 = client.post("/v1/chat/completions", headers=hdr,
+                          json={"model": "gemini2/gemini-3.1-flash-lite",
+                                "messages": [{"role": "user", "content": "hi"}]})
+        assert rr2.status_code == 200, rr2.text
+        sent2 = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+        assert sent2.get("reasoning_effort") == "none", f"Gemini 3 关思考应用 reasoning_effort=none: {sent2.get('reasoning_effort')}"
+        assert "google" not in sent2, "Google 端点不收顶层 google 扩展字段"
+    finally:
+        assert client.delete("/api/providers/gemini2", headers=hdr).status_code == 200
 
 
 # ---------------------------------------------------------------- R77 常用上游平台模板补齐

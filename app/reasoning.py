@@ -62,6 +62,12 @@ def _probe(upstream) -> tuple[str, str, str]:
     return blob, host, f"{host}:{port}"
 
 
+def is_gemini_family(upstream) -> bool:
+    """Google 系上游（Gemini 思考模型相关处理：关思考写法、thought_signature 补齐）。"""
+    blob, _, _ = _probe(upstream)
+    return any(w in blob for w in _GEMINI)
+
+
 def is_ollama_endpoint(upstream) -> bool:
     """Ollama 端点：端口 11434、ollama.com 域名，或平台名/显示名里写着 ollama。"""
     blob, host, hostport = _probe(upstream)
@@ -101,9 +107,12 @@ def auto_off_payload(upstream, out_fmt: str, model: str = "") -> dict:
     if any(w in blob for w in _DASHSCOPE):
         return dict(FIELD_PAYLOADS["enable_thinking"])
 
-    if any(w in blob for w in _GEMINI):
-        # Gemini 兼容层要嵌在 extra_body.google 里
-        return {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}
+    if any(w in blob for w in _GEMINI) or "gemini" in m:
+        # 实测（2026-11-08，/v1beta/openai 直连验证）：Google 的 OpenAI 兼容端点**不再接受**
+        # 顶层 google.thinking_config 扩展字段（发了直接 400 "Unknown name \"google\""），
+        # 认的是 OpenAI 系 reasoning_effort：gemini-3.1 实测 none/minimal/high 都收，
+        # 且 none 时响应无 reasoning_content / reasoning_tokens——真关上了。
+        return dict(FIELD_PAYLOADS["reasoning_effort"])
 
     if any(w in blob for w in _MINIMAX):
         return dict(FIELD_PAYLOADS["thinking_type"])

@@ -165,6 +165,16 @@ async def _handle(request: Request, in_fmt: str, kind: str):
 
     model = str(body.get("model") or "").strip()
     force = (request.headers.get("x-upstream-platform") or "").strip() or None
+    # 聚合模型：裸名命中聚合配置 → 在多个「平台/模型」条目间自动轮换/切换
+    if model and model in reg.aggregates and not force:
+        est_prompt = T.estimate_tokens(T.flatten_messages_text(body))
+        client_ip = request.client.host if request.client else ""
+        return await gw.relay_aggregate(
+            in_fmt=in_fmt, kind=kind, body=body, agg_name=model, client_model=model,
+            request_id=request_id, started_at=started_at, stream=bool(body.get("stream")),
+            est_prompt=est_prompt, client_ip=client_ip,
+            user_id=user["id"], client=user.get("email") or "", dkey_id=user.get("_key_id"),
+        )
     resolved = reg.resolve(model, force)
     if not resolved:
         avail = reg.all_model_ids()[:20]
@@ -297,6 +307,13 @@ async def list_models(request: Request):
                 continue
             seen.add(mid)
             items.append({**it, "id": mid})
+    # 聚合模型：以裸名暴露（owned_by=aggregation）
+    for ag in reg.aggregate_info():
+        if ag["name"] not in seen:
+            seen.add(ag["name"])
+            items.append({"id": ag["name"], "platform": "aggregation",
+                         "provider_name": f"聚合模型 · {ag['usable']}/{len(ag['entries'])} 可用",
+                         "model": ag["name"], "type": "openai", "enabled": ag["usable"] > 0})
     if _is_anthropic_client(request):
         return JSONResponse(content={
             "data": [{"id": it["id"], "display_name": it["id"], "type": "model",

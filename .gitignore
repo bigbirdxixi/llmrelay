@@ -14,9 +14,15 @@ deploy/certs/*.pem
 deploy/certs/*.key
 deploy/certs/*.crt
 
+# ByteRover 本地记忆目录（本机路径/知识树，不入库）
+.brv/
+
 # Python
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 nul
+
+# ByteRover 本地记忆目录（跨会话知识树，含本机路径/私钥，绝不提交）
+.brv/
