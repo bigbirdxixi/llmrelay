@@ -108,10 +108,15 @@ def auto_off_payload(upstream, out_fmt: str, model: str = "") -> dict:
         return dict(FIELD_PAYLOADS["enable_thinking"])
 
     if any(w in blob for w in _GEMINI) or "gemini" in m:
-        # 实测（2026-11-08，/v1beta/openai 直连验证）：Google 的 OpenAI 兼容端点**不再接受**
-        # 顶层 google.thinking_config 扩展字段（发了直接 400 "Unknown name \"google\""），
-        # 认的是 OpenAI 系 reasoning_effort：gemini-3.1 实测 none/minimal/high 都收，
-        # 且 none 时响应无 reasoning_content / reasoning_tokens——真关上了。
+        # 实测（2026-11-08/09，/v1beta/openai 直连验证）：Google 的 OpenAI 兼容端点**不再接受**
+        # 顶层 google.thinking_config 扩展字段（发了 400 "Unknown name \"google\""），认 OpenAI 系
+        # reasoning_effort。词汇表还分模型代：
+        #   2.x / 3.0~3.4：收 none（真关死）/ minimal / high …
+        #   3.5+：不认 none（400 "Request contains an invalid argument"），最低档是 minimal
+        # 所以 3.5/3.6/3.7/4.x 系关思考用 minimal，其余用 none。
+        suffix = m.split("gemini-", 1)[-1] if "gemini-" in m else m
+        if suffix.startswith(("3.5", "3.6", "3.7", "4")):
+            return {"reasoning_effort": "minimal"}
         return dict(FIELD_PAYLOADS["reasoning_effort"])
 
     if any(w in blob for w in _MINIMAX):

@@ -68,6 +68,18 @@ async def chat(request: Request):
         return JSONResponse(status_code=400, content={
             "error": {"message": "fake upstream rejected: " + str(body["fail"]), "type": "invalid_request_error"}})
 
+    # 模拟真实 Google 端点行为（2026-11-09 实测）：gemini 系模型的 reasoning_effort 词汇表
+    # 里没有 "none"（3.5+ 实测 400 "Request contains an invalid argument"），发 none 就拒；
+    # minimal/low/medium/high 正常。
+    # 真实行为按代分：2.x/3.0-3.4 收 none；3.5+（含 3.6/3.7/3.8/3.9/4.x 等未知名）不收。
+    mname = str(body.get("model") or "").lower()
+    if mname.startswith("gemini") and body.get("reasoning_effort") == "none":
+        suffix = mname.split("gemini-", 1)[-1]
+        if suffix.startswith(("3.5", "3.6", "3.7", "3.8", "3.9", "4", "5")):
+            return JSONResponse(status_code=400, content={
+                "error": {"message": "Request contains an invalid argument.",
+                          "status": "INVALID_ARGUMENT", "code": 400}})
+
     model = body.get("model")
     want_tool = bool(body.get("tools"))
     want_reasoning = ("reasoner" in (model or "")) and not _thinking_off(body)

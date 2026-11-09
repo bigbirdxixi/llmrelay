@@ -215,6 +215,7 @@ class Gateway:
         last_status, last_body = 502, b"no available key"
         hint, key_idx = "", 0
         client = self.client_for(up)
+        adapted = False
         for i in range(attempts):
             key, idx = reg.next_key(up)
             hint, key_idx = mask_key(key), int(idx)
@@ -238,6 +239,44 @@ class Gateway:
                     resp.extensions["relay_key_hint"] = hint
                     resp.extensions["relay_key_index"] = key_idx
                 return resp
+            # 400 自愈（只做一次）：Gemini 各代模型的“关闭思考”值词汇表不一样——
+            # 实测 3.5+ 不认 reasoning_effort=none（400 "Request contains an invalid argument"），
+            # 最低档是 minimal；2.x/3.0-3.4 认 none。表（reasoning.py）没覆盖到的新代模型
+            # 也会在这里自动降级：none→minimal→去掉字段，同 key 原样重发一次；
+            # 400 是参数问题不是 key 问题，key 记健康、不换 key。
+            if (resp.status_code == 400 and not adapted and
+                    isinstance(payload.get("reasoning_effort"), str) and
+                    (R.is_gemini_family(up) or "gemini" in str(payload.get("model") or "").lower())):
+                adapted = True
+                current_effort = payload["reasoning_effort"]
+                with contextlib.suppress(Exception):
+                    last_body = await resp.aread()
+                with contextlib.suppress(Exception):
+                    await resp.aclose()
+                last_status = resp.status_code
+                if current_effort != "minimal":
+                    payload["reasoning_effort"] = "minimal"
+                else:
+                    payload.pop("reasoning_effort", None)
+                reg.report(up, idx, True)
+                req = client.build_request(
+                    "POST", url, json=payload, headers=headers,
+                    timeout=httpx.Timeout(up.timeout_s, connect=CONNECT_TIMEOUT_S),
+                )
+                try:
+                    resp = await client.send(req, stream=stream)
+                except httpx.HTTPError as exc:
+                    last_status, last_body = 502, f"连接上游失败: {exc}".encode()
+                    if i == attempts - 1:
+                        break
+                    continue
+                if resp.status_code < 400:
+                    reg.report(up, idx, True)
+                    with contextlib.suppress(Exception):
+                        resp.extensions["relay_key_hint"] = hint
+                        resp.extensions["relay_key_index"] = key_idx
+                    return resp
+                # 还是 400 → 走下面常规错误路径
             with contextlib.suppress(Exception):
                 last_body = await resp.aread()
             with contextlib.suppress(Exception):

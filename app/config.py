@@ -31,7 +31,7 @@ READ_TIMEOUT_S = float(os.getenv("RELAY_READ_TIMEOUT", "600"))
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = int(os.getenv("RELAY_DEFAULT_MAX_TOKENS", "8192"))
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 # ---- 反向代理子路径 ----

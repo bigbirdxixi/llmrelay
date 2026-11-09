@@ -132,7 +132,7 @@ PRESETS: list[dict[str, Any]] = [
     {"platform": "google", "name": "Google AI Studio（Gemini）", "type": "openai",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models": [],
      "extra": {}, "thinking_off": "auto",
-     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖。注意 Gemini 3/4 思考模型：思考关不彻底（最低档 minimal），工具调用的 thought_signature 由中转自动补齐（历史 assistant 工具调用缺签名时填官方哨兵值，避免 400）；不想自动补可 extra.thought_signature_bypass=false" },
+     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖。注意 Gemini 思考模型的「关闭思考」走 OpenAI 系 reasoning_effort（Google 兼容端点不再收 google.thinking_config 扩展字段）：2.x/3.0~3.4 用 none 真关死，3.5+ 不认 none（400）自动给最低档 minimal，表没覆盖的新代模型 400 时自动降级 minimal/去掉字段重发一次；工具调用的 thought_signature 由中转自动补齐（历史 assistant 工具调用缺签名时填官方哨兵值，避免 400）；不想自动补可 extra.thought_signature_bypass=false" },
     {"platform": "volcark", "name": "火山方舟（豆包）", "type": "openai",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
      "models": ["deepseek-v3.2", "doubao-seed-1-6", "doubao-1.5-pro"],
@@ -273,10 +273,10 @@ async def reasoning_preview(request: Request, _: None = Depends(auth),
     sig = looks_google and ("gemini-3" in m or "gemini-4" in m)
     notes = []
     if sig:
-        notes.append("Gemini 3/4 思考关不彻底（low 是下限），思考内容对客户端隐藏；"
-                     "带工具调用时历史里的 thought_signature 由中转自动补齐（官方哨兵值）")
+        notes.append("Gemini 3/4 思考关不彻底（3.5+ 最低档是 minimal，2.x/3.0~3.4 可用 none 关死），"
+                     "思考内容对客户端隐藏；带工具调用时历史里的 thought_signature 由中转自动补齐（官方哨兵值）")
     elif looks_google and "gemini" in m:
-        notes.append("Gemini 2.x：thinking_budget=0 可以完全关掉思考")
+        notes.append("Gemini 2.x：reasoning_effort=none 可以完全关掉思考")
     if not wire and out_fmt == "anthropic":
         notes.append("Anthropic 原生协议没有「关」的写法：省略 thinking 字段本身就是关")
     return {"wire": wire, "notes": notes, "sig_autofill": sig}

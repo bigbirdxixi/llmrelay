@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-09
+
+### 修复
+- **Gemini 3.5+ 关思考 400**：`gemini-3.5-flash-lite` 等 3.5+/4.x 模型不认 `reasoning_effort=none`（400 "Request contains an invalid argument"），最低档是 `minimal`。修复两处：
+  - 规则表（reasoning.py）按模型代选值：2.x / 3.0~3.4 用 `none`，3.5/3.6/3.7/4.x 用 `minimal`
+  - 网关 400 自愈（gateway.py）：规则表没覆盖到的新代模型，400 时自动降级 `none→minimal→去掉字段` 同 key 原样重发一次（400 是参数问题不换 key）
+
 ## [1.0.0] - 2026-11-08
 
 首个开源版本。

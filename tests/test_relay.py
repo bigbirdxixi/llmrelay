@@ -2364,3 +2364,45 @@ def test_r74_expired_revoked_key_audit(client, hdr):
     client.post("/v1/chat/completions", headers={"authorization": "Bearer sk-r74-no-such-key"},
                 json={"model": "fake/fake-gpt", "messages": []})
     assert len(store.recent(5)) == n_before, "missing/invalid 401 不落请求日志（防攻击刷库）"
+
+
+# ---------------------------------------------------------------- R82 Google 关闭思考值分代 + 400 自适应降级（对齐真实端点实测）
+def test_r82_google_effort_generation_and_adapt(client, hdr, upstream_port):
+    """真实 /v1beta/openai 实测（2026-11-09）：gemini-3.5+ 的 reasoning_effort 词汇表没有
+    "none"（发了 400 "Request contains an invalid argument"），最低档是 minimal；
+    2.x/3.0-3.4 收 none。所以：3.5 系自动解析直接给 minimal（一次通过）；表没覆盖的
+    新代模型（如 3.9）先发 none 被 400 时，网关自适应降级 minimal 重发，客户端无感。"""
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "goog2", "name": "Gem2(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["***"],
+        "models": ["gemini-3.5-flash-lite", "gemini-3.9-flash"],
+        "extra": {"model_reasoning": {"gemini-3.5-flash-lite": "off",
+                                      "gemini-3.9-flash": {"policy": "off", "field": "auto"}}}})
+    assert r.status_code == 200, r.text
+    try:
+        from tests import fake_upstream
+        fake_upstream.RECEIVED.clear()
+
+        # 3.5：表里直接 minimal，假上游一次通过（不会有 400 重发）
+        p35 = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "goog2/gemini-3.5-flash-lite",
+            "messages": [{"role": "user", "content": "hi"}]})
+        assert p35.status_code == 200, p35.text
+        sent35 = [x for x in fake_upstream.RECEIVED
+                  if x["body"].get("model") == "gemini-3.5-flash-lite"]
+        assert len(sent35) == 1, "3.5 应一次通过（直接发 minimal），不该有 400 重发"
+        assert sent35[0]["body"].get("reasoning_effort") == "minimal", \
+            f"3.5 系关思考应是 minimal: {sent35[0]['body'].get('reasoning_effort')}"
+
+        # 3.9（表未覆盖）：auto 解析给 none → 假上游按真实 Google 行为 400
+        # → 网关自适应降级 minimal 重发 → 200。两次发送记录都在。
+        p39 = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "goog2/gemini-3.9-flash",
+            "messages": [{"role": "user", "content": "hi"}]})
+        assert p39.status_code == 200, p39.text
+        sent39 = [x["body"] for x in fake_upstream.RECEIVED
+                  if x["body"].get("model") == "gemini-3.9-flash"]
+        assert [b.get("reasoning_effort") for b in sent39] == ["none", "minimal"], \
+            f"应先发 none 被 400、再降级 minimal: {[b.get('reasoning_effort') for b in sent39]}"
+    finally:
+        client.delete("/api/providers/goog2", headers=hdr)
