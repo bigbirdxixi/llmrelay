@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 app = FastAPI()
 RECEIVED: list[dict] = []
+_ONCE_503 = {"hit": False}
 
 USAGE = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
 
@@ -60,6 +61,20 @@ async def models():
     return {"object": "list", "data": [{"id": "fake-gpt"}, {"id": "fake-gpt-2"}]}
 
 
+# 「/x401」前缀变体：chat 与 models 都 401（模拟 key 真的坏了——
+# 探测时 /models 目录也 401 → 判定 key 级错误，保留清单不写回）
+@app.get("/x401/v1/models")
+async def models_x401():
+    return JSONResponse(status_code=401, content={
+        "error": {"message": "Invalid API key", "type": "authentication_error"}})
+
+
+@app.post("/x401/v1/chat/completions")
+async def chat_x401():
+    return JSONResponse(status_code=401, content={
+        "error": {"message": "Invalid API key", "type": "authentication_error"}})
+
+
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
     body = await request.json()
@@ -79,6 +94,31 @@ async def chat(request: Request):
             return JSONResponse(status_code=400, content={
                 "error": {"message": "Request contains an invalid argument.",
                           "status": "INVALID_ARGUMENT", "code": 400}})
+
+    # 模拟 NVIDIA NIM 按账号授权模型：key 没授权的模型 404（拉模型列表有、调用 404）
+    if mname.startswith("m-x404"):
+        return JSONResponse(status_code=404, content={
+            "status": 404, "title": "Not Found",
+            "detail": "Function: Not found for account 'TEST'"})
+    # 慢模型加长版：3s 才响应（R91 读超时区分测试用：探测短超时 1s 时触发 ReadTimeout，
+    # 验证「上游响应慢」不算连接级 connfail、不触发连续 3 个放弃）
+    if mname.startswith("m-slow3"):
+        import asyncio as _aio
+        await _aio.sleep(3.0)
+    # 慢模型：探测取消测试用（每次调用睡 0.8s，让「停止探测」有可观察的截断效果）
+    if mname.startswith("m-slow"):
+        import asyncio as _aio
+        await _aio.sleep(0.8)
+    # key 级错误：探测时不得因此删模型
+    if mname.startswith("m-x401"):
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "Invalid API key", "type": "authentication_error"}})
+    # 模拟 NVIDIA NIM 的瞬时 503（content safety screening）：首次 503、重试 200
+    if mname.startswith("m-503once"):
+        if not _ONCE_503["hit"]:
+            _ONCE_503["hit"] = True
+            return JSONResponse(status_code=503, content={
+                "error": {"message": "content safety screening is temporarily unavailable"}})
 
     model = body.get("model")
     want_tool = bool(body.get("tools"))

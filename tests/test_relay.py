@@ -2406,3 +2406,344 @@ def test_r82_google_effort_generation_and_adapt(client, hdr, upstream_port):
             f"应先发 none 被 400、再降级 minimal: {[b.get('reasoning_effort') for b in sent39]}"
     finally:
         client.delete("/api/providers/goog2", headers=hdr)
+
+
+# ---------------------------------------------------------------- R83 瞬时 5xx/429 同 key 快速重试（NVIDIA NIM 503 content-safety）
+def test_r83_transient_same_key_retry(client, hdr, upstream_port):
+    """单 key 平台遇到瞬时 503（NVIDIA NIM 的 content safety 偶发）时，
+    网关同 key 退避重发，第二次 200，客户端无感；不 503 透传。"""
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimx", "name": "NIMx(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["nk"],
+        "models": ["m-503once"]})
+    assert r.status_code == 200, r.text
+    try:
+        from tests import fake_upstream
+        fake_upstream._ONCE_503["hit"] = False
+        fake_upstream.RECEIVED.clear()
+        rr = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "nimx/m-503once", "messages": [{"role": "user", "content": "hi"}]})
+        assert rr.status_code == 200, rr.text
+        sent = [x for x in fake_upstream.RECEIVED if x["body"].get("model") == "m-503once"]
+        assert len(sent) == 2, f"首次 503 应同 key 重试、第二次 200（共 2 次）: {len(sent)}"
+    finally:
+        client.delete("/api/providers/nimx", headers=hdr)
+
+
+# ---------------------------------------------------------------- R84 平台「测试」按钮按登记顺序逐个试模型（NVIDIA 按账号授权）
+def test_r84_provider_test_tries_models(client, hdr, upstream_port):
+    """NVIDIA NIM 这类按账号授权模型清单的平台：登记列表首模型未必对该 key 开放（404
+    "Function not found for account"）。测试按钮不指定模型时应按登记顺序逐个 ping
+    （最多 5 个），跳过 404 的，第一个通的才算平台可用；全部失败返回 ok=false + 末条原因。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimt", "name": "NIMt(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["tk"],
+        "models": ["m-x404", "m-ok-plain"]})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimbad", "name": "NIMbad(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["tk"],
+        "models": ["m-x404"]})
+    assert r2.status_code == 200, r2.text
+    try:
+        rt = client.post("/api/providers/nimt/test", headers=hdr, json={})
+        assert rt.status_code == 200, rt.text
+        j = rt.json()
+        assert j["ok"] is True and j["model"] == "m-ok-plain", \
+            f"首模型 404 应跳到第二个: {j}"
+
+        rt2 = client.post("/api/providers/nimbad/test", headers=hdr, json={})
+        j2 = rt2.json()
+        assert j2["ok"] is False and "m-x404" in j2["error"], \
+            f"全模型不可用要 ok=false 并列出试过的: {j2}"
+        assert "不可用" in j2["error"]
+
+        # 显式指定 model 时只试它（不扩散）
+        rt3 = client.post("/api/providers/nimt/test", headers=hdr,
+                          json={"model": "m-x404"})
+        assert rt3.json()["ok"] is False, "显式指定 404 模型应直接失败"
+    finally:
+        client.delete("/api/providers/nimt", headers=hdr)
+        client.delete("/api/providers/nimbad", headers=hdr)
+
+
+# ---------------------------------------------------------------- R85 平台「测试」= 全量模型探测：可用的保留、未授权自动移除写回
+def test_r85_probe_provider_models(client, hdr, upstream_port):
+    """NVIDIA NIM 式平台：测试按钮探测全部已登记模型——
+    模型级 404/400（账号未授权）移除并写回模型清单；瞬时 503 经网关重试后保留；
+    401/403 先验证 key 本身：key 能列 /models → 单模型未授权（移除并继续），
+    key 连 /models 都 401 → 真 key 级错误（保留清单不写回，见 R89）。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimp", "name": "NIMp(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-x404", "m-ok-plain", "m-503once"]})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimk", "name": "NIMk(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-x401", "m-ok-plain"]})
+    assert r2.status_code == 200, r2.text
+    try:
+        from tests import fake_upstream
+        fake_upstream._ONCE_503["hit"] = False
+
+        # 混合平台：404 移除 + 503 瞬时（重试后 200）保留 + 正常保留
+        rp = client.post("/api/providers/nimp/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        assert j["key_error"] is False and j["written"] is True, j
+        assert sorted(j["kept"]) == ["m-503once", "m-ok-plain"], j
+        assert [x["model"] for x in j["removed"]] == ["m-x404"], j
+        assert "m-503once" in j["transient"] or "m-503once" in j["kept"], \
+            "瞬时故障（重试后成功）必须保留在清单里"
+        gp = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "nimp"]
+        assert gp[0]["models"] == ["m-ok-plain", "m-503once"], \
+            f"404 模型应被写回移除: {gp[0]['models']}"
+
+        # 401 但 key 能列 /models（普通 fake 上游）→ 单模型未授权：移除该模型、继续探测、写回
+        rp2 = client.post("/api/providers/nimk/probe", headers=hdr, json={})
+        j2 = rp2.json()
+        assert j2["key_error"] is False and j2["written"] is True, j2
+        assert sorted(j2["kept"]) == ["m-ok-plain"] and j2.get("skipped") == 0, j2
+        assert [x["model"] for x in j2["removed"]] == ["m-x401"], \
+            "401 且 key 可用 → 判单模型未授权并移除"
+        gp2 = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+               if p["platform"] == "nimk"]
+        assert gp2[0]["models"] == ["m-ok-plain"], \
+            f"单模型未授权应写回移除: {gp2[0]['models']}"
+    finally:
+        client.delete("/api/providers/nimp", headers=hdr)
+        client.delete("/api/providers/nimk", headers=hdr)
+
+
+# ---------------------------------------------------------------- R89 探测 401/连不通 的细分判定：
+# key 可用但单模型未授权 → 只删该模型继续探测；key 真坏（/models 也 401）→ 整轮 key_error
+def test_r89_probe_401_and_connfail_granularity(client, hdr, upstream_port):
+    """① 普通平台（/models 200）上 401 的模型：判「无此模型授权」移除，不影响其余模型；
+    ② /x401 平台（chat 与 /models 都 401）：判定 key 级错误，保留清单不写回；
+    ③ 连不通的平台：容忍 2 个 connfail 模型不中断，第 3 个连续才整轮放弃。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimsplit", "name": "NIMsplit(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-x401", "m-ok-plain", "m-x404"]})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimdeadkey", "name": "NIMdeadkey(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/x401/v1", "api_keys": ["pk"],
+        "models": ["m-a", "m-b", "m-c"]})
+    assert r2.status_code == 200, r2.text
+    r3 = client.post("/api/providers", headers=hdr, json={
+        "platform": "dead2", "name": "死主机2(fake)", "type": "openai",
+        "base_url": "http://127.0.0.1:9/v1", "api_keys": ["pk"],
+        "models": ["m-a", "m-b"]})
+    assert r3.status_code == 200, r3.text
+    try:
+        # ① 401 单模型未授权（key 能列 /models）→ 移除该模型、继续测、写回
+        rp = client.post("/api/providers/nimsplit/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        assert j["key_error"] is False and j["written"] is True, j
+        assert sorted(x["model"] for x in j["removed"]) == ["m-x401", "m-x404"], j
+        assert any("无此模型授权" in x["reason"] for x in j["removed"]
+                   if x["model"] == "m-x401"), "401 且 key 可用应标注为单模型未授权"
+        assert j["kept"] == ["m-ok-plain"], j
+        assert j.get("skipped") == 0, "两个被移除模型之后还要继续测"
+        gs = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "nimsplit"]
+        assert gs[0]["models"] == ["m-ok-plain"], f"写回后只剩可用模型: {gs[0]['models']}"
+
+        # ② /x401：chat 401 且 /models 也 401 → 真 key 级错误 → 保留清单、提前收工
+        rp2 = client.post("/api/providers/nimdeadkey/probe", headers=hdr, json={})
+        j2 = rp2.json()
+        assert j2["key_error"] is True and j2["written"] is False, j2
+        assert j2.get("skipped") == 2, j2
+        gd = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "nimdeadkey"]
+        assert gd[0]["models"] == ["m-a", "m-b", "m-c"], "key 真坏不得改动模型清单"
+
+        # ③ 连不通但只有 2 个模型：不触发「连续 3 个」放弃，正常跑完、不写回
+        rp3 = client.post("/api/providers/dead2/probe", headers=hdr, json={})
+        j3 = rp3.json()
+        assert j3["connect_fail"] is False and j3["written"] is False, j3
+        assert j3.get("connfails") == ["m-a", "m-b"], j3
+        assert j3["kept"] == ["m-a", "m-b"] and j3.get("skipped") == 0, j3
+        g2 = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "dead2"]
+        assert g2[0]["models"] == ["m-a", "m-b"], "连不通不动模型清单"
+    finally:
+        client.delete("/api/providers/nimsplit", headers=hdr)
+        client.delete("/api/providers/nimdeadkey", headers=hdr)
+        client.delete("/api/providers/dead2", headers=hdr)
+
+
+# ---------------------------------------------------------------- R86 探测进度流（stream 模式）：逐模型事件 + 末行 done/写回
+def test_r86_probe_stream_progress(client, hdr, upstream_port):
+    """probe body {"stream": true} → NDJSON 事件流：每个模型一行（i/total/model/result），
+    done 行携带写回后的汇总。401 模型（key 能列 /models）按单模型未授权移除，探测继续。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimstream", "name": "NIMstream(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-x404", "m-x401", "m-ok-plain"]})
+    assert r1.status_code == 200, r1.text
+    try:
+        rp = client.post("/api/providers/nimstream/probe", headers=hdr,
+                         json={"stream": True})
+        assert rp.status_code == 200, rp.text
+        lines = [json.loads(x) for x in rp.text.splitlines() if x.strip()]
+        starts = [e for e in lines if e.get("phase") == "start"]
+        results = [e for e in lines if "result" in e and not e.get("done")]
+        final = lines[-1]
+        # 每个被测模型先给 start 事件（UI 立刻显示「正在测哪个/剩几个」，不再卡「开始…」）
+        assert [e["model"] for e in starts] == ["m-x404", "m-x401", "m-ok-plain"], starts
+        assert len(results) == 3, f"三个模型都应出结果: {results}"
+        assert [e["model"] for e in results] == ["m-x404", "m-x401", "m-ok-plain"]
+        assert results[0]["result"] == "removed" and results[0]["i"] == 1 \
+            and results[0]["total"] == 3
+        # 401 且 key 能列 /models → 单模型未授权（removed），探测不停
+        assert results[1]["result"] == "removed" and results[1]["code"] == 401, \
+            "401 应判单模型未授权并移除（key 可用）"
+        assert results[2]["result"] == "ok"
+        final = lines[-1]
+        assert final["done"] is True and final["key_error"] is False
+        assert final["skipped"] == 0, "401 单模型未授权不应中断探测"
+        assert final["connect_fail"] is False and final["cancelled"] is False
+        assert final["written"] is True, "移除项应写回模型清单"
+        assert sorted(x["model"] for x in final["removed"]) == ["m-x401", "m-x404"]
+        assert final["kept"] == ["m-ok-plain"]
+    finally:
+        client.delete("/api/providers/nimstream", headers=hdr)
+
+
+# ---------------------------------------------------------------- R87 探测连不通上游：容忍抖动，连续 3 个才整轮快速放弃
+def test_r87_probe_connect_fail_fast_abort(client, hdr, upstream_port):
+    """base_url 指向连不通的地址（127.0.0.1:9 拒绝连接）：
+    前 2 个 connfail 容忍（代理可能瞬时抖动，模型保留不删），第 3 个连续才整轮放弃
+    （不逐个空等 300s），不改模型清单；done 带 connect_fail=true + connfails 列表。"""
+    import time
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "deadhost", "name": "死主机(fake)", "type": "openai",
+        "base_url": "http://127.0.0.1:9/v1", "api_keys": ["pk"],
+        "models": ["m-a", "m-b", "m-c"]})
+    assert r1.status_code == 200, r1.text
+    try:
+        t0 = time.perf_counter()
+        rp = client.post("/api/providers/deadhost/probe", headers=hdr, json={})
+        elapsed = time.perf_counter() - t0
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        assert j["connect_fail"] is True and j["written"] is False, j
+        assert j["removed"] == [] and j["cancelled"] is False
+        assert j["connfails"] == ["m-a", "m-b", "m-c"], \
+            f"连不通的模型记录在 connfails 且保留: {j}"
+        assert j["skipped"] == 0, f"3 个模型全测过（第 3 个触发放弃）: {j}"
+        assert elapsed < 30, f"连不通应在 30s 内快速放弃（实际 {elapsed:.1f}s）"
+        gp = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "deadhost"]
+        assert gp[0]["models"] == ["m-a", "m-b", "m-c"], "连不通不动模型清单"
+    finally:
+        client.delete("/api/providers/deadhost", headers=hdr)
+
+
+
+
+# ---------------------------------------------------------------- R90 探测结束自动清理 job：stop 端点对已结束的探测返回 stopped:false
+def test_r90_probe_job_cleanup_after_done(client, hdr, upstream_port):
+    """probe 跑完（done 事件）后 job 句柄应被清掉：再调 /probe/stop 返回 stopped:false。
+    否则 stop 永远对着死 job set 事件，前端无法区分「有探测在跑/没有」。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimgone", "name": "NIMgone(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-ok-plain"]})
+    assert r1.status_code == 200, r1.text
+    try:
+        rp = client.post("/api/providers/nimgone/probe", headers=hdr, json={})
+        assert rp.status_code == 200 and rp.json()["done"] is True, rp.text
+        sp = client.post("/api/providers/nimgone/probe/stop", headers=hdr, json={})
+        assert sp.status_code == 200 and sp.json() == {"stopped": False},             f"已结束探测不应再算「stopped」: {sp.json()}"
+    finally:
+        client.delete("/api/providers/nimgone", headers=hdr)
+
+
+# ---------------------------------------------------------------- R88 显式停止探测（「取消」按钮的 stop 端点）
+def test_r88_probe_stop_endpoint(client, hdr, upstream_port):
+    """点「取消」= POST /probe/stop：置 cancel 事件，探测循环在下个检查点停止，
+    剩余模型记入 skipped、不写回清单——uvicorn 客户端断开不会取消服务端循环，
+    所以前端取消必须走这个显式端点。"""
+    import threading
+    import time
+    from fastapi.testclient import TestClient
+    from app.main import app as relay_app
+    from tests import fake_upstream
+
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimslow", "name": "NIMslow(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-slow"] * 8})
+    assert r1.status_code == 200, r1.text
+    try:
+        fake_upstream.RECEIVED.clear()
+        stop_result = {}
+
+        # 独立 portal 线程发 stop——探测流挂在 client 的 portal 上。
+        # 注意：不用 with 块（会重跑 lifespan、把共享 store 关掉），直接实例化
+        def stopper():
+            time.sleep(2.2)   # 让前 1-2 个 0.8s 慢 ping 完成
+            c2 = TestClient(relay_app)
+            stop_result["stop"] = c2.post(
+                "/api/providers/nimslow/probe/stop", headers=hdr).json()
+
+        t = threading.Thread(target=stopper, daemon=True)
+        t.start()
+        with client.stream("POST", "/api/providers/nimslow/probe",
+                           headers=hdr, json={"stream": True}) as resp:
+            lines = [x for x in resp.iter_lines() if x.strip()]
+        t.join(timeout=15)
+
+        stop = stop_result.get("stop")
+        assert stop == {"stopped": True}, f"stop 端点: {stop_result}"
+        parsed = [json.loads(x) for x in lines]
+        final = parsed[-1]
+        assert final["done"] is True and final["cancelled"] is True, final
+        assert final["written"] is False and final["skipped"] > 0, \
+            f"取消后不得写回清单且应记录未测数: {final}"
+        pings = [x for x in fake_upstream.RECEIVED if x["body"].get("model") == "m-slow"]
+        assert len(pings) < 8, f"取消后服务端仍打满 8 个 ping: {len(pings)}"
+        gp = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "nimslow"]
+        assert gp[0]["models"] == ["m-slow"] * 8, "取消不动模型清单"
+    finally:
+        client.delete("/api/providers/nimslow", headers=hdr)
+
+
+# ---------------------------------------------------------------- R91 读超时 ≠ 连接失败：慢模型不触发整轮放弃
+def test_r91_probe_slow_upstream_readtimeout_is_transient(client, hdr, upstream_port, monkeypatch):
+    """gateway 把 httpx 异常分两类：连接层（拒绝/代理不可用/ConnectTimeout）→ 502 connfail；
+    读/写超时（请求已发出、上游只是慢：NIM 冷启动、代理链路慢）→ 504「上游响应超时」。
+    探测把 504 归 transient：模型保留、不计入「连续 3 个 connfail」放弃计数。
+    旧逻辑把所有超时算 connfail，3 个慢模型就把整轮探测掐死（实测 8800 代理场景复现过）。"""
+    import app.admin as A
+    import httpx
+    monkeypatch.setattr(A, "PROBE_PING_TIMEOUT", httpx.Timeout(1.0, connect=1.0))
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "nimslowup", "name": "NIM慢上游(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-slow3", "m-slow3b", "m-slow3c"]})
+    assert r1.status_code == 200, r1.text
+    try:
+        rp = client.post("/api/providers/nimslowup/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        assert j["connect_fail"] is False, \
+            f"上游慢（读超时）不得判「连不通上游」整轮放弃: {j}"
+        assert j["key_error"] is False and j["cancelled"] is False
+        assert j["skipped"] == 0, "3 个慢模型都应测完，不提前收工"
+        assert j.get("connfails") == [], f"读超时不算连接级 connfail: {j.get('connfails')}"
+        assert sorted(j.get("transient") or []) == ["m-slow3", "m-slow3b", "m-slow3c"], \
+            f"慢模型应进 transient（保留不误删）: {j}"
+        assert j["kept"] == ["m-slow3", "m-slow3b", "m-slow3c"] and j["written"] is False
+        gp = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+              if p["platform"] == "nimslowup"]
+        assert gp[0]["models"] == ["m-slow3", "m-slow3b", "m-slow3c"], "慢模型保留不删"
+    finally:
+        client.delete("/api/providers/nimslowup", headers=hdr)

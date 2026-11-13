@@ -54,6 +54,7 @@ app.state.registry = tenants
 app.state.tenants = tenants
 app.state.store = store
 app.state.gw = gw
+app.state.probes = {}   # 平台「测试」探测任务：{platform: SimpleNamespace(cancel=asyncio.Event)}
 
 app.add_middleware(
     CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"],
@@ -350,7 +351,9 @@ if STATIC_DIR.exists():
 async def index():
     page = STATIC_DIR / "index.html"
     if page.exists():
-        return FileResponse(str(page))
+        # no-store：控制台页永远取最新——服务重启后旧标签页残留的老 JS（探测进度/取消逻辑）
+        # 会与服务端新行为对不上（症状：探测卡「开始…」、取消无效），刷新即愈
+        return FileResponse(str(page), headers={"Cache-Control": "no-store"})
     return PlainTextResponse("llm-relay 已启动，但 app/static/index.html 缺失。", status_code=500)
 
 

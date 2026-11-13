@@ -1,6 +1,7 @@
 """管理 API：上游平台 CRUD、模型探测、用量统计、设置。"""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import html as html_mod
 import json
@@ -10,12 +11,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+import httpx
 
 from . import auth as A
 from . import config
 from . import geoip as G
 from . import mailer as M
+from .gateway import UpstreamError
 from .registry import Upstream, fetch_models
 
 router = APIRouter(prefix="/api")
@@ -399,36 +402,225 @@ async def test_provider(platform: str, request: Request, _: None = Depends(auth)
     if not up.api_keys:
         raise HTTPException(400, "该平台还没有配置 api key")
     body = await request.json() if await request.body() else {}
-    model = (body.get("model") or (up.models[0] if up.models else "")).strip()
+    model = (body.get("model") or "").strip()
     if not model:
-        raise HTTPException(400, "该平台没有登记模型，先点『拉取模型』或用 ?model= 指定")
+        # 没指定模型时按登记顺序逐个试（最多 5 个）——NVIDIA NIM 这类按账号授权模型清单的
+        # 平台，登记列表里的首个模型未必对该 key 开放（404 "Function not found for account"），
+        # 试到第一个通的才算平台可用。
+        candidates = up.models[:5]
+        if not candidates:
+            raise HTTPException(400, "该平台没有登记模型，先点『拉取模型』或用 ?model= 指定")
+    else:
+        candidates = [model]
 
     url = up.url_for("chat" if up.type == "openai" else "messages")
-    if up.type == "openai":
-        payload: dict[str, Any] = {
-            "model": model, "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1, "stream": False,
-        }
+    tried: list[str] = []
+    last_err = ""
+    for cand in candidates:
+        if up.type == "openai":
+            payload: dict[str, Any] = {
+                "model": cand, "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1, "stream": False,
+            }
+        else:
+            payload = {"model": cand, "max_tokens": 1,
+                       "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
+        t0 = time.perf_counter()
+        try:
+            resp = await gw.send(_reg(request), up, url, payload, stream=False)
+        except Exception as exc:  # noqa: BLE001
+            tried.append(cand)
+            last_err = f"{cand}: {str(exc)[:200]}"
+            continue
+        try:
+            data = resp.json()
+        finally:
+            with contextlib.suppress(Exception):
+                await resp.aclose()
+        usage = data.get("usage") or {}
+        model = cand
+        if len(tried) > 1:
+            tried = []
+        break
     else:
-        payload = {"model": model, "max_tokens": 1,
-                   "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
-    t0 = time.perf_counter()
-    try:
-        resp = await gw.send(_reg(request), up, url, payload, stream=False)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "latency_ms": int((time.perf_counter() - t0) * 1000),
-                "error": str(exc)[:500]}
-    try:
-        data = resp.json()
-    finally:
-        with contextlib.suppress(Exception):
-            await resp.aclose()
-    usage = data.get("usage") or {}
+        return {"ok": False, "latency_ms": 0,
+                "error": f"试了 {len(candidates)} 个模型都不可用。" + (last_err or "")[:400]}
     return {
         "ok": True, "latency_ms": int((time.perf_counter() - t0) * 1000),
         "model": model, "http_status": resp.status_code,
         "usage": usage, "sample": str(data)[:400],
+        **({"tried": tried} if len(tried) > 1 else {}),
     }
+
+
+# 探测 ping 专用短超时：连不通的上游（如本机需要代理才到得了 api.nvidia.com）
+# 不能按 300s 平台超时干等——每个模型 20s 封顶，连不通时第一个模型就快速放弃整轮探测。
+PROBE_PING_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+
+async def _client_gone_async(request: Request) -> bool:
+    """客户端是否已断开（点取消/关页面）。uvicorn 客户端断开后不会取消 app task、
+    只是静默吞掉后续 send，所以探测循环必须自己查，否则「取消」后服务端还在空跑。
+    0.1s 超时兜底（TestClient 语义下 receive 会挂起，不能无限等）。"""
+    try:
+        return await asyncio.wait_for(request.is_disconnected(), 0.1)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _probe_model(gw, reg, up, url: str, m: str) -> tuple:
+    """ping 单个模型，返回 (result, code, reason)；result ∈ ok/removed/transient/keyerr/connfail。"""
+    if up.type == "openai":
+        payload: dict[str, Any] = {"model": m,
+                                   "messages": [{"role": "user", "content": "ping"}],
+                                   "max_tokens": 1, "stream": False}
+    else:
+        payload = {"model": m, "max_tokens": 1,
+                  "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
+    try:
+        resp = await gw.send(reg, up, url, payload, stream=False,
+                             timeout=PROBE_PING_TIMEOUT)
+        with contextlib.suppress(Exception):
+            await resp.aclose()
+        return "ok", resp.status_code, ""
+    except UpstreamError as exc:
+        if "连接上游失败" in exc.body:      # 连接级失败（超时/拒绝/无代理），不是上游真实 HTTP 响应
+            return "connfail", 0, exc.body[:160]
+        if exc.status in (401, 403):
+            return "keyerr", exc.status, exc.message()[:160]
+        if exc.status in (404, 400):
+            return "removed", exc.status, exc.message()[:160]
+        return "transient", exc.status, exc.message()[:160]
+    except Exception as exc:  # noqa: BLE001
+        return "connfail", 0, str(exc)[:160]
+
+
+async def _key_alive(gw, up) -> bool:
+    """探测「key 本身是否可用」：用同一 client（同代理）GET {base_url}/models。
+
+    NVIDIA NIM 的 chat 401「Unauthorized access」可能是单模型（function）级未授权，
+    而 /models 目录接口仍 200——这种情况不是 key 坏了，不该整轮叫 key 级错误。"""
+    cli = gw.client_for(up)
+    try:
+        resp = await cli.get(up.base_url.rstrip("/") + "/models",
+                             headers={"Authorization": "***" + up.api_keys[0]},
+                             timeout=httpx.Timeout(10.0, connect=10.0))
+        return resp.status_code < 400
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@router.post("/providers/{platform}/probe")
+async def probe_provider(platform: str, request: Request, _: None = Depends(auth)):
+    """探测全部已登记模型并把可用清单写回：每个模型 ping 一条（max_tokens=1）。
+    - 2xx（含网关瞬时重试后成功）→ 保留；
+    - 模型级 404/400（NVIDIA NIM「Function not found for account」= 账号未授权这类）→ 移除并写回；
+    - 429/5xx（重试后仍失败，疑似瞬时故障）→ 保留不误删，transient 里列出；
+    - key 级 401/403 → 提前停止（剩下的测了也没意义）、一律保留不动，只报 key_error。
+    被移除的模型随时可「拉取模型」恢复（拉的是全量目录）。
+    body {"stream": true} 时返回 NDJSON 实时进度流（每行一个模型结果，末行 done + 汇总）。"""
+    reg = _reg(request)
+    gw = request.app.state.gw
+    up = reg.find(platform)
+    if not up:
+        raise HTTPException(404, f"平台 {platform} 不存在")
+    if not up.api_keys:
+        raise HTTPException(400, "该平台还没有配置 api key")
+    models = up.models[:300]
+    if not models:
+        raise HTTPException(400, "该平台没有登记模型，先点『拉取模型』")
+    body = {}
+    raw_body = await request.body()
+    if raw_body:
+        with contextlib.suppress(json.JSONDecodeError):
+            body = json.loads(raw_body) or {}
+    url = up.url_for("chat" if up.type == "openai" else "messages")
+    # 探测任务句柄：显式「停止」（POST /probe/stop）置 cancel 事件；
+    # uvicorn 客户端断开不会取消 app task，is_disconnected 只作尽力而为的补充检查
+    job = SimpleNamespace(cancel=asyncio.Event())
+    request.app.state.probes[platform] = job
+
+    async def probe_events():
+        kept, removed, transient = [], [], []
+        connfails: list[str] = []
+        key_error, connect_fail, cancelled, skipped = False, False, False, 0
+        conn_reason, consec_fail = "", 0
+        total = len(models)
+        try:
+          for i, m in enumerate(models):
+            yield {"i": i + 1, "total": total, "model": m, "phase": "start"}
+            res, code, reason = await _probe_model(gw, reg, up, url, m)
+            if res == "keyerr":
+                # 401/403 先分清是 key 坏了还是「这个模型没权限」：
+                # 同一 key 能列出 /models 目录 → key 没问题，单模型未授权 → 按「移除」处理继续探测
+                if await _key_alive(gw, up):
+                    res, reason = "removed", f"{code}: 无此模型授权（key 可用，该模型未开通）"
+            if res == "ok":
+                kept.append(m)
+                consec_fail = 0
+            elif res == "removed":
+                removed.append({"model": m, "reason": reason})
+                consec_fail = 0
+            elif res == "transient":
+                transient.append(m)
+                kept.append(m)
+                consec_fail = 0
+            elif res == "connfail":
+                # 连不通（超时/拒绝/代理抖动）：模型保留不删；
+                # 容忍前 2 个（代理可能瞬时抖动），连续 3 个才算上游整体不可达 → 整轮快速放弃
+                connfails.append(m)
+                kept.append(m)
+                consec_fail += 1
+                if consec_fail >= 3:
+                    connect_fail = True
+                    conn_reason = reason
+                    skipped = total - i - 1
+                    break
+            else:  # keyerr：确认 key 级错误，后面全都会 401/403，提前收工
+                key_error = True
+                kept.append(m)
+                skipped = total - i - 1
+                break
+            yield {"i": i + 1, "total": total, "model": m,
+                   "result": res, "code": code, "reason": reason}
+            await asyncio.sleep(0.3)   # 限流余量（NVIDIA 免费档 40 RPM）
+            if job.cancel.is_set() or await _client_gone_async(request):
+                # 用户点了「取消」（显式 stop）或客户端已断开：停止继续 ping，也不写回模型清单
+                cancelled = True
+                skipped = total - i - 1
+                break
+        finally:
+            # 本轮跑完（含取消/放弃）清掉 job，stop 端点对已结束探测返回 stopped:false
+            if getattr(request.app.state, "probes", {}).get(platform) is job:
+                del request.app.state.probes[platform]
+        written = False
+        if removed and not key_error and not connect_fail and not cancelled:
+            reg.set_models(platform, kept)
+            written = True
+        yield {"done": True, "kept": kept, "removed": removed, "transient": transient,
+               "connfails": connfails,
+               "key_error": key_error, "connect_fail": connect_fail,
+               "connect_fail_reason": conn_reason,
+               "cancelled": cancelled, "skipped": skipped, "written": written}
+
+    if body.get("stream"):
+        async def gen():
+            async for ev in probe_events():
+                yield json.dumps(ev, ensure_ascii=False) + "\n"
+        return StreamingResponse(gen(), media_type="application/x-ndjson")
+    events = [ev async for ev in probe_events()]
+    return events[-1]
+
+
+@router.post("/providers/{platform}/probe/stop")
+async def probe_stop(platform: str, request: Request, _: None = Depends(auth)):
+    """显式停止某平台正在进行的探测（前端「取消」按钮调这个）。
+    停止后：不再继续 ping，剩余模型记入 skipped，模型清单不写回。"""
+    job = getattr(request.app.state, "probes", {}).get(platform)
+    if job is None:
+        return {"stopped": False}
+    job.cancel.set()
+    return {"stopped": True}
 
 
 @router.get("/models")
