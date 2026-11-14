@@ -76,6 +76,10 @@ def session_expiry() -> str:
 
 def new_api_key() -> str:
     return "sk-relay-" + secrets.token_urlsafe(30)
+def new_password() -> str:
+    """管理员重置租户密码用的自动生成密码（12 位，URL 安全字符；长度>=8 满足强度校验）。"""
+    return secrets.token_urlsafe(9)
+
 
 
 def mask_key(key: str) -> str:

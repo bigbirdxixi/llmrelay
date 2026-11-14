@@ -153,3 +153,21 @@ def send_test_email(store, to_email: str) -> dict:
     if r["ok"] and r["mode"] == "log":
         r["error"] = "当前为日志模式：没有实际发信，测试内容已写入服务器日志（搜 [mail/log]）。"
     return r
+
+
+def send_password_reset_email(store, to_email: str, new_password: str,
+                              base_url: str, from_name: str = "LLM Relay") -> dict:
+    """发「密码已被管理员重置」邮件（v1.1.0：重置密码自动生成后通过邮件给账号本人）。
+
+    日志模式下新密码只写进服务器日志（搜 [mail/log]）；smtp 模式发真邮件。
+    返回值同 _send：{"mode","ok","error"}。"""
+    subject = f"{from_name}：你的密码已被管理员重置"
+    body = (f"你好，\n\n{from_name} 的中转网关管理员刚刚重置了你账号（{to_email}）的登录密码。\n\n"
+            f"新密码：{new_password}\n"
+            f"控制台：{base_url}\n\n"
+            f"请尽快登录并在「设置 → 修改密码」改成只有你自己知道的密码。\n"
+            f"如果不是你本人操作，请立即联系管理员。\n")
+    r = _send(store, to_email, subject, body)
+    if r["ok"] and r["mode"] == "log":
+        r["error"] = "当前为日志模式：新密码已写入服务器日志（搜 [mail/log]）。"
+    return r

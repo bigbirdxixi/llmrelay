@@ -306,7 +306,7 @@ const BASE = (function(){
 /* 管理员看别的账号时，给数据类接口自动带上 tenant */
 function withTenant(path){
   if(!S.tenant) return path;
-  if(!/^\/api\/(overview|stats|models|providers|health)/.test(path)) return path;
+  if(!/^\/api\/(overview|stats|models|providers|health|settings)/.test(path)) return path;
   return path + (path.indexOf("?") >= 0 ? "&" : "?") + "tenant=" + encodeURIComponent(S.tenant);
 }
 
@@ -2018,7 +2018,7 @@ async function renderUsers(){
     <td class="mono dim">${esc((u.last_login||"-").replace("T"," ").slice(0,19))}</td>
     <td class="num">
       <button class="btn sm" onclick="viewTenant(${u.id})">看数据</button>
-      <button class="btn sm" onclick="resetUserPw(${u.id})">改密码</button>
+      ${u.id !== r.me ? `<button class="btn sm" onclick="resetUserPw(${u.id})">重置密码</button>` : ""}
       ${u.id === r.me
         ? '<span class="dim" style="font-size:12px">当前登录</span>'
         : `<button class="btn sm" onclick="toggleRole(${u.id}, '${u.role}')">${u.role === "admin" ? "取消管理员" : "设为管理员"}</button>
@@ -2038,6 +2038,7 @@ async function renderUsers(){
       <div class="dim" style="font-size:12px;margin-top:10px;line-height:1.8">
         点「看数据」= 把顶部的数据视角切到该账号（概览/用量/日志/上游平台都跟着变）。
         新建账号时会自动生成一把该账号的 API Key；key 只有账号本人能复制（管理员也看不到明文）。
+        「重置密码」= 系统自动生成新密码并邮件发给账号本人；管理员不能直接给对方设密码。
         自己的账号不能禁用/降级；最后一个管理员也不能被降级（至少保留一个管理员）。
       </div>
     </div>`;
@@ -2073,11 +2074,14 @@ async function newUser(){
 }
 
 async function resetUserPw(id){
-  const pw = prompt("输入新密码（至少 8 位）：");
-  if(!pw) return;
-  try{ await api(`/api/users/${id}`, { method: "PATCH", body: { password: pw } });
-    toast("密码已重置，对方需要重新登录", "ok"); renderUsers(); }
-  catch(e){ toast("失败：" + e.message, "err"); }
+  if(!confirm("重置该账号的密码？\n\n系统会自动生成新密码并邮件发给账号本人；旧密码立即失效，对方需要重新登录。")) return;
+  try{
+    const r = await api(`/api/users/${id}/reset-password`, { method: "POST" });
+    if(r.sent_via === "log") toast("密码已重置。当前发信为日志模式：新密码已写入服务器日志（搜 [mail/log]）", "ok");
+    else if(r.mail_ok) toast("密码已重置，新密码已邮件发给对方", "ok");
+    else toast("密码已重置，但邮件发送失败：" + (r.mail_error || "未知原因"), "err");
+    renderUsers();
+  }catch(e){ toast("重置失败：" + e.message, "err"); }
 }
 
 async function toggleRole(id, role){
@@ -2211,6 +2215,7 @@ async function changePassword(){
 async function renderSettings(){
   const box = $("#tab-settings");
   const s = await api("/api/settings");
+  const ro = !!s.viewing_user;   // 管理员切到租户视角：key 清单只读
   const base = location.origin + BASE;
   const code = (t) => `<div class="code">${esc(t)}</div>`;
   const bpPanel = !s.is_admin ? "" : `
@@ -2284,31 +2289,34 @@ async function renderSettings(){
     </div>`;
   box.innerHTML = `
     <div class="panel">
-      <h2>我的 API Key <small>下游客户端用这个连中转站</small>
+      <h2>${ro ? "API Key · " + esc(s.viewing_user.email) + " <small>只读（管理员视角）</small>"
+               : "我的 API Key <small>下游客户端用这个连中转站</small>"}
         <span style="flex:1"></span>
-        <button class="btn sm primary" onclick="newKey()">+ 新建 Key</button>
+        ${ro ? "" : '<button class="btn sm primary" onclick="newKey()">+ 新建 Key</button>'}
       </h2>
       <div class="dim" style="font-size:12px;margin-bottom:10px">
-        每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。
-        ${s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : ""}
+        ${ro
+          ? "你正在查看这个账号的 key 清单（掩码、只读）。创建 / 复制 / 改过期 / 删除 key 只能由账号本人操作，管理员也取不回、改不了对方的 key。"
+          : "每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。" +
+            (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : "")}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
         <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th>
       </tr></thead><tbody>${(s.api_keys||[]).map(k => {
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
         return `<tr>
-        <td class="mono">${esc(k.key)}
-          <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button></td>
+        <td class="mono">${esc(k.key)}${ro ? "" : `
+          <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button>`}</td>
         <td>${esc(k.label || "-")}</td>
         <td class="mono dim">${esc((k.created_at||"").replace("T"," ").slice(0,19))}</td>
         <td class="mono ${expired ? "num" : "dim"}">${k.expires_at
           ? `<span style="color:${expired ? "var(--red,#f87171)" : "inherit"}">${esc(k.expires_at.replace("T"," ").slice(0,16))}${expired ? " · 已过期" : ""}</span>`
           : "永不过期"}</td>
         <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
-        <td class="num"><button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
-          <button class="btn sm danger" onclick="delKey(${k.id})">删除</button></td>
+        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
+          <button class="btn sm danger" onclick="delKey(${k.id})">删除</button>`}</td>
       </tr>`;
-      }).join("")}</tbody></table>` : '<div class="empty">还没有 key，点右上角新建</div>'}
+      }).join("")}</tbody></table>` : `<div class="empty">${ro ? "该账号还没有 key" : "还没有 key，点右上角新建"}</div>`}
     </div>
 
     <div class="panel">

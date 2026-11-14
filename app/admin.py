@@ -847,14 +847,24 @@ async def stats_export(request: Request, days: int = 30, _: None = Depends(auth)
 @router.get("/settings")
 async def settings(request: Request, _: None = Depends(auth)):
     user = _user(request)
+    store = request.app.state.store
+    viewing = user
+    # 管理员切数据视角（?tenant=<id>）时，key 清单显示该账号的（掩码、只读）；key 仍只有账号本人能操作
+    if user.get("role") == "admin":
+        tid = (request.query_params.get("tenant") or "").strip()
+        if tid.isdigit():
+            tu = store.get_user(int(tid))
+            if tu:
+                viewing = tu
     keys = [{"id": k["id"], "key": A.mask_key(k["key"]), "label": k["label"],
              "created_at": k["created_at"], "last_used": k["last_used"],
              "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at")}
-            for k in request.app.state.store.list_api_keys(user["id"])]
+            for k in store.list_api_keys(viewing["id"])]
     return {
         "version": config.VERSION,
         "user": A.public_user(user),
         "is_admin": user.get("role") == "admin",
+        "viewing_user": (A.public_user(viewing) if viewing["id"] != user["id"] else None),
         "api_keys": keys,
         "base_url": f"http://{config.HOST}:{config.PORT}",
         "base_path": config.get_base_path(),
@@ -1233,13 +1243,33 @@ async def update_user(user_id: int, request: Request, _: None = Depends(auth)):
         if role != "admin" and target["role"] == "admin" and _other_active_admins() == 0:
             raise HTTPException(400, "这是最后一个管理员，不能降级")
         fields["role"] = role
-    if body.get("password"):
-        fields["pass_hash"] = A.hash_password(A.check_password_strength(str(body["password"])))
-        store.delete_user_sessions(user_id)
+    if body.get("password") not in (None, ""):
+        raise HTTPException(400, "不能直接设置别的账号的密码：请用 POST /api/users/<id>/reset-password（系统自动生成新密码并发邮件给账号本人）")
     if not fields:
         raise HTTPException(400, "没有要改的字段")
     store.update_user(user_id, **fields)
     return {"ok": True, "user": A.public_user(store.get_user(user_id))}
+
+
+@router.post("/users/{user_id}/reset-password")
+async def reset_user_password(user_id: int, request: Request, _: None = Depends(auth)):
+    """v1.1.0：管理员不能直接设租户密码——系统自动生成新密码、邮件发给账号本人。
+
+    - 新密码永不进响应（避免经代理日志/管理员浏览器泄露）
+    - 对方已有会话立即失效，需重新登录
+    - 发信为日志模式时，新密码写入服务器日志（搜 [mail/log]）"""
+    A.require_admin(request)
+    store = request.app.state.store
+    target = store.get_user(user_id)
+    if not target:
+        raise HTTPException(404, "账号不存在")
+    new_pw = A.new_password()
+    store.update_user(user_id, pass_hash=A.hash_password(new_pw))
+    store.delete_user_sessions(user_id)
+    mail = M.send_password_reset_email(store, target["email"], new_pw,
+                                       str(request.base_url).rstrip("/"))
+    return {"ok": True, "user": A.public_user(target),
+            "sent_via": mail["mode"], "mail_ok": mail["ok"], "mail_error": mail.get("error", "")}
 
 
 @router.delete("/users/{user_id}")

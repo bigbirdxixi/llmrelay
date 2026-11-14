@@ -722,7 +722,7 @@ def test_r39_accounts_register_login_isolation(client, hdr):
 
 
 # ---------------------------------------------------------------- R40 账号管理：建号/禁用/改密
-def test_r40_admin_user_management(client, hdr):
+def test_r40_admin_user_management(client, hdr, monkeypatch):
     r = client.post("/api/users", headers=hdr, json={
         "email": "carol@test.local", "password": "carol-password", "role": "user"})
     assert "api_key" not in r.json(), "管理员建号不应拿到租户的 key"
@@ -751,12 +751,22 @@ def test_r40_admin_user_management(client, hdr):
                         json={"status": "active"}).status_code == 200
     assert client.get("/v1/models", headers={"authorization": f"Bearer {carol_key}"}).status_code == 200
 
-    # 重置密码
+    # 重置密码（v1.1.0）：管理员不能再直接设密码
     assert client.patch(f"/api/users/{uid}", headers=hdr,
-                        json={"password": "carol-new-password"}).status_code == 200
+                        json={"password": "carol-new-password"}).status_code == 400
+    import app.mailer as _M
+    captured = {}
+    monkeypatch.setattr(_M, "send_password_reset_email",
+                        lambda st_, to, pw, base, **kw: captured.update(pw=pw, to=to) or
+                        {"mode": "log", "ok": True, "error": ""})
+    rr = client.post(f"/api/users/{uid}/reset-password", headers=hdr)
+    assert rr.status_code == 200, rr.text
+    assert captured["to"] == "carol@test.local"
+    new_pw = captured["pw"]
+    assert new_pw and new_pw not in rr.text, "新密码自动生成且不能出现在响应里"
     r = client.post("/api/auth/login", json={
-        "email": "carol@test.local", "password": "carol-new-password"})
-    assert r.status_code == 200
+        "email": "carol@test.local", "password": new_pw})
+    assert r.status_code == 200, "重置后的新密码可登录"
     client.cookies.clear()
 
     # 不能把自己禁用/删除
@@ -2917,3 +2927,36 @@ def test_r107_admin_cannot_copy_tenant_key(client, hdr):
     mine = s["api_keys"][0]["id"]
     assert client.post(f"/api/keys/{mine}/reveal", headers=hdr,
                        json={"password": "not-my-password"}).status_code == 401
+# ---------------------------------------------------------------- R108 管理员视角看租户 key 清单（只读、掩码）
+def test_r108_settings_tenant_view_readonly(client, hdr):
+    from app.main import store as _st
+    r = client.post("/api/users", headers=hdr, json={
+        "email": "henry@test.local", "password": "henry-password"})
+    assert r.status_code == 200
+    hid = r.json()["user"]["id"]
+    hkey = _st.reveal_api_key(_st.list_api_keys(hid)[0]["id"])
+    assert hkey.startswith("sk-relay-")
+
+    # 管理员 ?tenant=hid → 该账号的 key 清单（掩码），viewing_user 指明在看谁
+    s = client.get(f"/api/settings?tenant={hid}", headers=hdr).json()
+    assert s["viewing_user"] and s["viewing_user"]["email"] == "henry@test.local"
+    assert len(s["api_keys"]) == 1
+    assert "…" in s["api_keys"][0]["key"] and s["api_keys"][0]["key"] != hkey, "只给掩码"
+
+    # 不带 tenant / all / 不存在的 id → 看自己的
+    assert client.get("/api/settings", headers=hdr).json()["viewing_user"] is None
+    for q in ("all", "999999"):
+        assert client.get(f"/api/settings?tenant={q}", headers=hdr).json()["viewing_user"] is None, q
+
+    # 普通账号带 tenant 参数 → 后端强制只看自己
+    login = client.post("/api/auth/login", json={"email": "henry@test.local", "password": "henry-password"})
+    assert login.status_code == 200
+    cc = {"relay_session": login.cookies.get("relay_session")}
+    s4 = client.get("/api/settings?tenant=1", cookies=cc).json()
+    assert s4["viewing_user"] is None and len(s4["api_keys"]) == 1
+
+    # 视角不改变权限：管理员视角下 reveal 他人 key 仍 404（cookie 优先于 Bearer，先清掉 henry 的会话）
+    client.cookies.clear()
+    kid = _st.list_api_keys(hid)[0]["id"]
+    assert client.post(f"/api/keys/{kid}/reveal", headers=hdr,
+                       json={"password": "test-password"}).status_code == 404
