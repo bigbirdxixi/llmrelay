@@ -3,7 +3,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-VER="1.0.2"
+VER="1.1.0"
 STAMP="$(date +%Y%m%d-%H%M)"
 NAME="llm-relay-${VER}"
 STAGE=".pkgbuild/${NAME}"

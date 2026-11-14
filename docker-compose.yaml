@@ -19,7 +19,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: llm-relay:${RELAY_VERSION:-1.0.2}
+    image: llm-relay:${RELAY_VERSION:-1.1.0}
     container_name: llm-relay
     restart: unless-stopped
     init: true                      # 让 PID 1 正确转发 SIGTERM，流式连接能优雅退出
