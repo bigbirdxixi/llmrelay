@@ -109,17 +109,21 @@ docker compose build && docker compose up -d
 
 #### 主密钥（config/master.key，v1.1.0 起）
 
-API Key 自 v1.1.0 起加密存储（AES-GCM）。解密密钥 = 主密钥 S，来源优先级：
+API Key 自 v1.1.0 起加密存储（AES-GCM）；各账号的上游平台 key 自 v1.1.1 起
+加密存在 `config/tenants/u<id>/upstreams.json`（`enc_keys` 字段，每账号一把由 S
+派生的 K_t）。解密密钥 = 主密钥 S，来源优先级：
 
 1. 环境变量 `RELAY_KEY_SECRET`（hex/base64，64 位 hex 推荐——自建后写进 compose 的 `.env`，不进数据目录）
 2. `config/master.key`（首次启动自动生成，0600；日志里会大声提醒一次）
 
 铁律：
 
-- **S 丢失 = 所有已加密的 API Key 永久不可恢复**（服务会拒绝启动，fail-fast 而不是悄悄换一把钥匙）
+- **S 丢失 = 所有已加密的 API Key 与上游 key 永久不可恢复**（服务会拒绝启动，fail-fast 而不是悄悄换一把钥匙）
 - S **不进数据备份、不进发布包**（上面的备份命令已 `--exclude`）；单独记到密码管理器/纸质
+- 全新部署（没有任何加密材料）可以直接启动：S 自动生成 0600；只有「已有加密材料 + 找不到 S」才拒绝启动
 - 恢复备份后先放好原 S 再起服务：`docker compose up -d`
 - 文件权限：`chmod 600 /opt/llm-relay/config/master.key`（同目录的 `upstreams.json`、`relay.db`、`.env` 也建议 600）
+- 升级回滚：v1.1.1 起租户配置是加密的（v1.1.0 代码读不了 `enc_keys`）——回滚要一并恢复升级前的 config/ 备份
 
 ### 7. 自检
 

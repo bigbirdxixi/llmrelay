@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Optional
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
+
+from .crypto import KeyCipher
+
+log = logging.getLogger("relay")
 
 
 class Upstream(BaseModel):
@@ -19,6 +24,7 @@ class Upstream(BaseModel):
     base_url: str  # 例如 https://api.deepseek.com/v1 或 https://api.anthropic.com
     api_key: str = ""  # 单 key 便捷写法
     api_keys: list[str] = Field(default_factory=list)  # 多 key 轮换
+    enc_keys: list[str] = Field(default_factory=list)  # v1.1.1：加密存储的 key（base64url AES-GCM 密文，K_t 派生自主密钥 S）
     models: list[str] = Field(default_factory=list)  # 该平台提供的模型名
     model_map: dict[str, str] = Field(default_factory=dict)  # 客户端模型名 -> 上游模型名
     extra: dict = Field(default_factory=dict)  # chat_path / messages_path / headers / default_max_tokens...
@@ -71,9 +77,10 @@ class Upstream(BaseModel):
 
 
 class Registry:
-    def __init__(self, upstreams_file: Path, clients_file: Path):
+    def __init__(self, upstreams_file: Path, clients_file: Path, cipher: Optional[KeyCipher] = None):
         self.upstreams_file = upstreams_file
         self.clients_file = clients_file
+        self._cipher = cipher  # v1.1.1：该租户的 K_t（KeyCipher）；None=不加密（测试/老代码直建）
         self._lock = threading.RLock()
         self._rr: dict[str, int] = {}
         self._cooldown: dict[tuple[str, int], float] = {}
@@ -97,8 +104,26 @@ class Registry:
                     raw = json.loads(text)
             self._raw = raw
             marker = [x for x in raw if isinstance(x, dict) and x.get("_kind") == "aggregates"]
-            self.upstreams = [Upstream.model_validate(x) for x in raw
-                              if not (isinstance(x, dict) and x.get("_kind") == "aggregates")]
+            ups: list[Upstream] = []
+            for x in raw:
+                if isinstance(x, dict) and x.get("_kind") == "aggregates":
+                    continue
+                enc = x.get("enc_keys") if isinstance(x, dict) else None
+                if enc:
+                    # v1.1.1：密文行——用本租户 K_t 解密进内存（磁盘不留明文）
+                    dec: list[str] = []
+                    if self._cipher is not None:
+                        try:
+                            dec = [self._cipher.open_str(s) for s in enc if isinstance(s, str)]
+                        except Exception:
+                            log.warning("平台 %s 的加密 key 解不开（主密钥不对或密文损坏），按无 key 处理",
+                                        x.get("platform"))
+                    elif not self._cipher:
+                        log.warning("平台 %s 的 key 是加密存储，但本实例没有主密钥，按无 key 处理",
+                                    x.get("platform"))
+                    x = {**x, "api_key": "", "api_keys": dec}
+                ups.append(Upstream.model_validate(x))
+            self.upstreams = ups
             aggs = {}
             for mk in marker:
                 if isinstance(mk.get("aggregates"), dict):
@@ -136,8 +161,34 @@ class Registry:
                 pass
 
     # ---------- 持久化 ----------
+    def _encrypt_row(self, row: dict) -> dict:
+        """v1.1.1：落盘前把明文 key 换成密文（enc_keys）；磁盘不留明文。
+
+        已是密文行（无明文、有 enc_keys）原样保留，避免每次保存都重封 nonce；
+        标记项（_kind）与非 dict 行不动。
+        """
+        if not isinstance(row, dict) or row.get("_kind"):
+            return row
+        keys: list[str] = []
+        single = row.get("api_key")
+        if isinstance(single, str) and single.strip():
+            keys.append(single.strip())
+        for k in (row.get("api_keys") or []):
+            if isinstance(k, str) and k.strip() and k.strip() not in keys:
+                keys.append(k.strip())
+        if not keys and row.get("enc_keys"):
+            return row
+        out = dict(row)
+        if keys:
+            out["enc_keys"] = [self._cipher.seal_str(k) for k in keys]
+        out["api_key"] = ""
+        out["api_keys"] = []
+        return out
+
     def _write(self, rows: list[dict]) -> None:
         with self._lock:
+            if self._cipher is not None:
+                rows = [self._encrypt_row(r) for r in rows]
             self.upstreams_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.upstreams_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), "utf-8")

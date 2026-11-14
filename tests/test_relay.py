@@ -2960,3 +2960,185 @@ def test_r108_settings_tenant_view_readonly(client, hdr):
     kid = _st.list_api_keys(hid)[0]["id"]
     assert client.post(f"/api/keys/{kid}/reveal", headers=hdr,
                        json={"password": "test-password"}).status_code == 404
+# ---------------------------------------------------------------- R109 全新部署无 S 也能启动；租户上游 key 写入即加密落盘
+def test_r109_fresh_deploy_and_tenant_key_encryption(client, hdr):
+    """全新部署（无 master.key）直接启动；管理员写入的上游 key 磁盘上只有密文。"""
+    import json as _json
+    import secrets as _secrets
+    from app.main import store
+    from app import config as C
+
+    u1 = int(store.first_admin()["id"])
+    f = C.CONFIG_DIR / "tenants" / f"u{u1}" / "upstreams.json"
+    assert f.exists(), "首管理员租户文件应已存在（legacy 认领或空配置）"
+
+    # 拿一个假上游的 base_url（conftest 种子平台），造一个新平台
+    plats = client.get("/api/providers", headers=hdr).json()["data"]
+    base = next(p["base_url"] for p in plats if p["platform"] == "fake")
+    k = "up-" + _secrets.token_urlsafe(24)
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "vt109", "name": "v109", "type": "openai",
+        "base_url": base, "api_keys": [k], "models": ["vt109-m"]})
+    assert r.status_code == 200, r.text
+
+    # 磁盘无明文，只有密文
+    txt = f.read_text(encoding="utf-8")
+    assert k not in txt, "上游 key 明文不能落盘"
+    row = next(x for x in _json.loads(txt) if x.get("platform") == "vt109")
+    assert row["enc_keys"] and not row.get("api_keys") and row.get("api_key", "") == ""
+    # 新建 key 的响应回掩码，不回明文
+    assert k not in r.text
+
+    # 内存里解开了：relay 直接 200
+    rr = client.post("/v1/chat/completions", headers=hdr, json={
+        "model": "vt109/vt109-m", "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 4})
+    assert rr.status_code == 200, rr.text
+
+    # 全新部署的主密钥是自动生成的（0600）
+    assert C.MASTER_KEY_FILE.exists()
+
+    # 收尾：删掉测试平台，别污染其他用例
+    assert client.delete("/api/providers/vt109", headers=hdr).status_code == 200
+# ---------------------------------------------------------------- R110 加密文件跨重启/跨版本可直接启动
+def test_r110_encrypted_tenant_file_survives_restart(client, hdr):
+    """重启（或升到高版本）后，同一把 S 下 K_uid 解得开加密租户文件。"""
+    import json as _json
+    from app.main import store
+    from app.registry import Registry
+    from app.crypto import tenant_cipher
+    from app import config as C
+
+    u1 = int(store.first_admin()["id"])
+    f = C.CONFIG_DIR / "tenants" / f"u{u1}" / "upstreams.json"
+    rows = _json.loads(f.read_text(encoding="utf-8"))
+    assert any(x.get("enc_keys") for x in rows if isinstance(x, dict)), "应先有加密行（R109/lifespan 迁移）"
+
+    secret = C.MASTER_KEY_FILE.read_bytes()
+    clients = C.CONFIG_DIR / "tenants" / "_clients.json"
+    reg = Registry(f, clients, cipher=tenant_cipher(secret, u1))
+    assert any(u.api_keys for u in reg.upstreams), "重启后密文文件应解得开"
+    live_keys = {u.platform: len(u.api_keys) for u in reg.upstreams if u.api_keys}
+    assert live_keys, live_keys
+
+    # 换一个 uid 的域（K_9999）：同一份密文解不开 → 平台按无 key 降级、不崩
+    other = Registry(f, clients, cipher=tenant_cipher(secret, 9999))
+    for p, n in live_keys.items():
+        up = other.find(p)
+        assert up is not None and not up.api_keys, (p, n)
+# ---------------------------------------------------------------- R111 老版明文租户文件自动迁移（幂等）
+def test_r111_legacy_plaintext_tenant_file_migrated(client, hdr):
+    """v1.1.0 时代的明文租户文件：迁移后磁盘无明文、幂等、重开 Registry 仍可用。"""
+    import json as _json
+    from app.main import store
+    from app.registry import Registry
+    from app.tenants import migrate_one_tenant_file
+    from app.crypto import tenant_cipher
+    from app import config as C
+
+    u1 = int(store.first_admin()["id"])
+    f = C.CONFIG_DIR / "tenants" / f"u{u1}" / "upstreams.json"
+    rows = _json.loads(f.read_text(encoding="utf-8"))
+    rows.append({"platform": "vt111", "name": "legacy plain", "type": "openai",
+                 "base_url": "http://127.0.0.1:9", "api_key": "legacy-plain-up-key",
+                 "models": ["x"]})
+    f.write_text(_json.dumps(rows, ensure_ascii=False, indent=2), "utf-8")
+
+    secret = C.MASTER_KEY_FILE.read_bytes()
+    assert migrate_one_tenant_file(f, u1, secret) is True
+    txt = f.read_text(encoding="utf-8")
+    assert "legacy-plain-up-key" not in txt, "迁移后明文必须消失"
+    before = f.read_bytes()
+    assert migrate_one_tenant_file(f, u1, secret) is False, "迁移应幂等"
+    assert f.read_bytes() == before
+
+    reg = Registry(f, C.CONFIG_DIR / "tenants" / "_clients.json",
+                   cipher=tenant_cipher(secret, u1))
+    assert reg.find("vt111").api_keys == ["legacy-plain-up-key"], "迁移后 key 应能用"
+
+    # 收尾：删掉 vt111 行（enc 行原样保留，直接写文件，走下一轮热重载）
+    left = [x for x in _json.loads(f.read_text(encoding="utf-8"))
+            if x.get("platform") != "vt111"]
+    f.write_text(_json.dumps(left, ensure_ascii=False, indent=2), "utf-8")
+# ---------------------------------------------------------------- R112 K_t 域分离：A 租户密文 B 租户解不开
+def test_r112_kt_domain_separation(client):
+    import pytest
+    from cryptography.exceptions import InvalidTag
+    from app.crypto import tenant_cipher
+    from app import config as C
+
+    secret = C.MASTER_KEY_FILE.read_bytes()
+    c1, c2 = tenant_cipher(secret, 1), tenant_cipher(secret, 2)
+    blob = c1.seal_str("some-upstream-key")
+    assert c1.open_str(blob) == "some-upstream-key"
+    with pytest.raises(InvalidTag):
+        c2.open_str(blob)
+    # 同 uid 派生确定（无状态）：重新算一遍还能解
+    assert tenant_cipher(secret, 1).open_str(blob) == "some-upstream-key"
+# ---------------------------------------------------------------- R113 密文被篡改：不崩，平台降级为无 key
+def test_r113_tampered_ciphertext_degrades(client, hdr, tmp_path):
+    import json as _json
+    from app.main import store
+    from app.registry import Registry
+    from app.crypto import tenant_cipher
+    from app import config as C
+
+    u1 = int(store.first_admin()["id"])
+    f = C.CONFIG_DIR / "tenants" / f"u{u1}" / "upstreams.json"
+    rows = _json.loads(f.read_text(encoding="utf-8"))
+    assert any(isinstance(x, dict) and x.get("enc_keys") for x in rows)
+    # 复制一份到 tmp 再改坏（不碰活文件，避免 5s 热重载把活实例的平台弄丢 key）
+    copy = tmp_path / "tampered.json"
+    bad = _json.loads(_json.dumps(rows))
+    b = next(r for r in bad if isinstance(r, dict) and r.get("enc_keys"))
+    s0 = b["enc_keys"][0]
+    b["enc_keys"][0] = ("A" if s0[0] != "A" else "B") + s0[1:]
+    copy.write_text(_json.dumps(bad, ensure_ascii=False, indent=2), "utf-8")
+
+    secret = C.MASTER_KEY_FILE.read_bytes()
+    reg = Registry(copy, tmp_path / "c.json", cipher=tenant_cipher(secret, u1))
+    up = reg.find(b["platform"])
+    assert up is not None and not up.api_keys, "篡改的平台应降级为无 key（其他平台不受影响）"
+    others = [u for u in reg.upstreams if u.platform != up.platform and u.api_keys]
+    assert others, "同文件其他平台的 key 仍应解得开"
+# ---------------------------------------------------------------- R114 缺 S + 有加密租户配置 → fail-fast
+def test_r114_missing_master_secret_failfast(monkeypatch, tmp_path):
+    import pytest
+    import app.config as C
+    import app.crypto as CR
+    from app.tenants import has_encrypted_tenant_files
+
+    assert has_encrypted_tenant_files(C.CONFIG_DIR / "tenants", C.UPSTREAMS_FILE), \
+        "前面用例/迁移后应已有加密租户配置"
+    monkeypatch.delenv("RELAY_KEY_SECRET", raising=False)
+    monkeypatch.setattr(C, "MASTER_KEY_FILE", tmp_path / "nowhere-master.key")
+
+    class _FakeStore:
+        def has_encrypted_keys(self):
+            return False
+
+    with pytest.raises(RuntimeError):
+        CR.resolve_master_secret(_FakeStore(), extra_encrypted=True)
+    # 无加密材料时同样缺 S → 不炸（自动生成路径，全新部署保证）
+    got = CR.resolve_master_secret(_FakeStore(), extra_encrypted=False)
+    assert len(got) == 32 and (tmp_path / "nowhere-master.key").exists()
+# ---------------------------------------------------------------- R115 聚合标记行与密文共存 + GET 仍回掩码
+def test_r115_aggregates_and_mask_coexist(client, hdr):
+    import json as _json
+    from app.main import store
+    from app import config as C
+
+    r = client.post("/api/aggregates", headers=hdr, json={
+        "name": "vt115", "entries": ["fake/fake-gpt"]})
+    assert r.status_code == 200, r.text
+    f = C.CONFIG_DIR / "tenants" / f"u{int(store.first_admin()['id'])}" / "upstreams.json"
+    rows = _json.loads(f.read_text(encoding="utf-8"))
+    assert any(x.get("_kind") == "aggregates" and x["aggregates"].get("vt115") for x in rows), \
+        "聚合标记行应保留"
+    enc = [x for x in rows if isinstance(x, dict) and x.get("enc_keys")]
+    assert enc, "加密行应仍在"
+    # GET /api/providers 的 key 是掩码（既不是明文也不是原始密文）
+    d = client.get("/api/providers", headers=hdr).json()["data"]
+    fake = next(p for p in d if p["platform"] == "fake")
+    assert all("…" in k for k in fake["api_keys"]) and fake["api_keys"]
+    client.delete("/api/aggregates/vt115", headers=hdr)

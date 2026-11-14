@@ -19,7 +19,8 @@ from .admin import router as admin_router
 from .auth import _bearer as bearer_token
 from .auth import authenticate, current_user, tenant_of
 from .crypto import KeyCipher, resolve_master_secret
-from .tenants import TenantRegistries
+from .tenants import (TenantRegistries, has_encrypted_tenant_files,
+                      migrate_one_tenant_file, migrate_tenant_files)
 from .gateway import Gateway, error_response, new_request_id
 from .registry import Registry
 from .storage import Store
@@ -35,15 +36,29 @@ registry = tenants          # 兼容老代码/测试里的 registry.reload()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 密钥加密（v1.1.0）：先定主密钥再开服务——
-    # ① 库里已有加密 key 而 S 找不到了 → resolve_master_secret 直接 raise，拒绝启动（fail-fast）
-    # ② 新库/纯明文库且没配 S → 自动生成 config/master.key（0600）并大声警告
-    _secret = resolve_master_secret(store)
+    # 密钥加密（v1.1.0 下游 key / v1.1.1 租户上游 key）：先定主密钥再开服务——
+    # ① 已有加密材料（DB 加密 key 或租户配置加密 key）而 S 找不到了 → 拒绝启动（fail-fast）
+    # ② 全新部署（无任何加密材料）且没配 S → 自动生成 config/master.key（0600）并大声警告
+    _extra_enc = has_encrypted_tenant_files(config.CONFIG_DIR / "tenants", config.UPSTREAMS_FILE)
+    _secret = resolve_master_secret(store, extra_encrypted=_extra_enc)
     _cipher = KeyCipher(_secret)
     store.set_key_cipher(_cipher)
     _n = store.migrate_keys()
     if _n:
         log.warning("已把 %d 把历史明文 API Key 迁移为加密存储（key_mac/key_enc）", _n)
+    # v1.1.1：各租户上游配置里的明文 key 一次性加密（K_t 按 uid 派生，幂等）
+    tenants.set_secret(_secret)
+    # 老单体配置若还没被认领且已有第一个管理员 → 立即认领（拷贝会在 K_uid 域归一化）
+    if tenants.legacy_file is not None and tenants.legacy_file.exists() and not tenants.claimed:
+        _fa = store.first_admin()
+        if _fa:
+            tenants.get(int(_fa["id"]))
+    _tn = migrate_tenant_files(config.CONFIG_DIR / "tenants", _secret)
+    # 老 legacy 文件按 K_0 域加密（幂等；认领后它是历史遗留，get(0) 兜底实例与它同域自洽）
+    if tenants.legacy_file is not None and tenants.legacy_file.exists():
+        migrate_one_tenant_file(tenants.legacy_file, 0, _secret)
+    if _tn:
+        log.warning("已把 %d 份租户上游配置迁移为加密存储（enc_keys）", _tn)
 
     await gw.startup()
     watcher = asyncio.create_task(tenants.watch(5.0))

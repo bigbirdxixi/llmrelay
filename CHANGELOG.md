@@ -2,6 +2,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [Unreleased]（v1.1.1：上游 key 每租户加密）
+
+### 安全：上游平台 key 不再明文落盘
+- **各账号的上游配置 `config/tenants/u<id>/upstreams.json` 里的上游 key（OpenAI/Gemini/…）加密存储**：新增 `enc_keys` 字段（AES-GCM 密文，base64url），磁盘不留明文；加载时按账号解密进内存，网关转发/多 key 轮换/模型探测路径零改动，请求热路径零开销（解密只发生在文件加载/热重载）。
+- **每租户独立密钥 K_t**：K_t = HKDF-SHA256(主密钥 S, salt=账号 id, 域 "upstream-keys/tenant/v1")——从 v1.1.0 的主密钥 S 派生、按账号域分离，**不新增任何要保管的密钥材料**（S 的保管规则不变）；A 租户的密文文件泄露，B 租户的 K_t 解不开。
+- **老版明文文件自动迁移**：启动期一次性把 `tenants/u<id>/` 与老 `config/upstreams.json` 里的明文 key 就地加密（幂等、原子写 + round-trip 校验，失败保留原文件）；老单体配置认领给首管理员时自动做 K_0→K_uid 域转换。
+- **全新部署保证**：没有任何加密材料时服务直接启动（S 自动生成 0600）；只有「已有加密材料 + 找不到 S」才 fail-fast 拒绝启动——升级后的任意新版本都能直接启动，不依赖中间版本。
+- **密文被篡改**（GCM 校验失败）：该平台降级为「无 key」并记日志，服务不崩，同文件其他平台不受影响。
+
+### 部署
+- 回滚注意：v1.1.0 代码读不了加密后的租户配置（enc_keys 对它只是未知字段，平台 key 会空）——回滚需恢复升级前 config/ 备份。
+- 备份口径不变：`config/master.key` 不进备份、不进发布包；数据/config 迁机器必须连 master.key 一起走。
+
 ## [1.1.0] - 2026-11-14
 
 ### 安全：API Key 加密存储（信封加密）

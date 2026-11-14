@@ -12,9 +12,11 @@
     key_enc = AES-GCM(K_enc, key)      → 可逆（随机 12B nonce），复制按钮专用
   为什么是全局而不是「每用户一把 K_t」：验签时只知道 key 不知道属于谁，
   全局 MAC 密钥才能做到索引一击命中；每账号 K_t 会退化成 O(n) 逐个算 MAC
-  （设计红线：禁止全量解密比对）。「每租户一把随机密钥」的诉求在下一阶段
-  用于加密各账号的上游配置（config/tenants/u<id>/upstreams.json）——那时
-  解密时 user_id 已知，不存在热路径索引问题。
+  （设计红线：禁止全量解密比对）。「每租户一把 K_t」已在 v1.1.1 落地：
+  用于加密各账号的上游配置（config/tenants/u<id>/upstreams.json 的 enc_keys）
+  ——那时解密时 user_id 已知（一账号一个 Registry 实例），不存在热路径索引
+  约束；K_t 由 HKDF(S, salt=uid, 域 upstream-keys/tenant/v1) 派生（本模块
+  tenant_cipher()），不新增密钥材料。
 """
 from __future__ import annotations
 
@@ -69,6 +71,29 @@ class KeyCipher:
         nonce, ct = bytes(blob[:12]), bytes(blob[12:])
         return self._gcm.decrypt(nonce, ct, None).decode("utf-8")
 
+    # ---- 字符串级封装（给 JSON 配置文件用：base64url 编码落盘） ----
+    def seal_str(self, key: str) -> str:
+        """明文 → base64url(nonce+密文)。供 upstreams.json 的 enc_keys 字段用。"""
+        return base64.urlsafe_b64encode(self.seal(key)).decode("ascii")
+
+    def open_str(self, s: str) -> str:
+        """seal_str 的逆。失败抛 InvalidTag（密文被改/钥匙不对时）。"""
+        return self.open(base64.urlsafe_b64decode(s.encode("ascii")))
+
+
+def tenant_cipher(master: bytes, uid: int) -> KeyCipher:
+    """每租户一把工作密钥 K_t（v1.1.1）：从主密钥 S 派生、按账号 uid 做域分离。
+
+    只用于加密各账号的上游配置 config/tenants/u<uid>/upstreams.json——
+    加载该文件时 uid 已知（一账号一个 Registry 实例），不存在热路径索引约束。
+    域分离保证：A 租户的密文文件泄露，用 B 租户的 K_t 解不开。
+    不新增任何需要保管的密钥材料（根信任仍是 S，保管规则同 v1.1.0）。
+    """
+    k_t = HKDF(algorithm=hashes.SHA256(), length=32,
+               salt=str(int(uid)).encode("ascii"),
+               info=b"llm-relay:upstream-keys:tenant:v1").derive(bytes(master))
+    return KeyCipher(k_t)
+
 
 def _parse_env_secret(raw: str) -> bytes:
     raw = raw.strip()
@@ -87,11 +112,13 @@ def _parse_env_secret(raw: str) -> bytes:
     return raw.encode("utf-8")   # 原样当字节用（>=16 才放行，KeyCipher 兜底校验）
 
 
-def resolve_master_secret(store) -> bytes:
+def resolve_master_secret(store, extra_encrypted: bool = False) -> bytes:
     """启动期解析主密钥 S。store 需有 has_encrypted_keys()。
 
-    缺 S 且库里已有加密 key → raise RuntimeError（拒绝启动，fail-fast）。
-    缺 S 且库是纯明文/空 → 自动生成并持久化到 config/master.key（0600）。
+    缺 S 且已有加密材料（DB 加密 key 或 extra_encrypted=租户配置加密 key）
+    → raise RuntimeError（拒绝启动，fail-fast）。
+    缺 S 且无任何加密材料 → 自动生成并持久化到 config/master.key（0600）
+    ——全新部署因此可以直接启动（S 自动生成），之后写入的租户 key 才用到它。
     """
     env = (os.getenv(ENV_SECRET) or "").strip()
     if env:
@@ -104,10 +131,10 @@ def resolve_master_secret(store) -> bytes:
             return got
         log.warning("主密钥文件 %s 损坏（<16 字节），按缺失处理", f)
 
-    if store.has_encrypted_keys():
+    if store.has_encrypted_keys() or extra_encrypted:
         raise RuntimeError(
             "找不到主密钥（RELAY_KEY_SECRET 环境变量或 config/master.key），"
-            "但数据库里已有加密存储的 API Key——换一把新钥匙解不开旧密文。"
+            "但已有加密存储的 API Key（数据库和/或租户上游配置）——换一把新钥匙解不开旧密文。"
             "请补回原主密钥后重启。")
 
     got = secrets.token_bytes(32)
