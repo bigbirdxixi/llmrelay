@@ -31,7 +31,7 @@ READ_TIMEOUT_S = float(os.getenv("RELAY_READ_TIMEOUT", "600"))
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = int(os.getenv("RELAY_DEFAULT_MAX_TOKENS", "8192"))
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # ---- 密钥加密（v1.1.0） ----
 # 主密钥 S：32 随机字节。优先读环境变量 RELAY_KEY_SECRET（hex/base64），

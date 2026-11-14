@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
-## [Unreleased]（v1.1.1：上游 key 每租户加密）
+## [1.1.1] - 2026-11-15
 
 ### 安全：上游平台 key 不再明文落盘
 - **各账号的上游配置 `config/tenants/u<id>/upstreams.json` 里的上游 key（OpenAI/Gemini/…）加密存储**：新增 `enc_keys` 字段（AES-GCM 密文，base64url），磁盘不留明文；加载时按账号解密进内存，网关转发/多 key 轮换/模型探测路径零改动，请求热路径零开销（解密只发生在文件加载/热重载）。
