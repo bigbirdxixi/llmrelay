@@ -26,3 +26,4 @@ nul
 
 # ByteRover 本地记忆目录（跨会话知识树，含本机路径/私钥，绝不提交）
 .brv/
+config/master.key

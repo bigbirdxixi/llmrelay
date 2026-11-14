@@ -75,9 +75,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at  TEXT NOT NULL,
     last_used   TEXT,
     revoked     INTEGER NOT NULL DEFAULT 0,
-    expires_at  TEXT              -- 过期时间（ISO 带时区；NULL/空 = 永不过期）
+    expires_at  TEXT,              -- 过期时间（ISO 带时区；NULL/空 = 永不过期）
+    key_mac     BLOB,             -- HMAC-SHA256(K_mac, key)：验签专用（确定性、建索引，O(1)）
+    key_enc     BLOB             -- AES-GCM(K_enc, key)：可逆，复制按钮取回用（NULL = 尚未迁移）
 );
 CREATE INDEX IF NOT EXISTS idx_key_user ON api_keys (user_id);
+-- 注意：idx_key_mac（key_mac 唯一索引）不在此处建——老库的 api_keys 表可能还没有
+-- key_mac 列，要先等 _migrate() 的 ALTER 加列之后才能建（否则「no such column」）。
+
+-- ---------- key 明文取回审计（复制按钮 reveal） ----------
+CREATE TABLE IF NOT EXISTS key_reveal_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    key_id  INTEGER NOT NULL,
+    ts      TEXT NOT NULL,
+    ip      TEXT,
+    ua      TEXT
+);
 
 -- ---------- 邮件验证（magic link）/ 杂项 ----------
 CREATE TABLE IF NOT EXISTS meta (
@@ -109,6 +123,7 @@ class Store:
         self._conn.executescript(BASE_DDL)
         self._migrate()
         self._conn.commit()
+        self._key_cipher = None     # app.crypto.KeyCipher（启动期注入）：验签走 key_mac，复制走 key_enc
 
     # ---------- schema ----------
     def _migrate(self) -> None:
@@ -116,10 +131,16 @@ class Store:
         for name, typ in COLUMNS.items():
             if name not in have:
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {typ}")
-        # api_keys 的列级迁移（老库没有 expires_at）
+        # api_keys 的列级迁移（老库没有 expires_at / 加密双列）
         khave = {r["name"] for r in self._conn.execute("PRAGMA table_info(api_keys)")}
         if "expires_at" not in khave:
             self._conn.execute("ALTER TABLE api_keys ADD COLUMN expires_at TEXT")
+        if "key_mac" not in khave:
+            self._conn.execute("ALTER TABLE api_keys ADD COLUMN key_mac BLOB")
+        if "key_enc" not in khave:
+            self._conn.execute("ALTER TABLE api_keys ADD COLUMN key_enc BLOB")
+        # 列齐了才建唯一索引（NULL 可重复：未迁移的老行不受影响；SQLite 里 NULL 互不冲突）
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_key_mac ON api_keys (key_mac)")
 
     # ---------- 写入 ----------
     def record(self, **kw) -> None:
@@ -1001,15 +1022,76 @@ class Store:
             self._conn.commit()
         return True
 
+    # ---------- 密钥加密（v1.1.0：key_mac 验签索引 / key_enc 可逆取回） ----------
+    def set_key_cipher(self, cipher) -> None:
+        """启动期注入 KeyCipher；之后 create/验签/reveal 全部走加密双列。"""
+        self._key_cipher = cipher
+
+    def has_encrypted_keys(self) -> bool:
+        """库里是否已有加密存储的 key（主密钥缺失时用于 fail-fast 判断）。"""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM api_keys WHERE key_mac IS NOT NULL").fetchone()[0] > 0
+
+    def migrate_keys(self) -> int:
+        """一次性把历史明文 key 补上 key_mac/key_enc（幂等；未迁移的行仍走明文兜底验签）。"""
+        if self._key_cipher is None:
+            return 0
+        c = self._key_cipher
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, key FROM api_keys WHERE key_mac IS NULL AND key IS NOT NULL").fetchall()
+            n = 0
+            for r in rows:
+                self._conn.execute(
+                    "UPDATE api_keys SET key_mac = ?, key_enc = ? WHERE id = ?",
+                    (c.mac(r["key"]), c.seal(r["key"]), r["id"]))
+                n += 1
+            self._conn.commit()
+            if n:
+                # 回读 round-trip 校验：抽一条确认密文解得回来（全表小，直接全验）
+                for r in rows:
+                    enc = self._conn.execute(
+                        "SELECT key_enc FROM api_keys WHERE id = ?", (r["id"],)).fetchone()[0]
+                    assert c.open(enc) == r["key"], f"迁移后 round-trip 校验失败: api_keys.id={r['id']}"
+        return n
+
+    def reveal_api_key(self, key_id: int) -> str | None:
+        """复制按钮：解出某把 key 的明文。未迁移的历史行兜底读旧明文列。"""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT key, key_enc FROM api_keys WHERE id = ?", (int(key_id),)).fetchone()
+        if not r:
+            return None
+        if r["key_enc"] is not None and self._key_cipher is not None:
+            return self._key_cipher.open(r["key_enc"])
+        return r["key"]
+
+    def log_key_reveal(self, user_id: int, key_id: int, ip: str, ua: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO key_reveal_log (user_id, key_id, ts, ip, ua) VALUES (?,?,?,?,?)",
+                (int(user_id), int(key_id), self._now(), (ip or "")[:64], (ua or "")[:120]))
+            self._conn.commit()
+
+    def count_key_reveals(self, key_id: int) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM key_reveal_log WHERE key_id = ?", (int(key_id),)).fetchone()[0]
+
     def create_api_key(self, user_id: int, key: str, label: str = "",
                        expires_at: str | None = None) -> dict:
-        """expires_at：ISO 带时区字符串；None/空 = 永不过期。"""
+        """expires_at：ISO 带时区字符串；None/空 = 永不过期。
+        加密双列（key_mac/key_enc）随主键一起写（cipher 未注入时留 NULL，验签走明文兜底）。"""
+        c = self._key_cipher
+        mac = c.mac(key) if c else None
+        enc = c.seal(key) if c else None
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at, key_mac, key_enc)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (int(user_id), key, (label or "")[:60], self._now(),
-                 (expires_at or "").strip() or None))
+                 (expires_at or "").strip() or None, mac, enc))
             self._conn.commit()
             kid = cur.lastrowid
         return self.get_api_key(kid)
@@ -1033,14 +1115,23 @@ class Store:
             return cur.rowcount > 0
 
     def get_api_key(self, key_id: int) -> dict | None:
+        """取一条 api_keys（BLOB 双列剥掉：bytes 进不了 JSON 序列化，对外永远只给明文 key 列）。"""
         with self._lock:
             r = self._conn.execute("SELECT * FROM api_keys WHERE id = ?", (int(key_id),)).fetchone()
-        return dict(r) if r else None
+        return self._clean_key_row(r) if r else None
 
     def list_api_keys(self, user_id: int) -> list[dict]:
         with self._lock:
-            return [dict(r) for r in self._conn.execute(
-                "SELECT * FROM api_keys WHERE user_id = ? ORDER BY id", (int(user_id),))]
+            rows = self._conn.execute(
+                "SELECT * FROM api_keys WHERE user_id = ? ORDER BY id", (int(user_id),)).fetchall()
+        return [self._clean_key_row(r) for r in rows]
+
+    @staticmethod
+    def _clean_key_row(r) -> dict:
+        d = dict(r)
+        d.pop("key_mac", None)    # 32B HMAC：服务端内部用，不外泄
+        d.pop("key_enc", None)    # AES-GCM 密文：服务端内部用，不外泄
+        return d
 
     def revoke_api_key(self, user_id: int, key_id: int) -> bool:
         with self._lock:
@@ -1075,14 +1166,24 @@ class Store:
         key = (key or "").strip()
         if not key:
             return None
+        r = None
         with self._lock:
-            r = self._conn.execute(
-                "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked"
-                " FROM api_keys k JOIN users u ON u.id = k.user_id"
-                " WHERE k.key = ? AND u.status = 'active'", (key,)).fetchone()
+            # 主路径：MAC 索引一击命中（O(1)；加密双列是 v1.1.0 起默认路径）
+            if self._key_cipher is not None:
+                r = self._conn.execute(
+                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked"
+                    " FROM api_keys k JOIN users u ON u.id = k.user_id"
+                    " WHERE k.key_mac = ? AND u.status = 'active'",
+                    (self._key_cipher.mac(key),)).fetchone()
+            # 兜底：历史未迁移行（key_mac NULL）仍按明文列验签，迁移完成后此分支自然无人命中
+            if r is None:
+                r = self._conn.execute(
+                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked"
+                    " FROM api_keys k JOIN users u ON u.id = k.user_id"
+                    " WHERE k.key = ? AND u.status = 'active'", (key,)).fetchone()
             if r:
-                self._conn.execute("UPDATE api_keys SET last_used = ? WHERE key = ?",
-                                   (self._now(), key))
+                self._conn.execute("UPDATE api_keys SET last_used = ? WHERE id = ?",
+                                    (self._now(), r["key_id"]))
                 self._conn.commit()
         if not r:
             return None

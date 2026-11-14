@@ -791,24 +791,31 @@ def test_r42_key_copy_and_delete(client, hdr):
     listed = [k for k in client.get("/api/keys", headers=hdr).json()["data"] if k["id"] == kid][0]
     assert "…" in listed["key"] and listed["key"] != plain
 
-    # reveal 取回明文，能直接用来调下游
-    rv = client.get(f"/api/keys/{kid}/reveal", headers=hdr)
+    # v1.1.0 二次验证：密码错 → 401（不留审计）
+    assert client.post(f"/api/keys/{kid}/reveal", headers=hdr,
+                       json={"password": "wrong"}).status_code == 401
+    # 密码对：reveal 取回明文，能直接用来调下游
+    rv = client.post(f"/api/keys/{kid}/reveal", headers=hdr,
+                    json={"password": "test-password"})
     assert rv.status_code == 200 and rv.json()["key"] == plain
     assert client.get("/v1/models", headers={"authorization": f"Bearer {rv.json()['key']}"}).status_code == 200
+    # 审计：成功取回留痕
+    assert client.app.state.store.count_key_reveals(kid) == 1
 
     # 别的账号看不到这把 key（普通账号 → 404）
     r = client.post("/api/users", headers=hdr, json={
         "email": "dave@test.local", "password": "dave-password"})
-    dave_id = r.json()["user"]["id"]
     dave_key = r.json()["api_key"]
     # 用 dave 的 key 当 Bearer 打 /api（/api 也认 Bearer）
-    assert client.get(f"/api/keys/{kid}/reveal",
-                      headers={"authorization": f"Bearer {dave_key}"}).status_code == 404
+    assert client.post(f"/api/keys/{kid}/reveal",
+                      headers={"authorization": f"Bearer {dave_key}"},
+                      json={"password": "dave-password"}).status_code == 404
 
     # 真删除：记录消失、reveal 404、key 立即失效
     assert client.delete(f"/api/keys/{kid}", headers=hdr).status_code == 200
     assert kid not in [k["id"] for k in client.get("/api/keys", headers=hdr).json()["data"]]
-    assert client.get(f"/api/keys/{kid}/reveal", headers=hdr).status_code == 404
+    assert client.post(f"/api/keys/{kid}/reveal", headers=hdr,
+                       json={"password": "test-password"}).status_code == 404
     assert client.get("/v1/models", headers={"authorization": f"Bearer {plain}"}).status_code == 401
     # 重复删除 → 404
     assert client.delete(f"/api/keys/{kid}", headers=hdr).status_code == 404
@@ -2747,3 +2754,126 @@ def test_r91_probe_slow_upstream_readtimeout_is_transient(client, hdr, upstream_
         assert gp[0]["models"] == ["m-slow3", "m-slow3b", "m-slow3c"], "慢模型保留不删"
     finally:
         client.delete("/api/providers/nimslowup", headers=hdr)
+
+
+# ---------------------------------------------------------------- v1.1.0 密钥加密存储（R100-R106）
+def test_r100_key_crypto_at_rest(client, hdr):
+    """新建 key 立即写加密双列：key_mac（MAC 索引）+ key_enc（AES-GCM 可逆）。"""
+    from app.main import store
+    r = client.post("/api/keys", headers=hdr, json={"label": "crypto-test"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    plain = j["key"]
+    with store._lock:
+        row = store._conn.execute(
+            "SELECT key_mac, key_enc FROM api_keys WHERE id = ?", (j["id"],)).fetchone()
+    assert row["key_mac"] and len(row["key_mac"]) == 32, "key_mac 应为 32B HMAC 摘要"
+    assert row["key_enc"], "key_enc 必须落盘（复制按钮靠它取回明文）"
+    assert plain.encode("utf-8") not in row["key_enc"], "密文里不能含明文"
+    # 可逆性：服务端解密 == 原明文
+    assert store.reveal_api_key(j["id"]) == plain
+    client.delete(f"/api/keys/{j['id']}", headers=hdr)
+
+
+def test_r101_legacy_key_migrated_and_auth_via_mac(client, hdr):
+    """历史 key（cipher 注入前创建）由 lifespan 的 migrate_keys 补双列；验签走 MAC 索引。"""
+    from app.main import store
+    admin_id = store.first_admin()["id"]
+    with store._lock:
+        n = store._conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND label = '测试' AND key_mac IS NOT NULL",
+            (admin_id,)).fetchone()[0]
+    assert n >= 1, "conftest 的测试 key（cipher 注入前创建）应已被 lifespan 迁移补 key_mac"
+    # 该 key 现在能正常调下游（验签主路径命中 MAC 索引）
+    r = client.get("/v1/models", headers=hdr)
+    assert r.status_code == 200
+
+
+def test_r102_unmigrated_row_falls_back_to_plaintext_lookup(client, hdr):
+    """模拟一条没迁移的历史行（key_mac NULL）：明文兜底验签仍可用，服务不炸。"""
+    from app.main import store
+    admin_id = store.first_admin()["id"]
+    with store._lock:
+        cur = store._conn.execute(
+            "INSERT INTO api_keys (user_id, key, label, created_at) VALUES (?,?,?,?)",
+            (admin_id, "sk-relay-unmigrated-test-key", "legacy-fallback", store._now()))
+        legacy_id = cur.lastrowid
+        store._conn.commit()
+    try:
+        r = client.get("/v1/models", headers={"authorization": "Bearer sk-relay-unmigrated-test-key"})
+        assert r.status_code == 200, "未迁移历史 key 应走明文兜底验签"
+    finally:
+        with store._lock:
+            store._conn.execute("DELETE FROM api_keys WHERE id = ?", (legacy_id,))
+            store._conn.commit()
+
+
+def test_r103_reveal_requires_owner_password_and_audits(client, hdr):
+    """reveal 三件套：仅所有者 + 当前密码二次验证 + 审计留痕。"""
+    from app.main import store
+    import app.auth as A
+    r = client.post("/api/keys", headers=hdr, json={"label": "reveal-test"})
+    kid, plain = r.json()["id"], r.json()["key"]
+    # 密码错 → 401，不留审计
+    assert client.post(f"/api/keys/{kid}/reveal", headers=hdr,
+                       json={"password": "definitely-wrong"}).status_code == 401
+    assert store.count_key_reveals(kid) == 0
+    # 密码对 → 200 + 明文 + 审计 +1
+    ok = client.post(f"/api/keys/{kid}/reveal", headers=hdr, json={"password": "test-password"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["key"] == plain
+    assert store.count_key_reveals(kid) == 1
+    # 别人家的 key → 404（即便密码填对）
+    other = store.create_user("r103-other@test.local", A.hash_password("other-pass-9"), role="user")
+    okey = store.create_api_key(other["id"], "sk-relay-r103-other", "x")
+    assert client.post(f"/api/keys/{okey['id']}/reveal", headers=hdr,
+                       json={"password": "test-password"}).status_code == 404
+    client.delete(f"/api/keys/{kid}", headers=hdr)
+
+
+def test_r104_register_no_plaintext_key_in_response(client, hdr):
+    """注册/登录响应不再回明文 key（偷会话 ≠ 偷 key）：pending 账号 api_key 恒为空。"""
+    r = client.post("/api/auth/register", json={"email": "r104-new@test.local",
+                                                "password": "r104-pass-12345"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["api_key"] == "", f"pending 账号不应带 key: {j}"
+    assert "sk-relay" not in str(j["api_key"])
+
+
+def test_r105_master_secret_resolution(monkeypatch, tmp_path):
+    """主密钥 S 的解析规则：env > 文件 > 自动生成；已有加密 key 而 S 缺失 → 拒绝启动。"""
+    import app.config as C
+    import app.crypto as CR
+
+    class _FakeStore:
+        def __init__(self, n):
+            self.n = n
+        def has_encrypted_keys(self):
+            return self.n > 0
+
+    monkeypatch.delenv("RELAY_KEY_SECRET", raising=False)
+    f = tmp_path / "master.key"
+    monkeypatch.setattr(C, "MASTER_KEY_FILE", f)
+    # ① 无加密 key 且无 S → 自动生成并落盘 0600
+    sec = CR.resolve_master_secret(_FakeStore(0))
+    assert f.exists() and f.read_bytes() == sec and len(sec) == 32
+    # ② 已有加密 key 且 S 两处都缺 → 拒绝（宁可停服，不可换钥匙）
+    f.unlink()
+    import pytest as _pt
+    with _pt.raises(RuntimeError):
+        CR.resolve_master_secret(_FakeStore(5))
+    # ③ 环境变量优先
+    monkeypatch.setenv("RELAY_KEY_SECRET", "00112233445566778899aabbccddeeff")
+    assert CR.resolve_master_secret(_FakeStore(5)) == bytes.fromhex("00112233445566778899aabbccddeeff")
+    # ④ 密文 round-trip 且 MAC 确定性
+    c = CR.KeyCipher(bytes.fromhex("00112233445566778899aabbccddeeff"))
+    blob = c.seal("sk-relay-roundtrip-xyz")
+    assert c.open(blob) == "sk-relay-roundtrip-xyz"
+    assert c.mac("k") == c.mac("k") and c.mac("k") != c.mac("K")
+
+
+def test_r106_migrate_keys_idempotent(client, hdr):
+    """迁移幂等：lifespan 已跑过一轮，再调用应 0 行待迁移。"""
+    from app.main import store
+    assert store.migrate_keys() == 0

@@ -965,7 +965,8 @@ async def auth_register(request: Request):
     token = A.new_session_token()
     store.create_session(user["id"], token, A.session_expiry(), request.headers.get("user-agent", ""))
     keys = store.list_api_keys(user["id"])
-    out["api_key"] = keys[0]["key"] if keys else ""
+    # v1.1.0：登录/注册响应不再回明文 key（防「偷会话=偷 key」）；完整 key 走「设置 → 复制」二次验证取回
+    out["api_key"] = A.mask_key(keys[0]["key"]) if keys else ""
     resp = JSONResponse(out)
     _set_session_cookie(resp, request, token)
     return resp
@@ -1118,16 +1119,33 @@ async def create_key(request: Request, _: None = Depends(auth)):
             "expires_at": key.get("expires_at")}
 
 
-@router.get("/keys/{key_id}/reveal")
+@router.post("/keys/{key_id}/reveal")
 async def reveal_key(key_id: int, request: Request, _: None = Depends(auth)):
-    """把自己的某一把 key 明文取回来（用于「复制」）。只能看自己的。"""
+    """把自己的某一把 key 明文取回来（用于「复制」）。只能看自己的。
+
+    v1.1.0 三件套：① 仅所有者 ② 输入当前密码二次验证 ③ 每次取回写审计日志
+    （key_reveal_log：谁、何时、哪把 key、IP/UA）。偷了会话的人没有密码，取不回 key。
+    """
     user = _user(request)
     store = request.app.state.store
+    body = await request.json() if await request.body() else {}
+    pw = str(body.get("password") or "")
     for k in store.list_api_keys(user["id"]):
-        if k["id"] == key_id:
-            if k["revoked"]:
-                raise HTTPException(400, "这把 key 已被吊销")
-            return {"ok": True, "id": key_id, "key": k["key"], "label": k["label"]}
+        if k["id"] != key_id:
+            continue
+        if k["revoked"]:
+            raise HTTPException(400, "这把 key 已被吊销")
+        if not A.verify_password(pw, user.get("pass_hash") or ""):
+            raise HTTPException(401, "密码不对：取回 key 需要输入当前密码")
+        try:
+            plain = store.reveal_api_key(key_id)
+        except Exception:
+            raise HTTPException(500, "key 解密失败（主密钥可能不匹配），请检查 RELAY_KEY_SECRET / config/master.key")
+        if plain is None:
+            raise HTTPException(404, "key 不存在")
+        ip = request.client.host if request.client else ""
+        store.log_key_reveal(user["id"], key_id, ip, request.headers.get("user-agent", ""))
+        return {"ok": True, "id": key_id, "key": plain, "label": k["label"]}
     raise HTTPException(404, "key 不存在")
 
 

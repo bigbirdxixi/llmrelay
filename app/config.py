@@ -33,6 +33,11 @@ DEFAULT_MAX_TOKENS = int(os.getenv("RELAY_DEFAULT_MAX_TOKENS", "8192"))
 
 VERSION = "1.0.2"
 
+# ---- 密钥加密（v1.1.0） ----
+# 主密钥 S：32 随机字节。优先读环境变量 RELAY_KEY_SECRET（hex/base64），
+# 缺省则首次启动自动生成到这里（0600）。S 永不进数据备份/发布包（详见 app/crypto.py）。
+MASTER_KEY_FILE = CONFIG_DIR / "master.key"
+
 
 # ---- 反向代理子路径 ----
 # 站点不是挂在域名根目录时（例如 https://x.com/llmrelay/v1），把前缀设成 /llmrelay，

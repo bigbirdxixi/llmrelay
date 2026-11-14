@@ -18,6 +18,7 @@ from . import translate as T
 from .admin import router as admin_router
 from .auth import _bearer as bearer_token
 from .auth import authenticate, current_user, tenant_of
+from .crypto import KeyCipher, resolve_master_secret
 from .tenants import TenantRegistries
 from .gateway import Gateway, error_response, new_request_id
 from .registry import Registry
@@ -34,6 +35,16 @@ registry = tenants          # 兼容老代码/测试里的 registry.reload()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 密钥加密（v1.1.0）：先定主密钥再开服务——
+    # ① 库里已有加密 key 而 S 找不到了 → resolve_master_secret 直接 raise，拒绝启动（fail-fast）
+    # ② 新库/纯明文库且没配 S → 自动生成 config/master.key（0600）并大声警告
+    _secret = resolve_master_secret(store)
+    _cipher = KeyCipher(_secret)
+    store.set_key_cipher(_cipher)
+    _n = store.migrate_keys()
+    if _n:
+        log.warning("已把 %d 把历史明文 API Key 迁移为加密存储（key_mac/key_enc）", _n)
+
     await gw.startup()
     watcher = asyncio.create_task(tenants.watch(5.0))
     try:

@@ -2159,9 +2159,13 @@ async function saveKeyExpire(id){
 }
 
 async function copyKey(id){
+  // v1.1.0：取回 key 需要二次验证——输入当前密码（偷了会话的人也拿不到 key）
+  const pw = prompt("复制完整 key 前请输入当前账号密码：");
+  if(pw === null) return;
   try{
-    const r = await api(`/api/keys/${id}/reveal`);
+    const r = await api(`/api/keys/${id}/reveal`, { method: "POST", body: { password: pw } });
     copyText(r.key);
+    toast("完整 key 已复制到剪贴板（只显示这一次，请妥善保存）", "ok");
   }catch(e){ toast("获取 key 失败：" + e.message, "err"); }
 }
 
