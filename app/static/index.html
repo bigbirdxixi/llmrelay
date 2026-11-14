@@ -2037,7 +2037,7 @@ async function renderUsers(){
       </tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">还没有账号</div>'}
       <div class="dim" style="font-size:12px;margin-top:10px;line-height:1.8">
         点「看数据」= 把顶部的数据视角切到该账号（概览/用量/日志/上游平台都跟着变）。
-        新建账号时会生成一把该账号的 API Key，只在那一次弹窗里显示明文。
+        新建账号时会自动生成一把该账号的 API Key；key 只有账号本人能复制（管理员也看不到明文）。
         自己的账号不能禁用/降级；最后一个管理员也不能被降级（至少保留一个管理员）。
       </div>
     </div>`;
@@ -2067,8 +2067,7 @@ async function newUser(){
   if(!password) return;
   const role = confirm("设为管理员？（确定=管理员，取消=普通账号）") ? "admin" : "user";
   try{
-    const r = await api("/api/users", { method: "POST", body: { email, password, role } });
-    alert("账号已创建。\n\nAPI Key（只显示这一次，请立刻保存）：\n" + r.api_key);
+    alert("账号已创建。\n\n系统已为该账号生成默认 API Key。key 属于账号本人：让对方登录后到「设置 → 我的 API Key」输入自己的密码即可复制（管理员也看不到明文）。");
     renderUsers();
   }catch(e){ toast("创建失败：" + e.message, "err"); }
 }
@@ -2158,14 +2157,37 @@ async function saveKeyExpire(id){
   }catch(e){ toast("修改失败：" + e.message, "err"); }
 }
 
-async function copyKey(id){
-  // v1.1.0：取回 key 需要二次验证——输入当前密码（偷了会话的人也拿不到 key）
-  const pw = prompt("复制完整 key 前请输入当前账号密码：");
-  if(pw === null) return;
+function copyKey(id){
+  // v1.1.0：取回 key 需要二次验证——自建弹窗 + type=password（不明文显示，偷了会话的人也拿不到 key）
+  $("#modalBody").innerHTML = `
+    <h2>复制完整 API Key</h2>
+    <div class="dim" style="font-size:12px;margin-bottom:12px;line-height:1.8">
+      为确认是你本人操作，请输入当前账号密码。完整 key 只会复制到剪贴板、不在页面上显示；每次取回都会记录审计日志。
+    </div>
+    <div class="row" style="margin-bottom:16px">
+      <input id="revealPw" type="password" placeholder="当前账号密码" autocomplete="current-password" style="max-width:280px">
+    </div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="doReveal(${id})">确定</button>
+    </div>`;
+  $("#modal").classList.add("on");
+  const el = $("#revealPw");
+  if(el){
+    el.focus();
+    el.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); doReveal(id); } });
+  }
+}
+
+async function doReveal(id){
+  const el = $("#revealPw");
+  const pw = el ? el.value : "";
+  if(!pw) return toast("请输入当前账号密码", "err");
   try{
     const r = await api(`/api/keys/${id}/reveal`, { method: "POST", body: { password: pw } });
+    closeModal();
     copyText(r.key);
-    toast("完整 key 已复制到剪贴板（只显示这一次，请妥善保存）", "ok");
+    toast("完整 key 已复制到剪贴板（页面不显示明文，请妥善保存）", "ok");
   }catch(e){ toast("获取 key 失败：" + e.message, "err"); }
 }
 
@@ -2268,7 +2290,7 @@ async function renderSettings(){
       </h2>
       <div class="dim" style="font-size:12px;margin-bottom:10px">
         每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。
-        ${s.is_admin ? "<br>你是管理员，在「账号」页新建用户时也能直接拿到对方的 key。" : ""}
+        ${s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : ""}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
         <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th>

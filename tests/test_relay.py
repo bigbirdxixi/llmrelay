@@ -725,8 +725,9 @@ def test_r39_accounts_register_login_isolation(client, hdr):
 def test_r40_admin_user_management(client, hdr):
     r = client.post("/api/users", headers=hdr, json={
         "email": "carol@test.local", "password": "carol-password", "role": "user"})
-    assert r.status_code == 200, r.text
-    carol_key = r.json()["api_key"]
+    assert "api_key" not in r.json(), "管理员建号不应拿到租户的 key"
+    from app.main import store as _st
+    carol_key = _st.reveal_api_key(_st.list_api_keys(r.json()["user"]["id"])[0]["id"])
     uid = r.json()["user"]["id"]
 
     # 登录 / 退出 / 错密码
@@ -805,7 +806,7 @@ def test_r42_key_copy_and_delete(client, hdr):
     # 别的账号看不到这把 key（普通账号 → 404）
     r = client.post("/api/users", headers=hdr, json={
         "email": "dave@test.local", "password": "dave-password"})
-    dave_key = r.json()["api_key"]
+    dave_key = client.app.state.store.reveal_api_key(client.app.state.store.list_api_keys(r.json()["user"]["id"])[0]["id"])
     # 用 dave 的 key 当 Bearer 打 /api（/api 也认 Bearer）
     assert client.post(f"/api/keys/{kid}/reveal",
                       headers={"authorization": f"Bearer {dave_key}"},
@@ -882,7 +883,7 @@ def test_r44_account_dimension(client, hdr):
     # 4) 普通账号看不到别人：自己查自己，账号维度只有他自己
     r2 = client.post("/api/users", headers=hdr, json={
         "email": "frank@test.local", "password": "frank-password"})
-    frank_key = r2.json()["api_key"]
+    frank_key = client.app.state.store.reveal_api_key(client.app.state.store.list_api_keys(r2.json()["user"]["id"])[0]["id"])
     mine = client.get("/api/stats/summary?days=1&group_by=account",
                       headers={"authorization": f"Bearer {frank_key}"}).json()
     assert [row["k"] for row in mine["data"]] in ([], ["frank@test.local"]), mine
@@ -2877,3 +2878,42 @@ def test_r106_migrate_keys_idempotent(client, hdr):
     """迁移幂等：lifespan 已跑过一轮，再调用应 0 行待迁移。"""
     from app.main import store
     assert store.migrate_keys() == 0
+
+# ---------------------------------------------------------------- R107 key 归账号本人（管理员也拿不到）
+def test_r107_admin_cannot_copy_tenant_key(client, hdr):
+    """v1.1.0：建号不回明文 key；管理员 reveal 别人的 key 一律 404 且不写审计；本人可正常取回。"""
+    from app.main import store
+
+    # ① 管理员建号：响应里没有 api_key
+    r = client.post("/api/users", headers=hdr, json={
+        "email": "grace@test.local", "password": "grace-password"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "api_key" not in body, "管理员建号不能拿到租户的 key"
+    assert body.get("key_issued") is True
+    uid = body["user"]["id"]
+    kid = store.list_api_keys(uid)[0]["id"]
+
+    # ② 管理员拿自己的密码去 reveal 租户的 key → 404（不泄露、不写审计）
+    r = client.post(f"/api/keys/{kid}/reveal", headers=hdr, json={"password": "test-password"})
+    assert r.status_code == 404, r.text
+    assert "key" not in r.json()
+    assert store.count_key_reveals(kid) == 0
+
+    # ③ 本人可以取回自己的 key（用自己那把 key 当 Bearer + 自己的密码）
+    tenant_key = store.reveal_api_key(kid)
+    rk = client.post(f"/api/keys/{kid}/reveal",
+                     headers={"authorization": f"Bearer {tenant_key}"},
+                     json={"password": "grace-password"})
+    assert rk.status_code == 200, rk.text
+    assert rk.json()["key"] == tenant_key
+    assert store.count_key_reveals(kid) == 1
+
+    # ④ 管理员的设置页只能看到自己的 key（租户的 key 不出现在列表里）
+    s = client.get("/api/settings", headers=hdr).json()
+    assert kid not in [k["id"] for k in s["api_keys"]]
+
+    # ⑤ 取回自己的 key 也要密码：错密码 401
+    mine = s["api_keys"][0]["id"]
+    assert client.post(f"/api/keys/{mine}/reveal", headers=hdr,
+                       json={"password": "not-my-password"}).status_code == 401

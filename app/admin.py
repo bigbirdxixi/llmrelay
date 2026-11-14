@@ -1199,8 +1199,9 @@ async def create_user(request: Request, _: None = Depends(auth)):
         raise HTTPException(400, "这个邮箱已经注册过了")
     role = "admin" if str(body.get("role") or "") == "admin" else "user"
     user = store.create_user(email, A.hash_password(password), role=role)
-    key = store.create_api_key(user["id"], A.new_api_key(), label="默认")
-    return {"ok": True, "user": A.public_user(user), "api_key": key["key"]}
+    store.create_api_key(user["id"], A.new_api_key(), label="默认")
+    # v1.1.0：key 归账号本人所有，不回给管理员——对方登录后在「我的 API Key」输入自己的密码即可复制
+    return {"ok": True, "user": A.public_user(user), "key_issued": True}
 
 
 @router.patch("/users/{user_id}")
