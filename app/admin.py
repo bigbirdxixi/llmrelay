@@ -173,7 +173,7 @@ PRESETS: list[dict[str, Any]] = [
      "extra": {}, "thinking_off": "reasoning_effort",
      "note": "推理模型用 reasoning_effort=none 关闭；老模型本来就不思考。国内服务器直连不通，在平台编辑页「代理」一栏填出口代理（http://127.0.0.1:10808 或 socks5h://…），只对这一平台生效"},
     {"platform": "anthropic", "name": "Anthropic 官方", "type": "anthropic",
-     "base_url": "https://api.anthropic.com",
+     "base_url": "https://api.anthropic.com/v1",
      "models": ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"],
      "extra": {}, "thinking_off": "thinking_type",
      "note": "关闭时显式传 thinking.type=disabled（旧模型不支持 thinking 的话把模式改成『不传字段』）"},

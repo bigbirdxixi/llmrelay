@@ -3334,3 +3334,25 @@ def test_r122_subset_readonly_single_writable(client, hdr):
     assert client.delete(f"/api/providers/agm-single?tenant={uw}", headers=hdr).status_code == 200
     d = client.get(f"/api/providers?tenant={uw}", headers=hdr).json()
     assert "agm-single" not in {row["platform"] for row in d["data"]}
+
+
+# ---------------------------------------------------------------- R123 anthropic 协议 /v1 去重（双 v1 → 404 修复）
+def test_r123_urlfor_v1_dedup():
+    from app.registry import Upstream
+    # base 带 /v1（Agnes 风格 hub，同时提供 Messages）：anthropic 路径去掉前导 /v1，不再双 v1
+    a1 = Upstream(platform="a1", base_url="https://x.example/v1", type="anthropic")
+    assert a1.url_for("messages") == "https://x.example/v1/messages"
+    assert a1.url_for("models") == "https://x.example/v1/models"
+    assert a1.url_for("count_tokens") == "https://x.example/v1/messages/count_tokens"
+    # openai 协议不受影响（默认路径本就不带 /v1）
+    o1 = Upstream(platform="o1", base_url="https://x.example/v1", type="openai")
+    assert o1.url_for("chat") == "https://x.example/v1/chat/completions"
+    assert o1.url_for("models") == "https://x.example/v1/models"
+    # 官方 Anthropic（base 不带 /v1）：保留带 /v1 的默认路径
+    a2 = Upstream(platform="a2", base_url="https://api.anthropic.com", type="anthropic")
+    assert a2.url_for("messages") == "https://api.anthropic.com/v1/messages"
+    assert a2.url_for("models") == "https://api.anthropic.com/v1/models"
+    # extra 路径覆盖仍然优先，且参与去重
+    a3 = Upstream(platform="a3", base_url="https://x.example/v1", type="anthropic",
+                  extra={"messages_path": "/v1/messages"})
+    assert a3.url_for("messages") == "https://x.example/v1/messages"

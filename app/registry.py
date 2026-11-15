@@ -63,7 +63,12 @@ class Upstream(BaseModel):
         return self.name or self.platform
 
     def url_for(self, kind: str) -> str:
-        """kind: chat | messages | models | count_tokens。"""
+        """kind: chat | messages | models | count_tokens。
+
+        anthropic 协议默认路径带 /v1 前缀（按官方 base_url 不带 /v1 设计）；
+        若 base_url 已以 /v1 结尾（如 Agnes 等 OpenAI 风格 hub 同时提供 Messages），
+        去掉路径里的前导 /v1，避免拼出 /v1/v1/… → 404。base_url 因此永远不用动。
+        """
         default = {
             "chat": "/chat/completions",
             "messages": "/v1/messages",
@@ -73,7 +78,10 @@ class Upstream(BaseModel):
         path = str(self.extra.get(f"{kind}_path") or default)
         if not path.startswith("/"):
             path = "/" + path
-        return self.base_url + path
+        base = self.base_url
+        if base.endswith("/v1") and path.startswith("/v1/"):
+            path = path[len("/v1"):]
+        return base + path
 
 
 class Registry:
