@@ -1315,7 +1315,7 @@ async def reveal_key(key_id: int, request: Request, _: None = Depends(auth)):
 
 @router.patch("/keys/{key_id}")
 async def update_key(key_id: int, request: Request, _: None = Depends(auth)):
-    """改 key 的备注 / 过期时间 / 模型绑定。body: {label?, expires_at?, models?}
+    """改 key 的名称（v1.2.1 起原「备注」列改名「名称」）/ 过期时间 / 模型绑定。body: {label?, expires_at?, models?}
     （expires_at 传 "" 或 null = 永不过期；models 传 null 或 [] = 清空绑定恢复不限制）。"""
     body = await request.json() if await request.body() else {}
     user = _user(request)

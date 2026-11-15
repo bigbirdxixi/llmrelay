@@ -103,12 +103,12 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
-#: 下游 key 备注名归并表达式（{p} = requests 表名/别名）：
-#: 有备注→备注；活着的空备注→(无备注)；key 已删→(key 已删除)；历史未记录→(未记录)
+#: 下游 key 名称归并表达式（{p} = requests 表名/别名；v1.2.1 起原「备注」列改名「名称」）：
+#: 有名称→名称；活着的空名称→(无名称)；key 已删→(key 已删除)；历史未记录→(未记录)
 _DKEY_LABEL_EXPR = (
     "CASE WHEN ak.id IS NOT NULL AND COALESCE(NULLIF(TRIM(ak.label), ''), '') <> '' "
     "THEN ak.label "
-    "WHEN ak.id IS NOT NULL THEN '(无备注)' "
+    "WHEN ak.id IS NOT NULL THEN '(无名称)' "
     "WHEN {p}.dkey_id IS NOT NULL THEN '(key 已删除)' "
     "ELSE '(未记录)' END")
 
@@ -454,7 +454,7 @@ class Store:
                 user_id: int | list | None = None) -> list[dict]:
         since = self._since(days)
         if group_by == "dkey":
-            # 按下游客户端 key（用 api_keys.label 备注名；历史无 dkey_id 的归「未记录」）
+            # 按下游客户端 key（用 api_keys.label 名称；历史无 dkey_id 的归「未记录」）
             dkey_expr = _DKEY_LABEL_EXPR.format(p="r")
             ucond, uargs = self._user_cond(user_id, "r.", "AND")
             q = f"""
@@ -800,7 +800,7 @@ class Store:
         args.append(max(0, int(offset)))
         with self._lock:
             rows = [dict(r) for r in self._conn.execute(q, args)]
-        # 下游 key 备注名：dkey_id → api_keys.label（key 被删了显示提示）
+        # 下游 key 名称：dkey_id → api_keys.label（key 被删了显示提示）
         ids = {r.get("dkey_id") for r in rows if r.get("dkey_id")}
         lab: dict[int, str] = {}
         if ids:
@@ -810,7 +810,9 @@ class Store:
                 lab[r["id"]] = r["label"] or ""
         for r in rows:
             if r.get("dkey_id"):
-                r["dkey_label"] = lab.get(r["dkey_id"]) or "（key 已删除）"
+                # 与 _DKEY_LABEL_EXPR 保持一致：活着的空名称→（无名称）；已删→（key 已删除）
+                d = r["dkey_id"]
+                r["dkey_label"] = (lab[d] or "（无名称）") if d in lab else "（key 已删除）"
             else:
                 r["dkey_label"] = ""
         return rows
