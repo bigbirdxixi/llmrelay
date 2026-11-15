@@ -2264,8 +2264,8 @@ function modelPickHtml(selected){
   if(!(g.full.length + g.bare.length + g.aggs.length))
     return '<div class="dim" style="font-size:12px">暂无可用模型：请先在上游平台登记模型</div>';
   return `<div class="mkbox">
-    ${grp("平台全名（platform/model，客户端调用时的标准写法）", g.full)}
-    ${grp("裸模型名 / 别名（客户端用裸名调用；勾到裸名才放行该 key 的裸名调用）", g.bare)}
+    ${grp("平台全名", g.full)}
+    ${grp("裸模型名 / 别名", g.bare)}
     ${grp("聚合模型", g.aggs)}
   </div>
   <div class="dim" style="font-size:11.5px;margin-top:5px">勾了 = 这把 key 只能调用勾到的模型/聚合（精确匹配）；不勾 = 不限制。清单只列已配置的模型/别名，三组各自按首字母排序：平台全名（推荐让客户端这样调）/ 裸模型名（裸名调用场景）/ 聚合。组前复选框 = 全选/取消全选本组；点组标题折叠/展开。</div>`;
