@@ -974,16 +974,24 @@ async def settings(request: Request, _: None = Depends(auth)):
             tu = store.get_user(int(tid))
             if tu:
                 viewing = tu
-    keys = [{"id": k["id"], "key": A.mask_key(k["key"]), "label": k["label"],
-             "created_at": k["created_at"], "last_used": k["last_used"],
-             "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at")}
-            for k in store.list_api_keys(viewing["id"])]
+    keys = []
+    reg = request.app.state.registry.get(viewing["id"])
+    valid = set(reg.all_model_ids()) if reg is not None else set()
+    for k in store.list_api_keys(viewing["id"]):
+        models = k.get("models")
+        keys.append({"id": k["id"], "key": A.mask_key(k["key"]), "label": k["label"],
+                     "created_at": k["created_at"], "last_used": k["last_used"],
+                     "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at"),
+                     "models": models,                     # 模型绑定（list）；None = 不限制
+                     "models_missing": [m for m in (models or []) if m not in valid]})
     return {
         "version": config.VERSION,
         "user": A.public_user(user),
         "is_admin": user.get("role") == "admin",
         "viewing_user": (A.public_user(viewing) if viewing["id"] != user["id"] else None),
         "api_keys": keys,
+        "model_name_options": (reg.all_model_ids() if reg is not None else []),
+        "aggregate_names": (list(reg.aggregates) if reg is not None else []),
         "base_url": f"http://{config.HOST}:{config.PORT}",
         "base_path": config.get_base_path(),
         "base_path_env_locked": config.base_path_env_locked(),
@@ -1210,8 +1218,35 @@ async def change_password(request: Request, _: None = Depends(auth)):
 @router.get("/keys")
 async def my_keys(request: Request, _: None = Depends(auth)):
     user = _user(request)
-    keys = request.app.state.store.list_api_keys(user["id"])
-    return {"data": [{**k, "key": A.mask_key(k["key"]), "revoked": bool(k["revoked"])} for k in keys]}
+    store = request.app.state.store
+    keys = store.list_api_keys(user["id"])
+    reg = request.app.state.registry.get(user["id"])
+    valid = set(reg.all_model_ids()) if reg is not None else set()
+    data = []
+    for k in keys:
+        row = {**k, "key": A.mask_key(k["key"]), "revoked": bool(k["revoked"])}
+        row["models_missing"] = [m for m in (k.get("models") or []) if m not in valid]
+        data.append(row)
+    return {"data": data}
+
+
+def _validate_model_bindings(request: Request, user_id: int, raw) -> list | None:
+    """v1.2.0 模型绑定入参归一 + 校验。
+
+    None = 不绑定（不限制）；[] = 清空绑定（不限制）；list = 覆盖。
+    每项必须是该账号当前上游配置里客户端可请求的名称
+    （all_model_ids：「平台/模型」全名、裸模型名、别名、聚合名），否则 400 并列出坏名字。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or any(not isinstance(m, str) or not m.strip() for m in raw):
+        raise HTTPException(400, "models 必须是模型名字符串数组（空数组 = 清空绑定，恢复不限制）")
+    reg = request.app.state.registry.get(int(user_id))
+    valid = set(reg.all_model_ids()) if reg is not None else set()
+    clean = sorted({m.strip() for m in raw})
+    bad = [m for m in clean if m not in valid]
+    if bad:
+        raise HTTPException(400, f"这些模型名不在当前上游配置里：{', '.join(bad)}")
+    return clean or None
 
 
 def _parse_expires(v) -> str | None:
@@ -1239,12 +1274,13 @@ def _parse_expires(v) -> str | None:
 async def create_key(request: Request, _: None = Depends(auth)):
     body = await request.json() if await request.body() else {}
     user = _user(request)
+    models = _validate_model_bindings(request, user["id"], body.get("models"))
     key = request.app.state.store.create_api_key(
         user["id"], A.new_api_key(), str(body.get("label") or "")[:60],
-        _parse_expires(body.get("expires_at")))
+        _parse_expires(body.get("expires_at")), models)
     return {"ok": True, "key": key["key"], "id": key["id"],   # 明文只在这里返回一次
             "label": key["label"], "created_at": key["created_at"],
-            "expires_at": key.get("expires_at")}
+            "expires_at": key.get("expires_at"), "models": key.get("models")}
 
 
 @router.post("/keys/{key_id}/reveal")
@@ -1279,7 +1315,8 @@ async def reveal_key(key_id: int, request: Request, _: None = Depends(auth)):
 
 @router.patch("/keys/{key_id}")
 async def update_key(key_id: int, request: Request, _: None = Depends(auth)):
-    """改 key 的备注 / 过期时间。body: {label?, expires_at?}（expires_at 传 "" 或 null = 永不过期）。"""
+    """改 key 的备注 / 过期时间 / 模型绑定。body: {label?, expires_at?, models?}
+    （expires_at 传 "" 或 null = 永不过期；models 传 null 或 [] = 清空绑定恢复不限制）。"""
     body = await request.json() if await request.body() else {}
     user = _user(request)
     store = request.app.state.store
@@ -1293,8 +1330,13 @@ async def update_key(key_id: int, request: Request, _: None = Depends(auth)):
             raise HTTPException(404, "key 不存在")
     if "expires_at" in body:
         store.update_key_expires(user["id"], key_id, _parse_expires(body.get("expires_at")))
+    if "models" in body:
+        models = _validate_model_bindings(request, user["id"], body.get("models"))
+        if not store.update_key_models(user["id"], key_id, models):
+            raise HTTPException(404, "key 不存在")
     k2 = store.get_api_key(key_id)
-    return {"ok": True, "label": k2["label"], "expires_at": k2.get("expires_at")}
+    return {"ok": True, "label": k2["label"], "expires_at": k2.get("expires_at"),
+            "models": k2.get("models")}
 
 
 @router.delete("/keys/{key_id}")

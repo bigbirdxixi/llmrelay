@@ -3356,3 +3356,176 @@ def test_r123_urlfor_v1_dedup():
     a3 = Upstream(platform="a3", base_url="https://x.example/v1", type="anthropic",
                   extra={"messages_path": "/v1/messages"})
     assert a3.url_for("messages") == "https://x.example/v1/messages"
+
+
+# ---------------------------------------------------------------- R124 key↔模型/聚合绑定（v1.2.0 门禁 + 审计 + 列表过滤）
+def test_r124_key_model_binding(client, hdr):
+    """带绑定的 key：绑定的模型/聚合名 200；未绑定的模型 403 且写请求日志（dkey_id 归属）；
+    /v1/models 只列绑定名；不绑定的 key（存量）不限制；count_tokens 同样走门禁。"""
+    store = client.app.state.store
+    r = client.post("/api/aggregates", headers=hdr,
+                    json={"name": "r124agg", "entries": ["fake/fake-gpt", "fake/fake-gpt-2"]})
+    assert r.status_code == 200, r.text
+    kid = None
+    try:
+        cr = client.post("/api/keys", headers=hdr,
+                         json={"label": "r124bound", "models": ["fake/fake-gpt", "r124agg"]})
+        assert cr.status_code == 200, cr.text
+        kid = cr.json()["id"]; rk = cr.json()["key"]
+        bh = {"authorization": f"Bearer {rk}"}
+
+        ok1 = client.post("/v1/chat/completions", headers=bh, json={"model": "fake/fake-gpt", "messages": []})
+        assert ok1.status_code == 200, ok1.text
+        ok2 = client.post("/v1/chat/completions", headers=bh, json={"model": "r124agg", "messages": []})
+        assert ok2.status_code == 200, ok2.text
+
+        rr = client.post("/v1/chat/completions", headers=bh, json={"model": "fake/fake-gpt-2", "messages": []})
+        assert rr.status_code == 403 and "未绑定" in rr.text, rr.text
+        rows = store.recent(5)
+        hit = [x for x in rows if x.get("dkey_id") == kid and x.get("status") == "error"]
+        assert hit and "未绑定" in (hit[0].get("error") or ""), \
+            f"403 拦截要写进请求日志（dkey_id 归属）: {rows}"
+
+        ml = client.get("/v1/models", headers=bh).json()
+        ids = {i["id"] for i in ml["data"]}
+        assert "fake/fake-gpt" in ids and "r124agg" in ids, f"绑定名必须在列: {ids}"
+        assert "fake/fake-gpt-2" not in ids and "fakeclaude/fake-claude" not in ids, \
+            f"未绑定名不该列出: {ids}"
+
+        u2 = client.post("/v1/chat/completions", headers=hdr, json={"model": "fake/fake-gpt-2", "messages": []})
+        assert u2.status_code == 200, "不绑定的 key 不受限制（向后兼容）"
+
+        ct = client.post("/v1/messages/count_tokens", headers=bh, json={"model": "fake/fake-gpt-2", "messages": []})
+        assert ct.status_code == 403, f"count_tokens 同样走门禁: {ct.text}"
+    finally:
+        client.delete("/api/aggregates/r124agg", headers=hdr)
+        if kid is not None:
+            store.revoke_api_key(me_id(client), kid)
+
+
+def me_id(client):
+    return [u for u in client.app.state.store.list_users() if u.get("role") == "admin"][0]["id"]
+
+
+# ---------------------------------------------------------------- R125 绑定形式匹配 + PATCH 三态
+def test_r125_key_model_binding_forms_and_patch(client, hdr):
+    """形式匹配：绑裸名 ≠ 允许全名；别名可绑可直调；PATCH 三态（省略=不动 / []=清空 / list=覆盖）。
+    别名自包含（自建 r125-alias，不依赖 fake 平台既有 model_map——其他测试会覆盖它）。"""
+    p = client.get("/api/providers", headers=hdr).json()["data"]
+    fake = next(x for x in p if x["platform"] == "fake")
+    orig_map = dict(fake.get("model_map") or {})
+    base = {"platform": "fake", "name": fake["name"], "type": fake["type"],
+            "base_url": fake["base_url"], "api_keys": fake["api_keys"],
+            "models": fake["models"], "enabled": True, "timeout_s": fake.get("timeout_s", 300)}
+    assert client.post("/api/providers", headers=hdr,
+                       json={**base, "model_map": {**orig_map, "r125-alias": "fake-gpt"}}).status_code == 200
+    r = client.post("/api/keys", headers=hdr,
+                    json={"label": "r125", "models": ["fake-gpt", "r125-alias"]})
+    assert r.status_code == 200, r.text
+    kid = r.json()["id"]
+    bh = {"authorization": f"Bearer {r.json()['key']}"}
+    try:
+        ok1 = client.post("/v1/chat/completions", headers=bh, json={"model": "fake-gpt", "messages": []})
+        assert ok1.status_code == 200, ok1.text
+        ok2 = client.post("/v1/chat/completions", headers=bh, json={"model": "r125-alias", "messages": []})
+        assert ok2.status_code == 200, f"别名直呼应可用: {ok2.text}"
+
+        rr = client.post("/v1/chat/completions", headers=bh, json={"model": "fake/fake-gpt", "messages": []})
+        assert rr.status_code == 403, "绑裸名 ≠ 允许全名（形式也是绑定的一部分）"
+
+        # 省略 models = 不动
+        p1 = client.patch(f"/api/keys/{kid}", headers=hdr, json={"label": "r125-2"})
+        assert p1.status_code == 200 and p1.json()["models"] == ["fake-gpt", "r125-alias"], p1.text
+        assert client.post("/v1/chat/completions", headers=bh,
+                           json={"model": "fake-gpt", "messages": []}).status_code == 200
+
+        # [] = 清空 → 不限制
+        p2 = client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": []})
+        assert p2.status_code == 200 and p2.json()["models"] is None, p2.text
+        free = client.post("/v1/chat/completions", headers=bh, json={"model": "fake/fake-gpt-2", "messages": []})
+        assert free.status_code == 200, "清空绑定后不限制"
+
+        # list = 覆盖
+        p3 = client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": ["fake/fake-gpt-2"]})
+        assert p3.status_code == 200 and p3.json()["models"] == ["fake/fake-gpt-2"], p3.text
+        locked = client.post("/v1/chat/completions", headers=bh, json={"model": "fake/fake-gpt", "messages": []})
+        assert locked.status_code == 403, "覆盖后旧绑定失效"
+    finally:
+        client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": []})
+        client.post("/api/providers", headers=hdr, json={**base, "model_map": orig_map})
+
+
+# ---------------------------------------------------------------- R126 管理 API 校验 + 设置页字段
+def test_r126_key_model_binding_admin_api(client, hdr):
+    """POST 校验（无效名 400 并列出）；GET /api/settings 与 /api/keys 的 key 行带 models/models_missing，
+    /api/settings 带 model_name_options/aggregate_names（R73 式多端点字段回归锁）。"""
+    r = client.post("/api/keys", headers=hdr, json={"label": "r126bad", "models": ["no-such-model"]})
+    assert r.status_code == 400 and "no-such-model" in r.text, r.text
+    r2 = client.post("/api/keys", headers=hdr, json={"label": "r126ok", "models": ["fake/fake-gpt"]})
+    assert r2.status_code == 200 and r2.json()["models"] == ["fake/fake-gpt"], r2.text
+    kid = r2.json()["id"]
+
+    st = client.get("/api/settings", headers=hdr).json()
+    assert "model_name_options" in st and "aggregate_names" in st, "/api/settings 要带模型名选项"
+    assert "fake/fake-gpt" in st["model_name_options"] and "fake-gpt" in st["model_name_options"]
+    row = next(k for k in st["api_keys"] if k["id"] == kid)
+    assert row["models"] == ["fake/fake-gpt"] and row["models_missing"] == [], row
+    assert all("models" in k and "models_missing" in k for k in st["api_keys"]), "每行都要有绑定字段"
+
+    ks = client.get("/api/keys", headers=hdr).json()["data"]
+    krow = next(k for k in ks if k["id"] == kid)
+    assert krow["models"] == ["fake/fake-gpt"] and krow["models_missing"] == []
+    client.delete(f"/api/keys/{kid}", headers=hdr)
+
+
+# ---------------------------------------------------------------- R127 悬空绑定 + 老库迁移
+def test_r127_key_model_binding_dangling_and_migration(client, hdr, upstream_port):
+    """绑定的模型被删后：调该名走自然 404（门禁放行、resolve 兜底），key 行 models_missing 警告；
+    老库（api_keys 无 model_bindings 列）Store 打开自动迁移，旧 key 不限制。"""
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r127plat", "name": "R127(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["sk-x"], "models": ["r127m"]})
+    assert p.status_code == 200, p.text
+    cr = client.post("/api/keys", headers=hdr, json={"label": "r127", "models": ["r127plat/r127m"]})
+    assert cr.status_code == 200, cr.text
+    bh = {"authorization": f"Bearer {cr.json()['key']}"}
+    try:
+        ok = client.post("/v1/chat/completions", headers=bh, json={"model": "r127plat/r127m", "messages": []})
+        assert ok.status_code == 200, ok.text
+
+        assert client.delete("/api/providers/r127plat", headers=hdr).status_code == 200
+        rr = client.post("/v1/chat/completions", headers=bh, json={"model": "r127plat/r127m", "messages": []})
+        assert rr.status_code == 404, f"悬空绑定走模型不存在的 404（不是 403）: {rr.text}"
+
+        st = client.get("/api/settings", headers=hdr).json()
+        row = next(k for k in st["api_keys"] if k["id"] == cr.json()["id"])
+        assert "r127plat/r127m" in row["models_missing"], f"悬空绑定要显示警告: {row}"
+    finally:
+        client.delete(f"/api/keys/{cr.json()['id']}", headers=hdr)
+
+    # 老库迁移：api_keys 无 model_bindings 列 → Store 打开自动补列
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from app.storage import Store
+    tmp = Path(tempfile.mkdtemp())
+    db = tmp / "old-r127.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE api_keys (id INTEGER PRIMARY KEY, user_id INTEGER, key TEXT, "
+              "label TEXT, created_at TEXT, last_used TEXT, revoked INTEGER DEFAULT 0)")
+    c.execute("INSERT INTO api_keys (user_id, key, label, created_at) VALUES (1, 'sk-old-r127', '旧key', '2026-11-01T00:00:00')")
+    c.commit()
+    c.close()
+    s2 = Store(db)
+    s2.create_user("r127old@x.local", "ph", role="user")
+    old = s2.get_api_key(1)
+    assert old["models"] is None, "老库迁移后旧 key 默认不限制"
+    got_old = s2.user_for_api_key("sk-old-r127")
+    assert got_old and got_old["_key_models"] is None, "旧 key 鉴权附带 _key_models=None"
+    assert s2.update_key_models(1, 1, ["fake-gpt"])
+    assert s2.get_api_key(1)["models"] == ["fake-gpt"]
+    new = s2.create_api_key(1, "sk-new-r127", "new", None, ["fake-gpt", "fake/fake-gpt-2"])
+    assert new["models"] == ["fake-gpt", "fake/fake-gpt-2"]
+    got_new = s2.user_for_api_key("sk-new-r127")
+    assert got_new and got_new["_key_models"] == ["fake-gpt", "fake/fake-gpt-2"]
+    s2.close()

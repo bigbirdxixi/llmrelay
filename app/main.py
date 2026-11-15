@@ -172,6 +172,32 @@ def _auth_error(fmt: str, reason: str, token: str = "", path: str = "", request=
     return error_response(fmt, 401, msg, "invalid_api_key")
 
 
+def _model_binding_gate(user: dict | None, request: Request, in_fmt: str, model: str):
+    """v1.2.0 模型绑定门禁：带绑定的 key 只能调白名单内的模型/聚合名（原始请求串精确匹配，
+    不做形式归一——绑裸名 ≠ 允许「平台/模型」全名，形式也是绑定的一部分）。
+
+    未违规返回 None；违规写一条请求日志（403 + dkey_id 归属，审计「谁越界调了什么」）
+    并返回 403 响应。"""
+    allowed = (user or {}).get("_key_models")
+    if not user or not allowed or not model or model in allowed:
+        return None
+    try:
+        ip = request.client.host if request.client else ""
+        request.app.state.store.record(
+            platform="", model=model, in_format=in_fmt,
+            status="error", http_status=403,
+            error=f"模型绑定限制：该 key 未绑定模型 {model!r}",
+            client_ip=ip, user_id=user.get("id"), dkey_id=user.get("_key_id"))
+    except Exception:
+        log.exception("模型绑定拦截审计日志写入失败")
+    sample = "、".join(allowed[:8]) + ("…" if len(allowed) > 8 else "")
+    return error_response(
+        in_fmt, 403,
+        f"这把 key 未绑定模型 {model!r}（只允许 {len(allowed)} 个模型：{sample}）。"
+        f"如需访问请在控制台「设置 → 我的 API Key」修改该 key 的模型绑定。",
+        "model_not_bound")
+
+
 async def _handle(request: Request, in_fmt: str, kind: str):
     """kind: chat -> /v1/chat/completions ；messages -> /v1/messages。"""
     user, reason = authenticate(request)
@@ -192,6 +218,10 @@ async def _handle(request: Request, in_fmt: str, kind: str):
 
     model = str(body.get("model") or "").strip()
     force = (request.headers.get("x-upstream-platform") or "").strip() or None
+    # v1.2.0 模型绑定门禁：带绑定的 key 只能调白名单内的模型/聚合名
+    gate = _model_binding_gate(user, request, in_fmt, model)
+    if gate is not None:
+        return gate
     # 聚合模型：裸名命中聚合配置 → 在多个「平台/模型」条目间自动轮换/切换
     if model and model in reg.aggregates and not force:
         est_prompt = T.estimate_tokens(T.flatten_messages_text(body))
@@ -253,6 +283,9 @@ async def embeddings(request: Request):
     except Exception:
         return error_response("openai", 400, "请求体不是合法 JSON", "invalid_json")
     model = str(body.get("model") or "")
+    gate = _model_binding_gate(user, request, "openai", model)
+    if gate is not None:
+        return gate
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
         return error_response("openai", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
@@ -286,6 +319,9 @@ async def count_tokens(request: Request):
     except Exception:
         return error_response("anthropic", 400, "请求体不是合法 JSON", "invalid_json")
     model = str(body.get("model") or "")
+    gate = _model_binding_gate(user, request, "anthropic", model)
+    if gate is not None:
+        return gate
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
         return error_response("anthropic", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
@@ -341,6 +377,11 @@ async def list_models(request: Request):
             items.append({"id": ag["name"], "platform": "aggregation",
                          "provider_name": f"聚合模型 · {ag['usable']}/{len(ag['entries'])} 可用",
                          "model": ag["name"], "type": "openai", "enabled": ag["usable"] > 0})
+    # v1.2.0 模型绑定：带绑定的 key 只列白名单内的名称（id/model 任一形式命中即保留）
+    allowed = user.get("_key_models")
+    if allowed:
+        allowed = set(allowed)
+        items = [i for i in items if i["id"] in allowed or i.get("model") in allowed]
     if _is_anthropic_client(request):
         return JSONResponse(content={
             "data": [{"id": it["id"], "display_name": it["id"], "type": "model",

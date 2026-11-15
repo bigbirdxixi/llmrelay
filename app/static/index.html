@@ -2220,9 +2220,44 @@ async function delUser(id){
   catch(e){ toast("删除失败：" + e.message, "err"); }
 }
 
-/* 新建 Key：弹窗（备注 + 过期日期日历，精确到日；留空 = 永不过期）。
+/* 模型名分组（来自 /api/settings）：平台全名 / 裸模型名+别名 / 聚合模型。
+   新建 Key 与「改绑定」弹窗共用。 */
+function modelGroups(){
+  const s = S.settings || {};
+  const aggs = s.aggregate_names || [];
+  const agset = new Set(aggs);
+  const full = [], bare = [];
+  for(const n of (s.model_name_options || [])){
+    if(agset.has(n)) continue;
+    (n.indexOf("/") >= 0 ? full : bare).push(n);
+  }
+  return {full, bare, aggs};
+}
+function modelPickHtml(selected){
+  const g = modelGroups();
+  const box = (n, ck) =>
+    `<label style="display:block;font-size:12px;margin:2px 0;cursor:pointer">` +
+    `<input type="checkbox" data-mk="${esc(n)}" ${ck ? "checked" : ""}> ${esc(n)}</label>`;
+  const sec = (t, list) => list.length
+    ? `<div style="margin-top:8px"><div class="dim" style="font-size:11.5px;margin-bottom:2px">${t}（${list.length}）</div>` +
+      list.map(n => box(n, (selected || []).indexOf(n) >= 0)).join("") + `</div>` : "";
+  if(!(g.full.length + g.bare.length + g.aggs.length))
+    return '<div class="dim" style="font-size:12px">暂无可用模型：请先在上游平台登记模型</div>';
+  return `<div style="max-height:230px;overflow:auto;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px">
+    ${sec("平台全名（platform/model）", g.full)}
+    ${sec("裸模型名 / 别名", g.bare)}
+    ${sec("聚合模型", g.aggs)}
+  </div>
+  <div class="dim" style="font-size:11.5px;margin-top:5px">形式也是绑定的一部分：勾裸名 ≠ 允许用「平台/模型」全名调用，按客户端实际要传的形式勾。</div>`;
+}
+
+/* 新建 Key：弹窗（备注 + 过期日期日历 + 模型绑定多选；留空 = 永不过期 / 不限制）。
    点「取消」只关弹窗、不生成 key；点「确定」才 POST 创建。 */
 async function newKey(){
+  if(!S.settings){
+    try{ S.settings = await api("/api/settings"); }
+    catch(e){ return toast("加载模型选项失败：" + e.message, "err"); }
+  }
   const body = $("#modalBody");
   body.innerHTML = `
     <h3>新建 Key</h3>
@@ -2230,6 +2265,8 @@ async function newKey(){
       <input id="nkLabel" maxlength="60" placeholder="例如：Hermes 桌面端 / 定时任务" style="max-width:340px"></div>
     <div class="field"><label>过期时间（日历选择，精确到日；留空 = 永不过期。选中的当天仍可用，次日失效）</label>
       <input id="nkExpire" type="date" style="max-width:220px"></div>
+    <div class="field"><label>模型绑定（可选：不勾 = 不限制；勾了之后这把 key 只能调用勾到的模型/聚合）</label>
+      ${modelPickHtml([])}</div>
     <div class="row" style="justify-content:flex-end;margin-top:18px">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="createKey()">确定</button>
@@ -2240,14 +2277,47 @@ async function newKey(){
 async function createKey(){
   const label = $("#nkLabel").value.trim();
   const exp = $("#nkExpire").value;   // "YYYY-MM-DD" 或 ""（永不过期）
+  const models = [...document.querySelectorAll("#modalBody input[data-mk]:checked")].map(x => x.dataset.mk);
   try{
-    const r = await api("/api/keys", { method: "POST", body: { label, expires_at: exp } });
+    const body = { label, expires_at: exp };
+    if(models.length) body.models = models;   // 不勾 = 不传 = 不限制
+    const r = await api("/api/keys", { method: "POST", body });
     closeModal();
     copyText(r.key);
     alert("新 Key 已创建（并尝试复制到剪贴板）：\n\n" + r.key
-      + (r.expires_at ? "\n\n过期时间：" + r.expires_at.slice(0,10) + "（当天仍可用）" : "\n\n永不过期"));
+      + (r.expires_at ? "\n\n过期时间：" + r.expires_at.slice(0,10) + "（当天仍可用）" : "\n\n永不过期")
+      + (models.length ? "\n\n模型绑定：" + models.length + " 个（" + models.join("、") + "）" : "\n\n模型绑定：不限制"));
     renderSettings();
   }catch(e){ toast("创建失败：" + e.message, "err"); }
+}
+
+/* 改模型绑定：弹窗多选（预选当前绑定；全不勾 = 清空恢复不限制） */
+async function editKeyModels(id){
+  if(!S.settings){
+    try{ S.settings = await api("/api/settings"); }
+    catch(e){ return toast("加载模型选项失败：" + e.message, "err"); }
+  }
+  const k = (S.settings.api_keys || []).find(x => x.id === id);
+  const cur = (k && k.models) || [];
+  const body = $("#modalBody");
+  body.innerHTML = `
+    <h3>改模型绑定 · ${esc((k && k.label) || ("Key #" + id))}</h3>
+    <div class="field"><label>这把 key 能调用的模型（全不勾 = 不限制）</label>
+      ${modelPickHtml(cur)}</div>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveKeyModels(${id})">保存</button>
+    </div>`;
+  $("#modal").classList.add("on");
+}
+async function saveKeyModels(id){
+  const models = [...document.querySelectorAll("#modalBody input[data-mk]:checked")].map(x => x.dataset.mk);
+  try{
+    await api(`/api/keys/${id}`, { method: "PATCH", body: { models } });
+    closeModal();
+    toast(models.length ? "模型绑定已保存（" + models.length + " 个模型）" : "模型绑定已清空，不再限制", "ok");
+    renderSettings();
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
 }
 
 /* 改过期：弹窗日历控件，精确到日；cur = 当前过期日（YYYY-MM-DD，无则空） */
@@ -2328,6 +2398,7 @@ async function changePassword(){
 async function renderSettings(){
   const box = $("#tab-settings");
   const s = await api("/api/settings");
+  S.settings = s;   // key 弹窗（新建/改绑定）复用这份数据（model_name_options 等）
   const ro = !!s.viewing_user;   // 管理员切到租户视角：key 清单只读
   const base = location.origin + BASE;
   const code = (t) => `<div class="code">${esc(t)}</div>`;
@@ -2414,9 +2485,14 @@ async function renderSettings(){
             (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : "")}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
-        <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th>
+        <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
       </tr></thead><tbody>${(s.api_keys||[]).map(k => {
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
+        const mm = k.models_missing || [];
+        const modelsCell = (k.models && k.models.length)
+          ? `<span class="mono" title="${esc(k.models.join("、"))}">绑定 ${k.models.length}</span>`
+            + (mm.length ? ` <span style="color:var(--red,#f87171)" title="${esc(mm.join("、"))}">⚠ ${mm.length} 个已不存在</span>` : "")
+          : '<span class="dim">不限制</span>';
         return `<tr>
         <td class="mono">${esc(k.key)}${ro ? "" : `
           <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button>`}</td>
@@ -2425,8 +2501,10 @@ async function renderSettings(){
         <td class="mono ${expired ? "num" : "dim"}">${k.expires_at
           ? `<span style="color:${expired ? "var(--red,#f87171)" : "inherit"}">${esc(k.expires_at.replace("T"," ").slice(0,16))}${expired ? " · 已过期" : ""}</span>`
           : "永不过期"}</td>
+        <td>${modelsCell}</td>
         <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
-        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
+        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick="editKeyModels(${k.id})">模型</button>
+          <button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
           <button class="btn sm danger" onclick="delKey(${k.id})">删除</button>`}</td>
       </tr>`;
       }).join("")}</tbody></table>` : `<div class="empty">${ro ? "该账号还没有 key" : "还没有 key，点右上角新建"}</div>`}

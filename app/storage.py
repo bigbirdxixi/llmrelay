@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     last_used   TEXT,
     revoked     INTEGER NOT NULL DEFAULT 0,
     expires_at  TEXT,              -- 过期时间（ISO 带时区；NULL/空 = 永不过期）
+    model_bindings TEXT,           -- 模型绑定（JSON 数组：该 key 可调的客户端模型名；NULL/空 = 不限制）v1.2.0
     key_mac     BLOB,             -- HMAC-SHA256(K_mac, key)：验签专用（确定性、建索引，O(1)）
     key_enc     BLOB             -- AES-GCM(K_enc, key)：可逆，复制按钮取回用（NULL = 尚未迁移）
 );
@@ -139,6 +141,8 @@ class Store:
             self._conn.execute("ALTER TABLE api_keys ADD COLUMN key_mac BLOB")
         if "key_enc" not in khave:
             self._conn.execute("ALTER TABLE api_keys ADD COLUMN key_enc BLOB")
+        if "model_bindings" not in khave:
+            self._conn.execute("ALTER TABLE api_keys ADD COLUMN model_bindings TEXT")
         # 列齐了才建唯一索引（NULL 可重复：未迁移的老行不受影响；SQLite 里 NULL 互不冲突）
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_key_mac ON api_keys (key_mac)")
 
@@ -1094,19 +1098,45 @@ class Store:
             return self._conn.execute(
                 "SELECT COUNT(*) FROM key_reveal_log WHERE key_id = ?", (int(key_id),)).fetchone()[0]
 
+    # ---------- 模型绑定（key 白名单）存取 ----------
+    @staticmethod
+    def _models_to_json(models) -> str | None:
+        """绑定列表 → 存储形式：None/空列表 = NULL（不限制）；否则 JSON 串（去重 + 排序，展示稳定）。"""
+        if not models:
+            return None
+        clean = sorted({str(m).strip() for m in models if str(m).strip()})
+        return json.dumps(clean, ensure_ascii=False) if clean else None
+
+    @staticmethod
+    def _models_from_json(raw) -> list | None:
+        """存储形式 → 绑定列表：NULL/空/坏值 = None（不限制）。"""
+        if not raw:
+            return None
+        try:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                out = [str(x).strip() for x in v if str(x).strip()]
+                return out or None
+        except (TypeError, ValueError):
+            return None
+        return None
+
     def create_api_key(self, user_id: int, key: str, label: str = "",
-                       expires_at: str | None = None) -> dict:
+                       expires_at: str | None = None,
+                       model_bindings: list | None = None) -> dict:
         """expires_at：ISO 带时区字符串；None/空 = 永不过期。
+        model_bindings：该 key 可调的客户端模型/聚合名（原始请求串形式）；None/空 = 不限制。
         加密双列（key_mac/key_enc）随主键一起写（cipher 未注入时留 NULL，验签走明文兜底）。"""
         c = self._key_cipher
         mac = c.mac(key) if c else None
         enc = c.seal(key) if c else None
+        bindings = self._models_to_json(model_bindings)
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at, key_mac, key_enc)"
-                " VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at, key_mac, key_enc, model_bindings)"
+                " VALUES (?,?,?,?,?,?,?,?)",
                 (int(user_id), key, (label or "")[:60], self._now(),
-                 (expires_at or "").strip() or None, mac, enc))
+                 (expires_at or "").strip() or None, mac, enc, bindings))
             self._conn.commit()
             kid = cur.lastrowid
         return self.get_api_key(kid)
@@ -1129,6 +1159,16 @@ class Store:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def update_key_models(self, user_id: int, key_id: int,
+                          model_bindings: list | None) -> bool:
+        """改 key 的模型绑定（None/空列表 = 清空 → 不限制）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE api_keys SET model_bindings = ? WHERE id = ? AND user_id = ?",
+                (self._models_to_json(model_bindings), int(key_id), int(user_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def get_api_key(self, key_id: int) -> dict | None:
         """取一条 api_keys（BLOB 双列剥掉：bytes 进不了 JSON 序列化，对外永远只给明文 key 列）。"""
         with self._lock:
@@ -1146,6 +1186,7 @@ class Store:
         d = dict(r)
         d.pop("key_mac", None)    # 32B HMAC：服务端内部用，不外泄
         d.pop("key_enc", None)    # AES-GCM 密文：服务端内部用，不外泄
+        d["models"] = Store._models_from_json(d.pop("model_bindings", None))  # 解析后外泄：list 或 None（不限制）
         return d
 
     def revoke_api_key(self, user_id: int, key_id: int) -> bool:
@@ -1176,7 +1217,8 @@ class Store:
         _key_id（api_keys.id，供记账 dkey_id 维度）、
         _key_revoked（该 key 已被禁用/吊销 → 调用方拦 401「已禁用」）、
         _key_expired（过期时间已到 → 调用方拦 401「已过期」）、
-        _key_expires_at（原始过期时间 ISO 串，报错信息里回显用；无过期 = ""）。
+        _key_expires_at（原始过期时间 ISO 串，报错信息里回显用；无过期 = ""）、
+        _key_models（模型绑定白名单，list；None = 不限制 → 调用方做路由门禁）。
         """
         key = (key or "").strip()
         if not key:
@@ -1186,14 +1228,16 @@ class Store:
             # 主路径：MAC 索引一击命中（O(1)；加密双列是 v1.1.0 起默认路径）
             if self._key_cipher is not None:
                 r = self._conn.execute(
-                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked"
+                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked,"
+                    " k.model_bindings AS key_models"
                     " FROM api_keys k JOIN users u ON u.id = k.user_id"
                     " WHERE k.key_mac = ? AND u.status = 'active'",
                     (self._key_cipher.mac(key),)).fetchone()
             # 兜底：历史未迁移行（key_mac NULL）仍按明文列验签，迁移完成后此分支自然无人命中
             if r is None:
                 r = self._conn.execute(
-                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked"
+                    "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked,"
+                    " k.model_bindings AS key_models"
                     " FROM api_keys k JOIN users u ON u.id = k.user_id"
                     " WHERE k.key = ? AND u.status = 'active'", (key,)).fetchone()
             if r:
@@ -1208,6 +1252,7 @@ class Store:
         user["_key_expires_at"] = exp
         user["_key_revoked"] = bool(user.pop("key_revoked"))
         user["_key_expired"] = (not user["_key_revoked"]) and bool(exp) and self._now() >= exp
+        user["_key_models"] = self._models_from_json(user.pop("key_models", None))
         return user
 
     def close(self) -> None:

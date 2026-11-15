@@ -2,6 +2,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [1.2.0] - 2026-11-15
+
+### 功能：下游 Key 模型绑定（key ↔ 模型/聚合 白名单）
+- 新建/编辑下游 key 时可绑定「该 key 能调用的模型/聚合」白名单：设置页「我的 API Key」表新增「模型绑定」列（不限制 / 绑定 N，悬停列全名；绑定名在上游配置里被删后显示 ⚠ 警告），新建 Key 弹窗与每行「模型」按钮提供分组多选（平台全名 / 裸模型名+别名 / 聚合模型）
+- 带绑定的 key 只能调白名单内的名称（**原始请求串精确匹配**：绑裸名 ≠ 允许「平台/模型」全名，形式也是绑定的一部分；聚合名与模型名同一命名空间）；越界调用 **403「model_not_bound」** 并写一条请求日志（403 + dkey_id 归属 + 原因，日志页可按下游 key 审计越界尝试）
+- `GET /v1/models` 对带绑定的 key 只列白名单内的名称（客户端按列表选模型，不列调不动的）；`/v1/messages`、`/v1/messages/count_tokens`、`/v1/embeddings` 同样走门禁
+- 向后兼容：`api_keys.model_bindings` 新列（JSON，NULL = 不限制），老库打开自动迁移；**存量 key 行为完全不变**；悬空绑定不级联清理（调已删模型走自然 404，列表行给警告）
+- 管理 API：`POST /api/keys` 加 `models`（每项须在当前上游配置存在，无效名 400 并列出）；`PATCH /api/keys/{id}` 加 `models` 三态（省略=不动 / `[]` 或 `null`=清空 / 数组=覆盖）；`GET /api/keys` 与 `GET /api/settings` 的 key 行带 `models` + `models_missing`，`/api/settings` 另带 `model_name_options`（客户端可请求名全集，绑定多选数据源）+ `aggregate_names`
+- 控制台 Cookie 会话与 master 路径不受影响（门禁只作用于带 key 行的下游请求）
+- 回归测试 R124–R127（门禁/审计/列表过滤、形式匹配与 PATCH 三态、管理 API 与多端点字段、悬空绑定与老库迁移；累计 114 全绿）
+
 ## [1.1.3] - 2026-11-15
 
 ### 修复：anthropic 协议在 base_url 已带 /v1 时拼出 /v1/v1 → 404「Invalid URL」
