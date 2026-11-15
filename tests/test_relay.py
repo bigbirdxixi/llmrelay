@@ -3187,8 +3187,21 @@ def test_r116_all_mode_lists_every_tenant(client, hdr):
     # 概览/模型清单也按全量算
     ov = client.get("/api/overview?tenant=all", headers=hdr).json()
     assert ov["providers"] >= 2 and ov["models"] >= 2
-    ids = client.get("/api/models?tenant=all", headers=hdr).json()["ids"]
-    assert "aggplat/aggm1" in ids and "aggplat2/aggm2" in ids
+    ids = client.get("/api/models?tenant=all", headers=hdr).json()
+    assert "aggplat/aggm1" in ids["ids"] and "aggplat2/aggm2" in ids["ids"]
+    # v1.2.2：多租户合并的三组分组（panel 分组渲染数据源）：去重 + 组内排序
+    g = ids["groups"]
+    assert g["full"] == sorted(g["full"]) and g["bare"] == sorted(g["bare"]) and g["aggs"] == sorted(g["aggs"])
+    assert {"aggplat/aggm1", "aggplat2/aggm2"} <= set(g["full"]), g["full"]
+    assert {"aggm1", "aggm2"} <= set(g["bare"]), g["bare"]
+    assert g["aggs"].count("aggpool") == 1 and "aggpool" in g["aggs"], f"同名聚合应去重: {g['aggs']}"
+    # 汇总视图按用户维度再分组：逐账号的三组（label=邮箱/显示名）
+    tmap = {t["id"]: t for t in ids["tenants"]}
+    assert uid_a in tmap and uid_b in tmap, f"两个账号都要有逐组数据: {list(tmap)}"
+    assert "aggplat/aggm1" in tmap[uid_a]["groups"]["full"], tmap[uid_a]
+    assert "aggplat2/aggm2" in tmap[uid_b]["groups"]["full"], tmap[uid_b]
+    for t in ids["tenants"]:
+        assert t["groups"]["full"] == sorted(t["groups"]["full"]), f"用户 {t['id']} 组内要排序"
 
 
 # ---------------------------------------------------------------- R117 汇总视图是只读的：写/探测端点 400
@@ -3576,6 +3589,13 @@ def test_r128_binding_options_groups_sorted(client, hdr, upstream_port):
         m = client.get("/v1/models", headers={"authorization": f"Bearer {r_open.json()['key']}"})
         ids = {x["id"] for x in m.json()["data"]}
         assert {"r128plat/r128a", "r128a"} <= ids, f"/v1/models 两种形式都要有: {ids}"
+
+        # /api/models 三组分组字段（v1.2.2 panel 分组渲染数据源）：组内排序，三组并集 = 全量 ids
+        md = client.get("/api/models", headers=hdr).json()
+        g = md["groups"]
+        assert g["full"] == sorted(g["full"]) and g["bare"] == sorted(g["bare"]) and g["aggs"] == sorted(g["aggs"])
+        assert "r128plat/r128a" in g["full"] and "r128a" in g["bare"]
+        assert set(g["full"]) | set(g["bare"]) | set(g["aggs"]) == set(md["ids"]), "三组并集应等于全量 ids"
     finally:
         for kid in keys:
             client.delete(f"/api/keys/{kid}", headers=hdr)

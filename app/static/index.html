@@ -256,6 +256,8 @@ tbody tr:hover td{background:#101a28}
 const S = { tab: "overview",
             user: null, tenant: "", authMode: "login", pick: {},
             providers: [], presets: [], overview: null, models: [],
+            modelGroups: {full: [], bare: [], aggs: []},
+            modelTenants: [],
             users: [] };
 const PALETTE = ["#4f8cff","#38bdf8","#34d399","#fbbf24","#f472b6","#a78bfa","#fb923c","#22d3ee","#f87171","#a3e635"];
 
@@ -1228,10 +1230,35 @@ async function renderProviders(){
     ${aggregatePanelHtml()}
     <div class="panel">
       <h2>全部可用模型 <small>${nf(S.models.length)} 个</small></h2>
-      <div class="chips">${(S.models||[]).map(m => `<span class="chip mono">${esc(m)}</span>`).join("") || '<span class="dim">暂无</span>'}</div>
+      ${modelPanelGroupsHtml()}
     </div>
   `;
+}
 
+/* 「全部可用模型」panel 的分组渲染（v1.2.2）：
+   - 单账号视图：三组（平台全名 / 裸模型名·别名 / 聚合模型），组内按首字母排序；
+   - 汇总视图（全部账号/多选账号）：先按用户维度分组，每个用户内再分三组（同样组内排序）。
+   数据源 = /api/models 的 groups / tenants（与绑定弹窗同源 Registry.binding_options）。 */
+function modelPanelGroupsHtml(){
+  const chips = list => `<div class="chips">${list.map(m => `<span class="chip mono">${esc(m)}</span>`).join("")}</div>`;
+  const t3 = g => {
+    const sec = (t, list) => list.length
+      ? `<div class="dim" style="font-size:11.5px;margin:4px 0 3px">${t}（${list.length}）</div>` + chips(list) : "";
+    if(!(g.full.length + g.bare.length + g.aggs.length))
+      return '<span class="dim">暂无</span>';
+    return sec("平台全名", g.full) + sec("裸模型名 / 别名", g.bare) + sec("聚合模型", g.aggs);
+  };
+  const tenants = S.modelTenants || [];
+  if(S.tenant !== "" && tenants.length){      // 汇总视图：按用户维度再分组
+    return tenants.map(t => {
+      const g = t.groups || {full: [], bare: [], aggs: []};
+      const n = g.full.length + g.bare.length + g.aggs.length;
+      return `<div style="margin-top:8px">
+        <div class="dim" style="font-size:12px;margin-bottom:2px">${esc(t.label)}（${nf(n)} 个）</div>
+        ${t3(g)}</div>`;
+    }).join("");
+  }
+  return t3(S.modelGroups || {full: [], bare: [], aggs: []});
 }
 
 const MR_OPTS = [["auto","跟随客户端"],["off","关闭思考"],["low","低"],["medium","中"],["high","高"]];
@@ -2697,6 +2724,8 @@ async function refreshAll(){
     S.overview = await api("/api/overview");
     const m = await api("/api/models");
     S.models = m.ids || [];
+    S.modelGroups = m.groups || {full: [], bare: [], aggs: []};   // v1.2.2：三组分组（平台全名/裸模型名·别名/聚合），组内已排序
+    S.modelTenants = m.tenants || [];                               // 汇总视图（全部账号/多选）：逐账号的三组，面板按用户维度再分组
     $("#hMeta").textContent = `v${S.overview.version} · ${S.overview.enabled_providers} 个平台 · ${S.overview.models} 个模型 · 累计 ${fmtTok(S.overview.totals.total_tokens)} tokens`;
     await RENDERERS[S.tab]();
   }catch(e){ toast("刷新失败：" + e.message, "err"); }

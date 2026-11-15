@@ -733,8 +733,17 @@ async def probe_stop(platform: str, request: Request, _: None = Depends(auth)):
 
 @router.get("/models")
 async def models(request: Request, _: None = Depends(auth)):
+    # v1.2.2：加 groups 三组（平台全名/裸模型名·别名/聚合模型，组内首字母排序）供「全部可用模型」panel 分组渲染，
+    # 与绑定弹窗同源（Registry.binding_options）；ids 保持全量扁平清单（计数用，两种调用形式 + 聚合名）
+    def _merge_groups(regs: list) -> dict[str, list[str]]:
+        out = {"full": set(), "bare": set(), "aggs": set()}
+        for r in regs:
+            g = r.binding_options()
+            out["full"].update(g["full"]); out["bare"].update(g["bare"]); out["aggs"].update(g["aggs"])
+        return {k: sorted(v) for k, v in out.items()}
     if _multi_mode(request):
-        regs = [r for _, _, r in _sel_tenant_regs(request)]
+        triples = _sel_tenant_regs(request)
+        regs = [r for _, _, r in triples]
         idx: list[dict] = []
         for r in regs:
             for row in r.model_index():
@@ -742,9 +751,13 @@ async def models(request: Request, _: None = Depends(auth)):
         ids: set[str] = set()
         for r in regs:
             ids.update(r.all_model_ids())
-        return {"data": idx, "ids": sorted(ids)}
+        # v1.2.2：汇总视图（tenant=all/多选）面板要按用户维度再分组 → 逐账号带三组
+        tenants = [{"id": uid, "label": label, "groups": r.binding_options()}
+                   for uid, label, r in triples]
+        return {"data": idx, "ids": sorted(ids), "groups": _merge_groups(regs), "tenants": tenants}
     reg = _reg(request)
-    return {"data": reg.model_index(), "ids": reg.all_model_ids()}
+    return {"data": reg.model_index(), "ids": reg.all_model_ids(),
+            "groups": reg.binding_options(), "tenants": []}
 
 
 # ---------------------------------------------------------------- 统计
