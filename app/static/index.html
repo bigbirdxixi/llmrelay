@@ -1858,7 +1858,7 @@ function quickRangeBtn(r, label){
 async function renderLogs(page){
   if (!S.logFilters) S.logFilters = {};
   if (S.logRange === undefined && !S.logDateFrom && !S.logDateTo){
-    S.logRange = "1h";   // 默认展现最近 1 小时的请求日志
+    S.logRange = "15m";   // 默认展现最近 15 分钟的请求日志
   }
   if (page != null) S.logPage = Math.max(1, page);
   if (S.logTotal && S.logPage > Math.max(1, Math.ceil(S.logTotal / LOG_PAGE)))
@@ -2024,7 +2024,7 @@ document.addEventListener("scroll", () => { if (S.thfPop != null) thfPopClose();
 
 function clearLogFilters(){
   S.logFilters = {};
-  S.logRange = "1h"; S.logDateFrom = S.logDateTo = "";   // 恢复默认：最近 1 小时
+  S.logRange = "15m"; S.logDateFrom = S.logDateTo = "";   // 恢复默认：近 15 分钟（v1.2.1）
   renderLogs(1);
 }
 
@@ -2297,7 +2297,7 @@ function modelPickWire(){
   });
 }
 
-/* 新建 Key：弹窗（备注 + 过期日期日历 + 模型绑定多选；留空 = 永不过期 / 不限制）。
+/* 新建 Key：弹窗（名称 + 过期日期日历 + 模型绑定多选；留空 = 永不过期 / 不限制）。
    点「取消」只关弹窗、不生成 key；点「确定」才 POST 创建。 */
 async function newKey(){
   if(!S.settings){
@@ -2307,7 +2307,7 @@ async function newKey(){
   const body = $("#modalBody");
   body.innerHTML = `
     <h3>新建 Key</h3>
-    <div class="field"><label>备注（可留空，会显示在统计/日志的「下游 Key」里）</label>
+    <div class="field"><label>名称（可留空，会显示在统计/日志的「下游 Key」里）</label>
       <input id="nkLabel" maxlength="60" placeholder="例如：Hermes 桌面端 / 定时任务" style="max-width:340px"></div>
     <div class="field"><label>过期时间（日历选择，精确到日；留空 = 永不过期。选中的当天仍可用，次日失效）</label>
       <input id="nkExpire" type="date" style="max-width:220px"></div>
@@ -2390,6 +2390,30 @@ async function saveKeyExpire(id){
     toast(r.expires_at ? "已设置过期时间 " + r.expires_at.slice(0,10) + "（当天仍可用）" : "已设为永不过期", "ok");
     renderSettings();
   }catch(e){ toast("修改失败：" + e.message, "err"); }
+}
+
+/* 改名称（原「备注」列）：小弹窗输入，PATCH /api/keys/{id} 保存；留空 = 清空名称 */
+function editKeyLabel(id, cur){
+  const body = $("#modalBody");
+  body.innerHTML = `
+    <h3>改名称</h3>
+    <div class="field"><label>名称（可留空，会显示在统计/日志的「下游 Key」里）</label>
+      <input id="klNewLabel" maxlength="60" value="${esc(cur || "")}" placeholder="例如：Hermes 桌面端 / 定时任务" style="max-width:340px"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveKeyLabel(${id})">确定</button>
+    </div>`;
+  $("#modal").classList.add("on");
+  $("#klNewLabel").focus();
+}
+async function saveKeyLabel(id){
+  const label = $("#klNewLabel").value.trim();
+  try{
+    const r = await api(`/api/keys/${id}`, { method: "PATCH", body: { label } });
+    closeModal();
+    toast(r.label ? "名称已改为 " + r.label : "名称已清空", "ok");
+    renderSettings();
+  }catch(e){ toast("修改名称失败：" + e.message, "err"); }
 }
 
 function copyKey(id){
@@ -2533,7 +2557,7 @@ async function renderSettings(){
             (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : "")}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
-        <th>Key</th><th>备注</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
+        <th>Key</th><th>名称</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
       </tr></thead><tbody>${(s.api_keys||[]).map(k => {
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
         const mm = k.models_missing || [];
@@ -2551,7 +2575,8 @@ async function renderSettings(){
           : "永不过期"}</td>
         <td>${modelsCell}</td>
         <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
-        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick="editKeyModels(${k.id})">模型</button>
+        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyLabel(${k.id}, ${esc(JSON.stringify(k.label || ""))})'>改名称</button>
+          <button class="btn sm" onclick="editKeyModels(${k.id})">模型</button>
           <button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
           <button class="btn sm danger" onclick="delKey(${k.id})">删除</button>`}</td>
       </tr>`;
