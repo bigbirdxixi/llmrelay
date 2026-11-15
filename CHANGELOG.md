@@ -2,6 +2,14 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [1.1.3] - 2026-11-15
+
+### 修复：anthropic 协议在 base_url 已带 /v1 时拼出 /v1/v1 → 404「Invalid URL」
+- `anthropic (Messages 原生)` 协议的上游默认路径带 /v1 前缀（`/v1/messages`、`/v1/models`），按官方 `https://api.anthropic.com`（base 不带 /v1）设计；而 Agnes apihub 这类 OpenAI/Messages 双协议的 hub 惯例上 base_url 带 /v1（与 openai 协议一致），切到 anthropic 后 URL 拼成 `…/v1/v1/messages` → 上游 404「Invalid URL」，「测试模型」与「拉模型」全挂，失败的探测还会把模型清单自动清空
+- `Upstream.url_for` 增加 **/v1 去重**：base_url 已以 /v1 结尾时，anthropic 路径去掉前导 /v1——base 带 /v1（Agnes）输出 `…/v1/messages`；base 不带 /v1（官方 Anthropic）行为完全不变；openai 协议不受影响。**今后 openai/anthropic 切换协议永远不用动 base_url**
+- anthropic 预设 base_url 补上 /v1（`https://api.anthropic.com/v1`），与其余预设一致
+- 回归测试 R123（累计 110 全绿）
+
 ## [1.1.2] - 2026-11-15
 
 ### 功能：管理员「全部账号（汇总）」视图列出所有账号的上游平台与聚合模型
