@@ -19,7 +19,7 @@ from . import config
 from . import geoip as G
 from . import mailer as M
 from .gateway import UpstreamError
-from .registry import Upstream, fetch_models
+from .registry import Registry, Upstream, fetch_models
 
 router = APIRouter(prefix="/api")
 
@@ -36,6 +36,39 @@ def _user(request: Request) -> dict:
 def _reg(request: Request):
     """当前请求操作的账号配置：管理员可以用 ?tenant=<id> 管别人的平台。"""
     return request.app.state.tenants.get(A.tenant_of(request) or _user(request)["id"])
+
+
+def _all_tenant_regs(request: Request) -> list[tuple[int, str, Registry]]:
+    """汇总视图（管理员 ?tenant=all）逐账号列配置：[(uid, 显示名, reg)]。
+
+    - 只收「已有租户配置文件」的账号，不给没开过控制台的账号建文件
+    - 老单体配置（uid=0）仅在「有平台且还没被认领」时收录；
+      被第一个管理员认领后排除，避免和该管理员的 u<id> 文件重复计数
+    """
+    t = request.app.state.tenants
+    store = request.app.state.store
+    regs: list[tuple[int, str, Registry]] = []
+    for u in store.list_users():
+        uid = int(u["id"])
+        if t.path(uid).exists():
+            regs.append((uid, u["email"], t.get(uid)))
+    if not t.claimed and t.legacy_file is not None and t.legacy_file.exists():
+        reg0 = t.get(0)
+        if reg0.upstreams:
+            regs.append((0, "遗留配置（未认领）", reg0))
+    return regs
+
+
+def _all_mode(request: Request) -> bool:
+    """管理员 + ?tenant=all。tenant_of 只有这种情况返回 None，其他角色恒为账号 id。"""
+    return A.tenant_of(request) is None
+
+
+def _reg_scoped(request: Request):
+    """写 / 探测端点：汇总视图是只读的，不许静默操作管理员自己的配置。"""
+    if _all_mode(request):
+        raise HTTPException(400, "汇总视图为只读。要执行此操作，请在右上角账号选择器切到目标行所属的具体账号")
+    return _reg(request)
 
 
 def _email_map(store) -> dict[str, str]:
@@ -174,6 +207,24 @@ PRESETS: list[dict[str, Any]] = [
 async def overview(request: Request, _: None = Depends(auth)):
     reg = _reg(request)
     store = request.app.state.store
+    if _all_mode(request):
+        regs = [r for _, _, r in _all_tenant_regs(request)]
+        prov = sum(len(r.upstreams) for r in regs)
+        enab = sum(len(r.enabled()) for r in regs)
+        ids: set[str] = set()
+        for r in regs:
+            ids.update(r.all_model_ids())
+        return {
+            "version": config.VERSION,
+            "totals": store.totals(_data_user(request)),
+            "providers": prov,
+            "enabled_providers": enab,
+            "models": len(ids),
+            "records": store.record_count(user_id=_data_user(request)),
+            "today_bucket": store.summary("day", 1, _data_user(request))[:1],
+            "paths": {"db": str(config.DB_FILE), "upstreams": str(config.UPSTREAMS_FILE)},
+            "host": config.HOST, "port": config.PORT,
+        }
     return {
         "version": config.VERSION,
         "totals": store.totals(_data_user(request)),
@@ -200,19 +251,36 @@ def _public(up: Upstream) -> dict:
 
 @router.get("/providers")
 async def list_providers(request: Request, _: None = Depends(auth)):
+    if _all_mode(request):
+        data = []
+        for uid, label, reg in _all_tenant_regs(request):
+            for u in reg.upstreams:
+                row = _public(u)
+                row["tenant"] = uid
+                row["tenant_label"] = label
+                data.append(row)
+        return {"data": data, "presets": PRESETS, "all": True}
     reg = _reg(request)
     return {"data": [_public(u) for u in reg.upstreams], "presets": PRESETS}
 
 
 @router.get("/aggregates")
 async def list_aggregates(request: Request, _: None = Depends(auth)):
+    if _all_mode(request):
+        data = []
+        for uid, label, reg in _all_tenant_regs(request):
+            for a in reg.aggregate_info():
+                a["tenant"] = uid
+                a["tenant_label"] = label
+                data.append(a)
+        return {"data": data, "all": True}
     reg = _reg(request)
     return {"data": reg.aggregate_info()}
 
 
 @router.post("/aggregates")
 async def save_aggregate(request: Request, _: None = Depends(auth)):
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     data = await request.json()
     name = str(data.get("name") or "").strip()
     entries = [str(e).strip() for e in (data.get("entries") or []) if str(e).strip()]
@@ -236,7 +304,7 @@ async def save_aggregate(request: Request, _: None = Depends(auth)):
 
 @router.delete("/aggregates/{name}")
 async def delete_aggregate(name: str, request: Request, _: None = Depends(auth)):
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     if not reg.remove_aggregate(name):
         raise HTTPException(404, f"聚合模型 {name!r} 不存在")
     return {"ok": True}
@@ -287,7 +355,7 @@ async def reasoning_preview(request: Request, _: None = Depends(auth),
 
 @router.post("/providers")
 async def upsert_provider(request: Request, _: None = Depends(auth)):
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     payload = await request.json()
     platform = (payload.get("platform") or "").strip()
     if not platform:
@@ -349,7 +417,7 @@ async def upsert_provider(request: Request, _: None = Depends(auth)):
 
 @router.delete("/providers/{platform}")
 async def delete_provider(platform: str, request: Request, _: None = Depends(auth)):
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     up = reg.find(platform)
     if not reg.remove(platform):
         raise HTTPException(404, f"平台 {platform} 不存在")
@@ -358,7 +426,7 @@ async def delete_provider(platform: str, request: Request, _: None = Depends(aut
 
 @router.post("/providers/{platform}/refresh-models")
 async def refresh_models(platform: str, request: Request, _: None = Depends(auth)):
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     gw = request.app.state.gw
     up = reg.find(platform)
     if not up:
@@ -377,7 +445,7 @@ async def refresh_models(platform: str, request: Request, _: None = Depends(auth
 @router.get("/providers/{platform}/available-models")
 async def available_models(platform: str, request: Request, _: None = Depends(auth)):
     """拉取上游模型列表但**不写回配置**（编辑平台里模型下拉框用）。"""
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     gw = request.app.state.gw
     up = reg.find(platform)
     if not up:
@@ -394,7 +462,7 @@ async def available_models(platform: str, request: Request, _: None = Depends(au
 @router.post("/providers/{platform}/test")
 async def test_provider(platform: str, request: Request, _: None = Depends(auth)):
     """真发一条最小请求，验证 key / base_url / 协议是否可用。"""
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     gw = request.app.state.gw
     up = reg.find(platform)
     if not up:
@@ -519,7 +587,7 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
     - key 级 401/403 → 提前停止（剩下的测了也没意义）、一律保留不动，只报 key_error。
     被移除的模型随时可「拉取模型」恢复（拉的是全量目录）。
     body {"stream": true} 时返回 NDJSON 实时进度流（每行一个模型结果，末行 done + 汇总）。"""
-    reg = _reg(request)
+    reg = _reg_scoped(request)
     gw = request.app.state.gw
     up = reg.find(platform)
     if not up:
@@ -625,6 +693,16 @@ async def probe_stop(platform: str, request: Request, _: None = Depends(auth)):
 
 @router.get("/models")
 async def models(request: Request, _: None = Depends(auth)):
+    if _all_mode(request):
+        regs = [r for _, _, r in _all_tenant_regs(request)]
+        idx: list[dict] = []
+        for r in regs:
+            for row in r.model_index():
+                idx.append(row)
+        ids: set[str] = set()
+        for r in regs:
+            ids.update(r.all_model_ids())
+        return {"data": idx, "ids": sorted(ids)}
     reg = _reg(request)
     return {"data": reg.model_index(), "ids": reg.all_model_ids()}
 

@@ -306,7 +306,7 @@ const BASE = (function(){
 /* 管理员看别的账号时，给数据类接口自动带上 tenant */
 function withTenant(path){
   if(!S.tenant) return path;
-  if(!/^\/api\/(overview|stats|models|providers|health|settings)/.test(path)) return path;
+  if(!/^\/api\/(overview|stats|models|providers|aggregates|health|settings)/.test(path)) return path;
   return path + (path.indexOf("?") >= 0 ? "&" : "?") + "tenant=" + encodeURIComponent(S.tenant);
 }
 
@@ -1063,6 +1063,7 @@ function editProvider(platform){
 
 async function renderProviders(){
   const box = $("#tab-providers");
+  const all = S.tenant === "all";
   const data = await api("/api/providers");
   S.providers = data.data || []; S.presets = data.presets || [];
   const agData = await api("/api/aggregates");
@@ -1072,32 +1073,40 @@ async function renderProviders(){
     const models = (p.models || []).length + Object.keys(p.model_map || {}).length;
     const state = !p.enabled ? '<span class="pill">已停用</span>'
       : (p.key_count ? '<span class="pill ok">启用</span>' : '<span class="pill warn">缺 key</span>');
+    const acctTd = all ? `<td class="dim" style="font-size:11.5px">${esc(p.tenant_label || ("u" + p.tenant))}</td>` : "";
+    const ops = all
+      ? '<span class="dim" style="font-size:11.5px" title="汇总视图为只读">只读 · 切到该账号操作</span>'
+      : `<button class="btn sm" title="探测全部已登记模型：可用的保留，未授权/不可用的自动移除并写回（被移除的可再拉取模型补回）" onclick="testProvider('${esc(p.platform)}')">测试</button>
+        <button class="btn sm" onclick="refreshModels('${esc(p.platform)}')">拉模型</button>
+        <button class="btn sm" onclick="editProvider('${esc(p.platform)}')">编辑</button>
+        <button class="btn sm danger" onclick="delProvider('${esc(p.platform)}')">删除</button>`;
     return `<tr>
       <td><b>${esc(p.platform)}</b><div class="dim" style="font-size:11.5px">${esc(p.name||"")}</div></td>
+      ${acctTd}
       <td><span class="pill">${esc(p.type)}</span></td>
       <td class="mono dim" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${esc(p.base_url)}${p.proxy ? `<div style="font-size:11px">代理 ${esc(p.proxy)}</div>` : ""}</td>
       <td class="mono" style="font-size:11.5px">${keys}</td>
       <td class="num">${models}</td>
       <td>${reasoningPill(p)}</td>
       <td>${state}</td>
-      <td class="num">
-        <button class="btn sm" title="探测全部已登记模型：可用的保留，未授权/不可用的自动移除并写回（被移除的可再拉取模型补回）" onclick="testProvider('${esc(p.platform)}')">测试</button>
-        <button class="btn sm" onclick="refreshModels('${esc(p.platform)}')">拉模型</button>
-        <button class="btn sm" onclick="editProvider('${esc(p.platform)}')">编辑</button>
-        <button class="btn sm danger" onclick="delProvider('${esc(p.platform)}')">删除</button>
-      </td></tr>`;
+      <td class="num">${ops}</td></tr>`;
   }).join("");
+  const head = all
+    ? "<th>平台</th><th>账号</th><th>类型</th><th>Base URL</th><th>API Key</th><th class=\"num\">模型</th><th>思考</th><th>状态</th><th class=\"num\">操作</th>"
+    : "<th>平台</th><th>类型</th><th>Base URL</th><th>API Key</th><th class=\"num\">模型</th><th>思考</th><th>状态</th><th class=\"num\">操作</th>";
+  const addBtn = all
+    ? '<button class="btn primary sm" disabled title="汇总视图为只读，切到具体账号后再新增">+ 新增平台</button>'
+    : '<button class="btn primary sm" onclick="editProvider(null)">+ 新增平台</button>';
   box.innerHTML = `
     <div class="panel">
-      <h2>上游平台 <small>所有客户端请求都从这里转发出去</small>
+      <h2>上游平台 <small>${all ? "所有账号的平台都在这里，按账号列出" : "所有客户端请求都从这里转发出去"}</small>
         <span style="flex:1"></span>
-        <button class="btn primary sm" onclick="editProvider(null)">+ 新增平台</button>
+        ${addBtn}
       </h2>
       ${S.providers.length ? `<table><thead><tr>
-        <th>平台</th><th>类型</th><th>Base URL</th><th>API Key</th>
-        <th class="num">模型</th><th>思考</th><th>状态</th><th class="num">操作</th>
+        ${head}
       </tr></thead><tbody>${rows}</tbody></table>`
-      : '<div class="empty">还没有上游平台，点右上角「新增平台」开始</div>'}
+      : `<div class="empty">${all ? "全部账号都还没有上游平台" : "还没有上游平台，点右上角「新增平台」开始"}</div>`}
       <div class="dim" style="font-size:12px;margin-top:12px;line-height:1.7">
         提示：下游用 <span class="mono">platform/model</span> 指定平台与模型（例如
         <span class="mono">deepseek/deepseek-chat</span>）；也可以只写模型名，中转站按登记顺序自动挑平台。
@@ -1321,24 +1330,37 @@ async function saveProvider(platform){
 /* ---------------- 聚合模型：一个名字 -> 多个 平台/模型，轮询 + 失败冷却自动切换 ---------------- */
 function aggregatePanelHtml(){
   const list = S.aggregates || [];
-  return `<div class="panel">
-    <h2>聚合模型 <small>一个名字挂多个「平台/模型」，调用时自动轮换/切换（类似多 key）</small>
-      <span style="flex:1"></span>
-      <button class="btn primary sm" onclick="editAggregate(null)">+ 新增聚合</button>
-    </h2>
-    ${list.length ? `<table><thead><tr><th>聚合名</th><th>条目（按配置顺序轮询）</th><th class="num">可用</th><th class="num">操作</th></tr></thead><tbody>
-      ${list.map(a => `<tr>
+  const all = S.tenant === "all";
+  const addBtn = all
+    ? '<button class="btn primary sm" disabled title="汇总视图为只读，切到具体账号后再新增">+ 新增聚合</button>'
+    : '<button class="btn primary sm" onclick="editAggregate(null)">+ 新增聚合</button>';
+  const head = all
+    ? "<th>聚合名</th><th>账号</th><th>条目（按配置顺序轮询）</th><th class=\"num\">可用</th><th class=\"num\">操作</th>"
+    : "<th>聚合名</th><th>条目（按配置顺序轮询）</th><th class=\"num\">可用</th><th class=\"num\">操作</th>";
+  const rows = list.map(a => {
+    const ops = all
+      ? '<span class="dim" style="font-size:11.5px" title="汇总视图为只读">只读 · 切到该账号操作</span>'
+      : `<button class="btn sm" onclick="editAggregate('${esc(a.name)}')">编辑</button>
+         <button class="btn sm danger" onclick="delAggregate('${esc(a.name)}')">删除</button>`;
+    const acctTd = all ? `<td class="dim" style="font-size:11.5px">${esc(a.tenant_label || ("u" + a.tenant))}</td>` : "";
+    return `<tr>
         <td><b class="mono">${esc(a.name)}</b></td>
+        ${acctTd}
         <td>${a.entries.map(e => e.ok
             ? `<span class="chip mono" title="解析到 ${esc(e.platform)} / ${esc(e.up_model)}">${esc(e.entry)}</span>`
             : `<span class="chip mono dim" style="text-decoration:line-through" title="解析不到（平台停用或模型未登记）">${esc(e.entry)}</span>`).join(" ")}</td>
         <td class="num">${a.usable}/${a.entries.length}</td>
-        <td class="num">
-          <button class="btn sm" onclick="editAggregate('${esc(a.name)}')">编辑</button>
-          <button class="btn sm danger" onclick="delAggregate('${esc(a.name)}')">删除</button>
-        </td></tr>`).join("")}
+        <td class="num">${ops}</td></tr>`;
+  }).join("");
+  return `<div class="panel">
+    <h2>聚合模型 <small>${all ? "所有账号的聚合模型都在这里，按账号列出" : "一个名字挂多个「平台/模型」，调用时自动轮换/切换（类似多 key）"}</small>
+      <span style="flex:1"></span>
+      ${addBtn}
+    </h2>
+    ${list.length ? `<table><thead><tr>${head}</tr></thead><tbody>
+      ${rows}
       </tbody></table>`
-      : '<div class="dim" style="font-size:12.5px">还没有聚合模型。例：把 <span class="mono">google/gemini-2.5-flash</span> 和 <span class="mono">ollama/llama3.2:13b</span> 挂到 <span class="mono">Aggregation</span>，下游直接调 <span class="mono">Aggregation</span> 即可。</div>'}
+      : `<div class="dim" style="font-size:12.5px">${all ? "全部账号都还没有聚合模型" : "还没有聚合模型。例：把 <span class=\"mono\">google/gemini-2.5-flash</span> 和 <span class=\"mono\">ollama/llama3.2:13b</span> 挂到 <span class=\"mono\">Aggregation</span>，下游直接调 <span class=\"mono\">Aggregation</span> 即可。"}</div>`}
   </div>`;
 }
 

@@ -3142,3 +3142,100 @@ def test_r115_aggregates_and_mask_coexist(client, hdr):
     fake = next(p for p in d if p["platform"] == "fake")
     assert all("…" in k for k in fake["api_keys"]) and fake["api_keys"]
     client.delete("/api/aggregates/vt115", headers=hdr)
+# ---------------------------------------------------------------- R116 汇总视图：按账号列出全部上游平台 + 聚合模型
+def test_r116_all_mode_lists_every_tenant(client, hdr):
+    # 建两个普通账号，各自登记一个平台 + 同名聚合（跨账号重名要都能列出来）
+    ra = client.post("/api/users", headers=hdr, json={
+        "email": "aggx-a@test.local", "password": "aggx-password", "role": "user"})
+    assert ra.status_code == 200, ra.text
+    uid_a = ra.json()["user"]["id"]
+    rb = client.post("/api/users", headers=hdr, json={
+        "email": "aggx-b@test.local", "password": "aggx-password", "role": "user"})
+    assert rb.status_code == 200, rb.text
+    uid_b = rb.json()["user"]["id"]
+
+    ca = _session_cookie(client, "aggx-a@test.local", "aggx-password")
+    cb = _session_cookie(client, "aggx-b@test.local", "aggx-password")
+    for ck, uid, plat, model in ((ca, uid_a, "aggplat", "aggm1"),
+                                 (cb, uid_b, "aggplat2", "aggm2")):
+        r = client.post("/api/providers", cookies=ck, json={
+            "platform": plat, "type": "openai", "base_url": "http://127.0.0.1:9/v1",
+            "api_keys": ["sk-agg-test"], "models": [model]})
+        assert r.status_code == 200, r.text
+        r = client.post("/api/aggregates", cookies=ck, json={
+            "name": "aggpool", "entries": [f"{plat}/{model}"]})
+        assert r.status_code == 200, r.text
+
+    # 汇总视图：两个账号的平台都在，且带账号归属
+    d = client.get("/api/providers?tenant=all", headers=hdr).json()
+    assert d["all"] is True
+    tenants = {row["tenant"] for row in d["data"]}
+    assert uid_a in tenants and uid_b in tenants, (tenants, "两个账号都应出现在汇总里")
+    by = {(row["tenant"], row["platform"]) for row in d["data"]}
+    assert (uid_a, "aggplat") in by and (uid_b, "aggplat2") in by
+    assert not any(row["platform"] in ("aggplat", "aggplat2") and row["tenant"] not in (uid_a, uid_b)
+                   for row in d["data"])
+    labels = {row["tenant"]: row["tenant_label"] for row in d["data"]}
+    assert labels[uid_a] == "aggx-a@test.local" and labels[uid_b] == "aggx-b@test.local"
+
+    # 聚合模型：同名 aggpool 两个账号各一条，都带归属
+    ag = client.get("/api/aggregates?tenant=all", headers=hdr).json()
+    assert ag["all"] is True
+    rows = {(row["tenant"], row["name"]) for row in ag["data"]}
+    assert (uid_a, "aggpool") in rows and (uid_b, "aggpool") in rows
+
+    # 概览/模型清单也按全量算
+    ov = client.get("/api/overview?tenant=all", headers=hdr).json()
+    assert ov["providers"] >= 2 and ov["models"] >= 2
+    ids = client.get("/api/models?tenant=all", headers=hdr).json()["ids"]
+    assert "aggplat/aggm1" in ids and "aggplat2/aggm2" in ids
+
+
+# ---------------------------------------------------------------- R117 汇总视图是只读的：写/探测端点 400
+def test_r117_all_mode_is_readonly(client, hdr):
+    cases = [
+        ("POST", "/api/providers?tenant=all",
+         {"platform": "aggx3", "type": "openai", "base_url": "http://127.0.0.1:9/v1",
+          "api_keys": ["sk-x"], "models": ["m"]}),
+        ("POST", "/api/aggregates?tenant=all", {"name": "aggx3", "entries": ["aggx3/m"]}),
+        ("DELETE", "/api/providers/aggplat?tenant=all", None),
+        ("POST", "/api/providers/aggplat/test?tenant=all", None),
+        ("POST", "/api/providers/aggplat/probe?tenant=all", None),
+    ]
+    for method, path, body in cases:
+        if method == "DELETE":
+            r = client.delete(path, headers=hdr)
+        else:
+            r = client.post(path, headers=hdr, json=body if body is not None else None)
+        assert r.status_code == 400, (method, path, r.status_code, r.text)
+        assert "只读" in r.json()["detail"], (method, path, r.text)
+    # 同一批操作不带 tenant=all 时不受影响（管理员自己的配置仍可写）
+    ok = client.post("/api/aggregates", headers=hdr,
+                     json={"name": "aggxguard", "entries": ["fake/fake-gpt"]})
+    assert ok.status_code == 200, ok.text
+    client.delete("/api/aggregates/aggxguard", headers=hdr)
+
+
+# ---------------------------------------------------------------- R118 老配置认领后不重复计数
+def test_r118_legacy_no_double_count(client, hdr):
+    d = client.get("/api/providers?tenant=all", headers=hdr).json()
+    legacy_rows = [row for row in d["data"] if row["platform"] == "fake"]
+    assert len(legacy_rows) == 1, (
+        f"老配置的平台在汇总里应只出现一次，实际 {len(legacy_rows)} 次"
+        + ("（被认领后不应再单列「遗留配置」）" if client.app.state.tenants.claimed else ""))
+    t = client.app.state.tenants
+    if not t.claimed:
+        assert legacy_rows[0]["tenant"] == 0 and "遗留" in legacy_rows[0]["tenant_label"]
+    else:
+        assert legacy_rows[0]["tenant"] != 0, "认领后应挂在认领者账号名下"
+
+
+# ---------------------------------------------------------------- R119 指定账号视图不变（含聚合模型跟随账号）
+def test_r119_single_tenant_scoping(client, hdr):
+    users = {u["email"]: u["id"] for u in client.app.state.store.list_users()}
+    uid_a = users["aggx-a@test.local"]
+    d = client.get(f"/api/providers?tenant={uid_a}", headers=hdr).json()
+    plats = {row["platform"] for row in d["data"]}
+    assert "aggplat" in plats and "aggplat2" not in plats and "fake" not in plats
+    ag = client.get(f"/api/aggregates?tenant={uid_a}", headers=hdr).json()
+    assert [row["name"] for row in ag["data"]] == ["aggpool"], "指定账号只回该账号的聚合"

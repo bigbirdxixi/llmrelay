@@ -2,6 +2,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [Unreleased]（v1.1.2 候选）
+
+### 功能：管理员「全部账号（汇总）」视图列出所有账号的上游平台与聚合模型
+- 汇总视图（右上角账号选择器 → 全部账号（汇总））原先只回显管理员自己的配置；现在 `GET /api/providers` / `GET /api/aggregates` / `GET /api/overview` / `GET /api/models` 在 `?tenant=all` 时跨全部账号返回：
+  - 平台行、聚合行均带 `tenant`（账号 id）+ `tenant_label`（邮箱）归属；同名平台/同名聚合跨账号不合并，各自独立列出
+  - 老单体 `config/upstreams.json` 仅在「有平台且未被首个管理员认领」时以「遗留配置（未认领）」列出，认领后归认领者名下，不重复计数
+  - 没开过控制台的账号不建文件、不出现在汇总里
+- 汇总视图**只读**：平台/聚合的新增、编辑、删除、测试、拉模型、探测在 `?tenant=all` 下全部 400（提示切到目标行所属账号操作），前端同步禁用按钮并显示「账号」列
+- 顺带修复：指定某账号（`?tenant=<id>`）时聚合模型接口此前不带 tenant 参数，看到的是管理员自己的聚合——`withTenant` 补上 `aggregates`
+- 测试 R116–R119（4 个，累计 106 全绿）
+
 ## [1.1.1] - 2026-11-15
 
 ### 安全：上游平台 key 不再明文落盘
