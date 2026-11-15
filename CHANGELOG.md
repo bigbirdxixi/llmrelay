@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
-## [Unreleased]（v1.1.2 候选）
+## [1.1.2] - 2026-11-15
 
 ### 功能：管理员「全部账号（汇总）」视图列出所有账号的上游平台与聚合模型
 - 汇总视图（右上角账号选择器 → 全部账号（汇总））原先只回显管理员自己的配置；现在 `GET /api/providers` / `GET /api/aggregates` / `GET /api/overview` / `GET /api/models` 在 `?tenant=all` 时跨全部账号返回：
