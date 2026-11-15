@@ -384,6 +384,27 @@ class Registry:
                 ids.append(name)
         return ids
 
+    def binding_options(self) -> list[str]:
+        """给控制台「模型绑定」多选弹窗用（v1.2.2 起，与 /v1/models 的 all_model_ids 分家）：
+        每个已配置的模型/别名只出一行「平台/模型」全名（客户端最常用、无歧义的调用形式），
+        聚合模型名以裸名追加。裸模型名不再单列——同一模型的裸名/全名两行并存会被误读成
+        「多出了没配置的模型」（2026-11-15 用户反馈：配了 48 个模型清单却显示 93 项）。
+        绑定语义不变：门禁仍按精确字符串匹配，裸名入参（API 校验）依旧合法。"""
+        out: list[str] = []
+        seen: set[str] = set()
+        for up in self.enabled():
+            names = self._names(up) + [a for a in (up.model_map or {}) if a not in (up.models or [])]
+            for m in names:
+                i = f"{up.platform}/{m}"
+                if i not in seen:
+                    seen.add(i)
+                    out.append(i)
+        for name in self.aggregates:
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+
     def model_index(self) -> list[dict]:
         out: list[dict] = []
         for up in self.upstreams:

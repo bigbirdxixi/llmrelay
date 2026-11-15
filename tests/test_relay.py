@@ -3467,7 +3467,9 @@ def test_r126_key_model_binding_admin_api(client, hdr):
 
     st = client.get("/api/settings", headers=hdr).json()
     assert "model_name_options" in st and "aggregate_names" in st, "/api/settings 要带模型名选项"
-    assert "fake/fake-gpt" in st["model_name_options"] and "fake-gpt" in st["model_name_options"]
+    # v1.2.2：选项 = 绑定弹窗数据源，每模型/别名一行「平台/模型」全名，不再单列裸名
+    assert "fake/fake-gpt" in st["model_name_options"], st["model_name_options"]
+    assert "fake-gpt" not in st["model_name_options"], "裸模型名不再进绑定选项（v1.2.2）"
     row = next(k for k in st["api_keys"] if k["id"] == kid)
     assert row["models"] == ["fake/fake-gpt"] and row["models_missing"] == [], row
     assert all("models" in k and "models_missing" in k for k in st["api_keys"]), "每行都要有绑定字段"
@@ -3529,3 +3531,42 @@ def test_r127_key_model_binding_dangling_and_migration(client, hdr, upstream_por
     got_new = s2.user_for_api_key("sk-new-r127")
     assert got_new and got_new["_key_models"] == ["fake-gpt", "fake/fake-gpt-2"]
     s2.close()
+
+
+# ---------------------------------------------------------------- R128 绑定弹窗选项：只列已配置的模型/聚合（v1.2.2）
+def test_r128_binding_options_no_bare_model_names(client, hdr, upstream_port):
+    """模型绑定选项（/api/settings model_name_options）不再单列裸模型名：
+    每个已配置的模型/别名只出一行「平台/模型」全名 + 聚合名——用户配 48 个模型
+    清单却显示 93 项的 bug（裸名/全名两行并存被误读成多出的模型）。
+    不回归 /v1/models（两种形式仍都列，客户端可发现裸名路由）。"""
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r128plat", "name": "R128(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["sk-x"],
+        "models": ["r128a", "r128b"], "model_map": {"r128alias": "r128a"}})
+    assert p.status_code == 200, p.text
+    keys = []
+    try:
+        # 全名与裸名都仍是合法的绑定入参（门禁精确匹配语义不变）
+        r_full = client.post("/api/keys", headers=hdr, json={"label": "r128full", "models": ["r128plat/r128a"]})
+        assert r_full.status_code == 200, r_full.text
+        r_bare = client.post("/api/keys", headers=hdr, json={"label": "r128bare", "models": ["r128a"]})
+        assert r_bare.status_code == 200, f"裸名入参必须仍合法: {r_bare.text}"
+        r_open = client.post("/api/keys", headers=hdr, json={"label": "r128open"})   # 无绑定 key：/v1/models 全量目录
+        assert r_open.status_code == 200, r_open.text
+        keys = [r_full.json()["id"], r_bare.json()["id"], r_open.json()["id"]]
+
+        st = client.get("/api/settings", headers=hdr).json()
+        opts = st["model_name_options"]
+        for expect in ("r128plat/r128a", "r128plat/r128b", "r128plat/r128alias"):
+            assert expect in opts, f"{expect} 要在选项里: {opts}"
+        assert "r128a" not in opts and "r128b" not in opts, \
+            f"裸模型名不得单列（v1.2.2）: {[o for o in opts if o in ('r128a', 'r128b')]}"
+
+        # /v1/models 保持旧行为（全量目录视角：无绑定 key）：全名与裸名都列
+        m = client.get("/v1/models", headers={"authorization": f"Bearer {r_open.json()['key']}"})
+        ids = {x["id"] for x in m.json()["data"]}
+        assert {"r128plat/r128a", "r128a"} <= ids, f"/v1/models 两种形式都要有: {ids}"
+    finally:
+        for kid in keys:
+            client.delete(f"/api/keys/{kid}", headers=hdr)
+        client.delete("/api/providers/r128plat", headers=hdr)

@@ -2237,8 +2237,9 @@ async function delUser(id){
   catch(e){ toast("删除失败：" + e.message, "err"); }
 }
 
-/* 模型名分组（来自 /api/settings）：平台全名 / 裸模型名+别名 / 聚合模型。
-   新建 Key 与「改绑定」弹窗共用。 */
+/* 模型名分组（来自 /api/settings）：平台全名（每模型/别名一行）/ 聚合模型。
+   v1.2.2 起后端 binding_options() 不再单列裸模型名（避免同一模型两行被误读成多出的模型）；
+   裸名组代码保留兼容旧版服务端。新建 Key 与「改绑定」弹窗共用。 */
 function modelGroups(){
   const s = S.settings || {};
   const aggs = s.aggregate_names || [];
@@ -2270,7 +2271,7 @@ function modelPickHtml(selected){
     ${grp("裸模型名 / 别名", g.bare)}
     ${grp("聚合模型", g.aggs)}
   </div>
-  <div class="dim" style="font-size:11.5px;margin-top:5px">形式也是绑定的一部分：勾裸名 ≠ 允许用「平台/模型」全名调用，按客户端实际要传的形式勾。组前复选框 = 全选/取消全选本组；点组标题折叠/展开。</div>`;
+  <div class="dim" style="font-size:11.5px;margin-top:5px">勾了 = 这把 key 只能调用勾到的模型/聚合（精确匹配「平台/模型」全名与聚合名）；不勾 = 不限制。注意：存在绑定时，客户端用裸模型名（不带平台前缀）的调用同样不被放行，请让客户端用全名。组前复选框 = 全选/取消全选本组；点组标题折叠/展开。</div>`;
 }
 /* 弹窗渲染后接事件：点组标题折叠/展开；组框全选 ↔ 组内项联动（含半选态）；点组框本身不触发折叠 */
 function modelPickWire(){

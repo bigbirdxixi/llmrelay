@@ -990,7 +990,7 @@ async def settings(request: Request, _: None = Depends(auth)):
         "is_admin": user.get("role") == "admin",
         "viewing_user": (A.public_user(viewing) if viewing["id"] != user["id"] else None),
         "api_keys": keys,
-        "model_name_options": (reg.all_model_ids() if reg is not None else []),
+        "model_name_options": (reg.binding_options() if reg is not None else []),
         "aggregate_names": (list(reg.aggregates) if reg is not None else []),
         "base_url": f"http://{config.HOST}:{config.PORT}",
         "base_path": config.get_base_path(),
