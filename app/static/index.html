@@ -144,6 +144,23 @@ tbody tr:hover td{background:#101a28}
 #modal .sheet{max-width:640px;margin:0 auto;background:var(--panel);border:1px solid var(--line);
   border-radius:16px;padding:22px}
 #modal h3{margin:0 0 16px;font-size:15px}
+/* 模型绑定多选（v1.2.0）：分组可折叠，组前复选框全选/取消全选，项复选框靠左 */
+.mkbox{max-height:300px;overflow:auto;border:1px solid var(--line,rgba(128,128,128,.3));border-radius:8px;padding:4px 6px}
+.mkgrp{margin:2px 0}
+.mksm{display:flex;align-items:center;gap:6px;padding:5px 4px;font-size:12.5px;cursor:pointer;user-select:none}
+.mktri{font-size:10px;color:var(--dim,#8b98ab);transition:transform .12s;flex:none}
+.mkgrp.open .mktri{transform:rotate(90deg)}
+.mksm .mkgt{font-weight:600}
+.mkbody{display:none;padding:0 2px 6px}
+.mkgrp.open .mkbody{display:block}
+.mkrow{display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 4px 2px 22px;cursor:pointer}
+.mkrow:hover{background:rgba(128,128,128,.08)}
+/* 全局 input 规则（width:100%/padding/背景）会污染复选框——显式重置（仿 #tenantMsPanel 的做法） */
+.mkbox input.mkall,.mkbox input.mkitem{width:13px;height:13px;padding:0;margin:0;border:0;
+  border-radius:0;background:transparent;flex:none;accent-color:var(--accent,#4f8cff);cursor:pointer}
+.mkbox input.mkall{margin-right:2px}
+.mkrow input{margin:0}
+.mkrow .mkname{font-family:ui-monospace,Consolas,monospace}
 .probe-view{max-width:720px}
 .probe-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .probe-stat{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums}
@@ -2235,20 +2252,49 @@ function modelGroups(){
 }
 function modelPickHtml(selected){
   const g = modelGroups();
-  const box = (n, ck) =>
-    `<label style="display:block;font-size:12px;margin:2px 0;cursor:pointer">` +
-    `<input type="checkbox" data-mk="${esc(n)}" ${ck ? "checked" : ""}> ${esc(n)}</label>`;
-  const sec = (t, list) => list.length
-    ? `<div style="margin-top:8px"><div class="dim" style="font-size:11.5px;margin-bottom:2px">${t}（${list.length}）</div>` +
-      list.map(n => box(n, (selected || []).indexOf(n) >= 0)).join("") + `</div>` : "";
+  const sel = selected || [];
+  const grp = (t, list) => {
+    if(!list.length) return "";
+    const rows = list.map(n =>
+      `<label class="mkrow"><input type="checkbox" class="mkitem" data-mk="${esc(n)}" ${sel.indexOf(n) >= 0 ? "checked" : ""}><span class="mkname">${esc(n)}</span></label>`
+    ).join("");
+    return `<div class="mkgrp open">
+      <div class="mksm"><input type="checkbox" class="mkall" title="全选 / 取消全选本组"><span class="mktri">▸</span><span class="mkgt">${t}（${list.length}）</span></div>
+      <div class="mkbody">${rows}</div>
+    </div>`;
+  };
   if(!(g.full.length + g.bare.length + g.aggs.length))
     return '<div class="dim" style="font-size:12px">暂无可用模型：请先在上游平台登记模型</div>';
-  return `<div style="max-height:230px;overflow:auto;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px">
-    ${sec("平台全名（platform/model）", g.full)}
-    ${sec("裸模型名 / 别名", g.bare)}
-    ${sec("聚合模型", g.aggs)}
+  return `<div class="mkbox">
+    ${grp("平台全名（platform/model）", g.full)}
+    ${grp("裸模型名 / 别名", g.bare)}
+    ${grp("聚合模型", g.aggs)}
   </div>
-  <div class="dim" style="font-size:11.5px;margin-top:5px">形式也是绑定的一部分：勾裸名 ≠ 允许用「平台/模型」全名调用，按客户端实际要传的形式勾。</div>`;
+  <div class="dim" style="font-size:11.5px;margin-top:5px">形式也是绑定的一部分：勾裸名 ≠ 允许用「平台/模型」全名调用，按客户端实际要传的形式勾。组前复选框 = 全选/取消全选本组；点组标题折叠/展开。</div>`;
+}
+/* 弹窗渲染后接事件：点组标题折叠/展开；组框全选 ↔ 组内项联动（含半选态）；点组框本身不触发折叠 */
+function modelPickWire(){
+  const scope = document.querySelector("#modalBody");
+  if(!scope) return;
+  scope.querySelectorAll(".mkgrp").forEach(g => {
+    const sm = g.querySelector(".mksm");
+    const all = g.querySelector(".mkall");
+    const items = [...g.querySelectorAll(".mkitem")];
+    const sync = () => {
+      const n = items.filter(x => x.checked).length;
+      all.checked = items.length > 0 && n === items.length;
+      all.indeterminate = n > 0 && n < items.length;
+    };
+    sm.addEventListener("click", e => {
+      if(e.target === all) return;        // 点组框：只做全选/取消全选，不折叠
+      g.classList.toggle("open");
+    });
+    all.addEventListener("change", () => {
+      items.forEach(x => { x.checked = all.checked; });
+    });
+    items.forEach(x => x.addEventListener("change", sync));
+    sync();
+  });
 }
 
 /* 新建 Key：弹窗（备注 + 过期日期日历 + 模型绑定多选；留空 = 永不过期 / 不限制）。
@@ -2271,6 +2317,7 @@ async function newKey(){
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="createKey()">确定</button>
     </div>`;
+  modelPickWire();
   $("#modal").classList.add("on");
 }
 
@@ -2308,6 +2355,7 @@ async function editKeyModels(id){
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="saveKeyModels(${id})">保存</button>
     </div>`;
+  modelPickWire();
   $("#modal").classList.add("on");
 }
 async function saveKeyModels(id){
