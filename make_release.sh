@@ -24,11 +24,7 @@ find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || 
 find "$STAGE" -name '*.pyc' -delete 2>/dev/null || true
 rm -rf "$STAGE/.pytest_cache" "$STAGE/tests/__pycache__"
 
-# IP2Region xdb（可选：本地 data/ 有就随包带上，部署时拷进服务器 data 目录）
-if [ -f data/IP2Region.xdb ]; then
-  cp data/IP2Region.xdb "$STAGE/"
-  echo "已随包附带 IP2Region.xdb：部署时 cp 到 /opt/llm-relay/data/（国内城市级定位用，境外仍走 GeoLite2）"
-fi
+# IP2Region xdb 不进包（2026-11-15 用户拍板：服务器 data/ 自备，包保持纯代码）
 
 # 证书目录留空（自签测试证书不进去，线上要放自己的）
 cat > "$STAGE/deploy/certs/README.txt" <<'EOF'
