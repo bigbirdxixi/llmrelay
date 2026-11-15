@@ -3239,3 +3239,98 @@ def test_r119_single_tenant_scoping(client, hdr):
     assert "aggplat" in plats and "aggplat2" not in plats and "fake" not in plats
     ag = client.get(f"/api/aggregates?tenant={uid_a}", headers=hdr).json()
     assert [row["name"] for row in ag["data"]] == ["aggpool"], "指定账号只回该账号的聚合"
+# ---------------------------------------------------------------- R120 多选汇总：?tenant=a,b 只列勾选的账号
+def test_r120_subset_merges_only_selected(client, hdr):
+    def _mk(email):
+        r = client.post("/api/users", headers=hdr, json={
+            "email": email, "password": "agm-password", "role": "user"})
+        assert r.status_code == 200, r.text
+        return r.json()["user"]["id"]
+    ua = _mk("agm-a@test.local")
+    ub = _mk("agm-b@test.local")
+    for email, plat, model in (("agm-a@test.local", "agmplat", "agmm1"),
+                               ("agm-b@test.local", "agmplat2", "agmm2")):
+        ck = _session_cookie(client, email, "agm-password")
+        r = client.post("/api/providers", cookies=ck, json={
+            "platform": plat, "type": "openai", "base_url": "http://127.0.0.1:9/v1",
+            "api_keys": ["sk-agg-test"], "models": [model]})
+        assert r.status_code == 200, r.text
+        r = client.post("/api/aggregates", cookies=ck, json={
+            "name": "agmpool", "entries": [f"{plat}/{model}"]})
+        assert r.status_code == 200, r.text
+
+    d = client.get(f"/api/providers?tenant={ua},{ub}", headers=hdr).json()
+    assert d["all"] is True
+    tenants = {row["tenant"] for row in d["data"]}
+    assert tenants == {ua, ub}, f"只能出现勾选的账号，实际 {tenants}"
+    assert not any(row["platform"] == "fake" for row in d["data"]), \
+        "管理员自己的平台不应混进多选汇总"
+    labels = {row["tenant"]: row["tenant_label"] for row in d["data"]}
+    assert labels[ua] == "agm-a@test.local" and labels[ub] == "agm-b@test.local"
+
+    ag = client.get(f"/api/aggregates?tenant={ua},{ub}", headers=hdr).json()
+    rows = {(row["tenant"], row["name"]) for row in ag["data"]}
+    assert (ua, "agmpool") in rows and (ub, "agmpool") in rows
+
+    ov = client.get(f"/api/overview?tenant={ua},{ub}", headers=hdr).json()
+    assert ov["providers"] == 2, f"两个账号各一个平台，应共 2 个，实际 {ov['providers']}"
+    ids = client.get(f"/api/models?tenant={ua},{ub}", headers=hdr).json()["ids"]
+    assert "agmplat/agmm1" in ids and "agmplat2/agmm2" in ids
+
+
+# ---------------------------------------------------------------- R121 多选时报表也按勾选项过滤（user_id IN）
+def test_r121_subset_filters_reports(client, hdr):
+    from app.main import store
+
+    def _mk(email):
+        r = client.post("/api/users", headers=hdr, json={
+            "email": email, "password": "agm-password", "role": "user"})
+        assert r.status_code == 200, r.text
+        return r.json()["user"]["id"]
+    ux = _mk("agm-x@test.local")
+    uy = _mk("agm-y@test.local")
+    me = store.first_admin()["id"]
+    me_email = next(u["email"] for u in store.list_users() if u["id"] == me)
+    for uid, model in ((me, "rm-me"), (ux, "rm-x"), (uy, "rm-y")):
+        store.record(platform="rplat", model=model, total_tokens=100, user_id=uid)
+
+    rows = client.get(f"/api/stats/summary?group_by=account&tenant={ux},{uy}", headers=hdr).json()["data"]
+    got = {row["k"] for row in rows}
+    assert "agm-x@test.local" in got and "agm-y@test.local" in got, got
+    assert me_email not in got, f"多选报表不应包含未勾选的管理员数据：{got}"
+
+    rows1 = client.get(f"/api/stats/summary?group_by=account&tenant={uy}", headers=hdr).json()["data"]
+    assert {row["k"] for row in rows1} == {"agm-y@test.local"}, "单选报表只看该账号"
+
+    ov = client.get(f"/api/overview?tenant={ux},{uy}", headers=hdr).json()
+    assert ov["records"] == 2, f"记录数应只算勾选的两个账号，实际 {ov['records']}"
+    fac = client.get(f"/api/stats/logs/facets?tenant={ux},{uy}", headers=hdr).json()
+    assert fac["total"] == 2
+    assert {a["id"] for a in fac["accounts"]} == {ux, uy}
+
+
+# ---------------------------------------------------------------- R122 多选只读 / 单选可写
+def test_r122_subset_readonly_single_writable(client, hdr):
+    def _mk(email):
+        r = client.post("/api/users", headers=hdr, json={
+            "email": email, "password": "agm-password", "role": "user"})
+        assert r.status_code == 200, r.text
+        return r.json()["user"]["id"]
+    uw = _mk("agm-w@test.local")
+    uz = _mk("agm-z@test.local")
+    # 多选 → 写端点 400 只读
+    r = client.post(f"/api/providers?tenant={uw},{uz}", headers=hdr, json={
+        "platform": "agm-multi", "type": "openai", "base_url": "http://127.0.0.1:9/v1",
+        "api_keys": ["sk-x"], "models": ["m"]})
+    assert r.status_code == 400 and "只读" in r.json()["detail"], r.text
+    r = client.post(f"/api/aggregates?tenant={uw},{uz}", headers=hdr,
+                    json={"name": "agm-multi", "entries": ["agm-multi/m"]})
+    assert r.status_code == 400, r.text
+    # 单选仍是全功能管理视图
+    ok = client.post(f"/api/providers?tenant={uw}", headers=hdr, json={
+        "platform": "agm-single", "type": "openai", "base_url": "http://127.0.0.1:9/v1",
+        "api_keys": ["sk-x"], "models": ["m"]})
+    assert ok.status_code == 200, ok.text
+    assert client.delete(f"/api/providers/agm-single?tenant={uw}", headers=hdr).status_code == 200
+    d = client.get(f"/api/providers?tenant={uw}", headers=hdr).json()
+    assert "agm-single" not in {row["platform"] for row in d["data"]}

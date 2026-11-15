@@ -33,57 +33,97 @@ def _user(request: Request) -> dict:
     return A.current_user(request)
 
 
-def _reg(request: Request):
-    """当前请求操作的账号配置：管理员可以用 ?tenant=<id> 管别人的平台。"""
-    return request.app.state.tenants.get(A.tenant_of(request) or _user(request)["id"])
-
-
-def _all_tenant_regs(request: Request) -> list[tuple[int, str, Registry]]:
-    """汇总视图（管理员 ?tenant=all）逐账号列配置：[(uid, 显示名, reg)]。
-
-    - 只收「已有租户配置文件」的账号，不给没开过控制台的账号建文件
-    - 老单体配置（uid=0）仅在「有平台且还没被认领」时收录；
-      被第一个管理员认领后排除，避免和该管理员的 u<id> 文件重复计数
+def _tenant_sel(request: Request) -> tuple[str, list[int]]:
+    """解析 ?tenant：返回 (mode, uids)。
+    - 非管理员：("single", [自己])——tenant 参数对其无效
+    - 管理员：缺省/"" → ("self", [自己])，即「只看我的数据」；
+      "0" → ("single", [0]) 老单体配置；"all" → ("all", []) 全账号；
+      "a,b,…" 多选 → 1 个 ("single", [a])，≥2 个 ("subset", [a,b,…])；解析失败回退 self
     """
+    user = _user(request)
+    if user.get("role") != "admin":
+        return "single", [int(user["id"])]
+    raw = (request.query_params.get("tenant") or "").strip()
+    if raw == "":
+        return "self", [int(user["id"])]
+    if raw == "all":
+        return "all", []
+    try:
+        ids = sorted({int(x) for x in raw.split(",") if x.strip()})
+    except ValueError:
+        return "self", [int(user["id"])]
+    if not ids:
+        return "self", [int(user["id"])]
+    return ("single", ids) if len(ids) == 1 else ("subset", ids)
+
+
+def _reg(request: Request) -> "Registry":
+    """当前请求操作的账号配置：管理员可以用 ?tenant=<id> 管别人的平台（多选走只读汇总）。"""
+    mode, uids = _tenant_sel(request)
+    uid = uids[0] if mode in ("self", "single") else _user(request)["id"]
+    return request.app.state.tenants.get(uid)
+
+
+def _multi_mode(request: Request) -> bool:
+    """汇总视图：多选（≥2）或 all。跨账号罗列、带归属、只读。"""
+    return _tenant_sel(request)[0] in ("subset", "all")
+
+
+def _sel_tenant_regs(request: Request) -> list[tuple[int, str, "Registry"]]:
+    """汇总视图逐账号取配置：[(uid, 显示名, reg)]。
+
+    - all：每个「已有租户配置文件」的账号；老单体配置（uid=0）仅在
+      「有平台且还没被认领」时收录——被第一个管理员认领后排除，
+      避免和该管理员的 u<id> 文件重复计数
+    - subset：只取勾选的账号；没建过文件的也取（等同该账号打开过控制台）
+    """
+    mode, uids = _tenant_sel(request)
     t = request.app.state.tenants
     store = request.app.state.store
-    regs: list[tuple[int, str, Registry]] = []
-    for u in store.list_users():
-        uid = int(u["id"])
-        if t.path(uid).exists():
-            regs.append((uid, u["email"], t.get(uid)))
-    if not t.claimed and t.legacy_file is not None and t.legacy_file.exists():
-        reg0 = t.get(0)
-        if reg0.upstreams:
-            regs.append((0, "遗留配置（未认领）", reg0))
+    regs: list[tuple[int, str, "Registry"]] = []
+    if mode == "all":
+        users = store.list_users()
+        for u in users:
+            uid = int(u["id"])
+            if t.path(uid).exists():
+                regs.append((uid, u["email"], t.get(uid)))
+        if not t.claimed and t.legacy_file is not None and t.legacy_file.exists():
+            reg0 = t.get(0)
+            if reg0.upstreams:
+                regs.append((0, "遗留配置（未认领）", reg0))
+    else:
+        emails = {str(u["id"]): u["email"] for u in store.list_users()}
+        for uid in uids:
+            label = ("遗留配置（未认领）" if uid == 0 else
+                     emails.get(str(uid)) or f"u{uid}")
+            regs.append((uid, label, t.get(uid)))
     return regs
 
 
-def _all_mode(request: Request) -> bool:
-    """管理员 + ?tenant=all。tenant_of 只有这种情况返回 None，其他角色恒为账号 id。"""
-    return A.tenant_of(request) is None
-
-
 def _reg_scoped(request: Request):
-    """写 / 探测端点：汇总视图是只读的，不许静默操作管理员自己的配置。"""
-    if _all_mode(request):
-        raise HTTPException(400, "汇总视图为只读。要执行此操作，请在右上角账号选择器切到目标行所属的具体账号")
+    """写 / 探测端点：汇总视图（多选 / all）是只读的，不许静默操作管理员自己的配置。"""
+    if _multi_mode(request):
+        raise HTTPException(400, "汇总视图为只读。要执行此操作，请在右上角账号选择器只选目标行所属的那个账号")
     return _reg(request)
+
+
+def _data_user(request: Request) -> "int | list | None":
+    """报表看谁的数据：普通账号=自己；管理员：
+    - 缺省/""（只看我的数据）= 自己；?tenant=<id> = 该账号；
+    - 多选 → 账号 id 列表（user_id IN）；"all" → None（全部账号 + 遗留 NULL 数据）
+    tenant=0 是「还没注册任何账号」的历史租户，它的数据 user_id 为 NULL，
+    所以这里返回 None（不过滤）——注册第一个账号时这些记录会被接管。"""
+    mode, uids = _tenant_sel(request)
+    if mode in ("self", "single"):
+        return None if uids[0] == 0 else uids[0]
+    if mode == "subset":
+        return uids
+    return None
 
 
 def _email_map(store) -> dict[str, str]:
     """user_id -> 邮箱，用于把「按账号」聚合里的 id 换成人看得懂的名字。"""
     return {str(u["id"]): u["email"] for u in store.list_users()}
-
-
-def _data_user(request: Request) -> int | None:
-    """报表看谁的数据：普通账号=自己；管理员不带参数=自己，tenant=all 看全部。
-
-    tenant=0 是「还没注册任何账号」的历史租户，它的数据 user_id 为 NULL，
-    所以这里返回 None（不过滤）——注册第一个账号时这些记录会被接管。
-    """
-    uid = A.tenant_of(request)
-    return None if uid == 0 else uid
 
 
 def _mask(key: str) -> str:
@@ -207,8 +247,8 @@ PRESETS: list[dict[str, Any]] = [
 async def overview(request: Request, _: None = Depends(auth)):
     reg = _reg(request)
     store = request.app.state.store
-    if _all_mode(request):
-        regs = [r for _, _, r in _all_tenant_regs(request)]
+    if _multi_mode(request):
+        regs = [r for _, _, r in _sel_tenant_regs(request)]
         prov = sum(len(r.upstreams) for r in regs)
         enab = sum(len(r.enabled()) for r in regs)
         ids: set[str] = set()
@@ -251,9 +291,9 @@ def _public(up: Upstream) -> dict:
 
 @router.get("/providers")
 async def list_providers(request: Request, _: None = Depends(auth)):
-    if _all_mode(request):
+    if _multi_mode(request):
         data = []
-        for uid, label, reg in _all_tenant_regs(request):
+        for uid, label, reg in _sel_tenant_regs(request):
             for u in reg.upstreams:
                 row = _public(u)
                 row["tenant"] = uid
@@ -266,9 +306,9 @@ async def list_providers(request: Request, _: None = Depends(auth)):
 
 @router.get("/aggregates")
 async def list_aggregates(request: Request, _: None = Depends(auth)):
-    if _all_mode(request):
+    if _multi_mode(request):
         data = []
-        for uid, label, reg in _all_tenant_regs(request):
+        for uid, label, reg in _sel_tenant_regs(request):
             for a in reg.aggregate_info():
                 a["tenant"] = uid
                 a["tenant_label"] = label
@@ -693,8 +733,8 @@ async def probe_stop(platform: str, request: Request, _: None = Depends(auth)):
 
 @router.get("/models")
 async def models(request: Request, _: None = Depends(auth)):
-    if _all_mode(request):
-        regs = [r for _, _, r in _all_tenant_regs(request)]
+    if _multi_mode(request):
+        regs = [r for _, _, r in _sel_tenant_regs(request)]
         idx: list[dict] = []
         for r in regs:
             for row in r.model_index():

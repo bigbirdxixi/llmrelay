@@ -197,7 +197,11 @@ tbody tr:hover td{background:#101a28}
     <div class="logo">LLM <span>Relay</span></div>
     <div class="meta"><span class="dot"></span><span id="hMeta">连接中…</span></div>
     <div class="spacer"></div>
-    <select id="tenantSel" style="display:none;width:190px" onchange="S.tenant=this.value;refreshAll()"></select>
+    <div id="tenantMs" style="display:none;position:relative">
+    <button id="tenantMsBtn" class="btn sm" onclick="toggleTenantMs(event)"
+            style="width:190px;display:flex;justify-content:space-between;align-items:center;gap:6px;text-align:left">只看我的数据 <span class="dim">▾</span></button>
+    <div id="tenantMsPanel" style="display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:60;min-width:250px;max-height:340px;overflow:auto;background:var(--panel,#151c28);border:1px solid var(--border,#2a3646);border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.5);padding:6px"></div>
+  </div>
     <span class="pill" id="who" style="max-width:220px;overflow:hidden;text-overflow:ellipsis"></span>
     <button class="btn sm" onclick="refreshAll()">刷新</button>
     <button class="btn sm" onclick="logout()">退出</button>
@@ -227,7 +231,8 @@ tbody tr:hover td{background:#101a28}
 "use strict";
 const S = { tab: "overview",
             user: null, tenant: "", authMode: "login", pick: {},
-            providers: [], presets: [], overview: null, models: [] };
+            providers: [], presets: [], overview: null, models: [],
+            users: [] };
 const PALETTE = ["#4f8cff","#38bdf8","#34d399","#fbbf24","#f472b6","#a78bfa","#fb923c","#22d3ee","#f87171","#a3e635"];
 
 /* 中国省级地图路径（DataV 边界数据投影 + Douglas-Peucker 2px 简化，离线内嵌，无外部依赖） */
@@ -405,16 +410,95 @@ async function enterApp(){
   await buildTenantPicker();
   await refreshAll();
 }
-async function buildTenantPicker(){
-  const sel = $("#tenantSel");
-  if(S.user.role !== "admin"){ sel.style.display = "none"; return; }
-  const r = await api("/api/users");
-  const opts = [`<option value="">只看我的数据</option>`, `<option value="all">全部账号（汇总）</option>`]
-    .concat((r.data || []).map(u => `<option value="${u.id}">${esc(u.email)}</option>`));
-  sel.innerHTML = opts.join("");
-  sel.value = S.tenant;
-  sel.style.display = "";
+/* 账号多选器：默认「只看我的数据」；可勾多个账号一起看（汇总、带账号归属、只读） */
+function tmHas(uid){
+  const t = S.tenant;
+  if(t === "all") return true;
+  return t !== "" && t.split(",").indexOf(String(uid)) >= 0;
 }
+function tmSelectedIds(){
+  if(S.tenant === "" || S.tenant === "all") return [];
+  return S.tenant.split(",").filter(Boolean);
+}
+function tmLabel(){
+  if(!S.tenant) return "只看我的数据";
+  if(S.tenant === "all") return "全部账号（汇总）";
+  const ids = tmSelectedIds();
+  if(ids.length === 1){
+    const u = (S.users || []).find(x => String(x.id) === ids[0]);
+    return u ? u.email : ("u" + ids[0]);
+  }
+  return ids.length + " 个账号（汇总）";
+}
+function tmAllChecked(){
+  if(!S.users.length) return false;
+  if(S.tenant === "all") return true;
+  return S.tenant !== "" && tmSelectedIds().length === S.users.length;
+}
+function renderTenantMsPanel(){
+  const panel = $("#tenantMsPanel");
+  if(!panel) return;
+  panel.innerHTML =
+    `<label style="display:flex;gap:8px;align-items:center;padding:5px 8px;cursor:pointer;font-size:13px">
+       <input type="checkbox" ${tmAllChecked() ? "checked" : ""} onchange="tmToggleAll(this)">
+       <b>全部账号（汇总）</b></label>
+    <div style="border:none;border-top:1px solid var(--border,#2a3646);margin:5px 0"></div>
+    ${S.users.map(u => `<label style="display:flex;gap:8px;align-items:center;padding:4px 8px;cursor:pointer;font-size:13px">
+       <input type="checkbox" data-uid="${u.id}" ${tmHas(u.id) ? "checked" : ""} onchange="tmToggleOne(this)">
+       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.email)}</span>
+       ${u.role === "admin" ? '<span class="dim" style="font-size:11px;flex:none">管理员</span>' : ""}
+     </label>`).join("")}
+    <div style="border:none;border-top:1px solid var(--border,#2a3646);margin:5px 0"></div>
+    <div class="dim" style="font-size:12px;padding:5px 8px;cursor:pointer" onclick="tmClear()">只看我的数据（清除选择）</div>`;
+}
+function tmToggleAll(cb){
+  S.tenant = cb.checked ? "all" : "";
+  tmAfterChange();
+}
+function tmToggleOne(cb){
+  if(S.tenant === "all"){      // 从「全部」开始逐个反选 → 转成显式多选
+    S.tenant = S.users.map(u => u.id).join(",");
+  }
+  const ids = tmSelectedIds();
+  const uid = String(cb.dataset.uid);
+  if(cb.checked){ if(ids.indexOf(uid) < 0) ids.push(uid); }
+  else ids.splice(ids.indexOf(uid), 1);
+  S.tenant = ids.join(",");
+  tmAfterChange();
+}
+function tmClear(){ S.tenant = ""; tmAfterChange(); }
+/* 汇总（多账号）视图：all 或勾了 ≥2 个账号 → 跨账号罗列 + 归属列 + 只读操作 */
+function isMultiTenant(){
+  const t = S.tenant;
+  return t === "all" || (t !== "" && t.split(",").length > 1);
+}
+function tmAfterChange(){
+  renderTenantMsPanel();
+  const btn = $("#tenantMsBtn");
+  if(btn) btn.innerHTML = tmLabel() + ' <span class="dim">▾</span>';
+  refreshAll();
+}
+function toggleTenantMs(e){
+  e.stopPropagation();
+  const p = $("#tenantMsPanel");
+  if(!p) return;
+  const open = p.style.display === "none";
+  p.style.display = open ? "" : "none";
+  if(open) renderTenantMsPanel();
+}
+async function buildTenantPicker(){
+  if(S.user.role !== "admin") return;
+  const wrap = $("#tenantMs");
+  wrap.style.display = "";
+  const r = await api("/api/users");
+  S.users = r.data || [];
+  $("#tenantMsBtn").innerHTML = tmLabel() + ' <span class="dim">▾</span>';
+  renderTenantMsPanel();
+}
+document.addEventListener("click", e => {
+  const p = $("#tenantMsPanel");
+  if(p && p.style.display !== "none" && !e.target.closest("#tenantMs")) p.style.display = "none";
+});
 
 /* ---------------- 图表 ---------------- */
 
@@ -1063,7 +1147,7 @@ function editProvider(platform){
 
 async function renderProviders(){
   const box = $("#tab-providers");
-  const all = S.tenant === "all";
+  const all = isMultiTenant();
   const data = await api("/api/providers");
   S.providers = data.data || []; S.presets = data.presets || [];
   const agData = await api("/api/aggregates");
@@ -1330,7 +1414,7 @@ async function saveProvider(platform){
 /* ---------------- 聚合模型：一个名字 -> 多个 平台/模型，轮询 + 失败冷却自动切换 ---------------- */
 function aggregatePanelHtml(){
   const list = S.aggregates || [];
-  const all = S.tenant === "all";
+  const all = isMultiTenant();
   const addBtn = all
     ? '<button class="btn primary sm" disabled title="汇总视图为只读，切到具体账号后再新增">+ 新增聚合</button>'
     : '<button class="btn primary sm" onclick="editAggregate(null)">+ 新增聚合</button>';
@@ -2067,19 +2151,15 @@ async function renderUsers(){
 }
 
 function jumpAccount(email){
-  const sel = $("#tenantSel");
-  if(!sel) return;
-  const opt = Array.from(sel.options).find(o => o.textContent === email);
-  if(!opt) return toast("找不到这个账号", "err");
-  S.tenant = opt.value;
-  sel.value = S.tenant;
-  refreshAll();
+  const u = (S.users || []).find(x => x.email === email);
+  if(!u) return toast("找不到这个账号", "err");
+  S.tenant = String(u.id);
+  tmAfterChange();
 }
 
 function viewTenant(id){
   S.tenant = String(id);
-  const sel = $("#tenantSel");
-  if(sel) sel.value = S.tenant;
+  tmAfterChange();
   switchTab("overview");
 }
 

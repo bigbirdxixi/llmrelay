@@ -187,13 +187,24 @@ class Store:
         return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
 
     @staticmethod
-    def _user_clause(user_id: int | None, sep: str = "WHERE") -> tuple[str, tuple]:
-        """user_id=None 表示不按账号过滤（admin 看全站）。"""
+    def _user_cond(user_id, prefix: str = "", sep: str = "AND") -> tuple[str, tuple]:
+        """账号过滤片段（支持多选汇总）：None → 无条件；int → ` {sep} {prefix}user_id = ?`；
+        非空 list → ` {sep} {prefix}user_id IN (?,…)`；空 list 按无过滤处理。返回 (cond, args)。"""
         if user_id is None:
             return "", ()
-        return f" {sep} user_id = ?", (int(user_id),)
+        if isinstance(user_id, (list, tuple, set)):
+            ids = [int(u) for u in user_id]
+            if not ids:
+                return "", ()
+            return (f" {sep} {prefix}user_id IN ({','.join('?' * len(ids))})", tuple(ids))
+        return f" {sep} {prefix}user_id = ?", (int(user_id),)
 
-    def totals(self, user_id: int | None = None) -> dict:
+    @staticmethod
+    def _user_clause(user_id, sep: str = "WHERE") -> tuple[str, tuple]:
+        """user_id=None 表示不按账号过滤（admin 看全站）；list 表示多账号汇总视图（IN）。"""
+        return Store._user_cond(user_id, "", sep)
+
+    def totals(self, user_id: int | list | None = None) -> dict:
         today = datetime.now().strftime("%Y-%m-%d")
         where, args = self._user_clause(user_id)
         where_today, args_today = self._user_clause(user_id)
@@ -249,7 +260,7 @@ class Store:
             byk.setdefault(r["k"], {})[r["c"] or "unknown"] = r["tk"]
         return byk
 
-    def hourly(self, user_id: int | None = None, days: int = 1,
+    def hourly(self, user_id: int | list | None = None, days: int = 1,
                group: str = "hour", split: str = "none") -> dict:
         """近 N 天的活动 + 区间合计（概览看板用）。
 
@@ -322,7 +333,7 @@ class Store:
                "today": total if days == 1 and group != "day" else None}
         return out
 
-    def month_activity(self, user_id: int | None, year: int, month: int,
+    def month_activity(self, user_id: int | list | None, year: int, month: int,
                       limit_months: int = 12) -> dict:
         """指定年月的按月活跃统计（概览页「本月活跃情况」日历）。
 
@@ -344,12 +355,11 @@ class Store:
                 " COALESCE(SUM(total_tokens),0) AS tk,"
                 " COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS er"
                 f" FROM requests{cond} GROUP BY k", args).fetchall()
+            mw, margs = self._user_cond(user_id, "", "WHERE")
             months = [r[0] for r in self._conn.execute(
                 "SELECT DISTINCT substr(ts,1,7) AS m FROM requests"
-                + (f" WHERE user_id = ?" if user_id is not None else "")
-                + " GROUP BY m ORDER BY m DESC LIMIT ?",
-                (args[:1] + (limit_months,)) if user_id is not None else (limit_months,))
-                .fetchall()]
+                + mw + " GROUP BY m ORDER BY m DESC LIMIT ?",
+                margs + (limit_months,)).fetchall()]
         got = {r["k"]: r for r in rows}
         buckets = []
         for day in range(1, last_day + 1):
@@ -366,7 +376,7 @@ class Store:
                 "total_tokens": total_tokens, "active_days": active_days,
                 "months": months}
 
-    def year_activity(self, user_id: int | None, year: int,
+    def year_activity(self, user_id: int | list | None, year: int,
                      limit_years: int = 5) -> dict:
         """指定年度的按「星期 × 月份」活跃统计（概览页活跃度日历）。
 
@@ -385,12 +395,11 @@ class Store:
                 " COALESCE(SUM(total_tokens),0) AS tk,"
                 " COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS er"
                 f" FROM requests{cond} GROUP BY d", args).fetchall()
+            yw, yargs = self._user_cond(user_id, "", "WHERE")
             years = [r[0] for r in self._conn.execute(
                 "SELECT DISTINCT substr(ts,1,4) AS y FROM requests"
-                + (f" WHERE user_id = ?" if user_id is not None else "")
-                + " GROUP BY y ORDER BY y DESC LIMIT ?",
-                (args[:1] + (limit_years,)) if user_id is not None else (limit_years,))
-                .fetchall()]
+                + yw + " GROUP BY y ORDER BY y DESC LIMIT ?",
+                yargs + (limit_years,)).fetchall()]
         cells = [[{"requests": 0, "tokens": 0, "errors": 0} for _ in range(7)]
                  for _ in range(12)]
         active_days = 0
@@ -418,7 +427,7 @@ class Store:
                 "total_requests": total_requests, "total_tokens": total_tokens,
                 "active_days": active_days, "years": years}
 
-    def ip_counts(self, user_id: int | None, days: int = 1) -> list[dict]:
+    def ip_counts(self, user_id: int | list | None, days: int = 1) -> list[dict]:
         """近 N 个日历天（日历天对齐，同 hourly group=day 口径）内按客户端 IP 聚合请求数。
 
         返回 [{"ip": str, "n": int}]（n 降序）；空 client_ip 不计入。
@@ -438,13 +447,12 @@ class Store:
         return [{"ip": r["ip"], "n": r["n"]} for r in rows]
 
     def summary(self, group_by: str = "platform", days: int = 30,
-                user_id: int | None = None) -> list[dict]:
+                user_id: int | list | None = None) -> list[dict]:
         since = self._since(days)
         if group_by == "dkey":
             # 按下游客户端 key（用 api_keys.label 备注名；历史无 dkey_id 的归「未记录」）
-            where, args = self._user_clause(user_id)
-            where = where.replace("user_id", "r.user_id") if user_id is not None else ""
             dkey_expr = _DKEY_LABEL_EXPR.format(p="r")
+            ucond, uargs = self._user_cond(user_id, "r.", "AND")
             q = f"""
                 SELECT COALESCE({dkey_expr}, '') AS k,
                        COUNT(*) AS requests,
@@ -455,10 +463,10 @@ class Store:
                        COALESCE(SUM(CASE WHEN r.status!='ok' THEN 1 ELSE 0 END),0) AS errors,
                        COALESCE(ROUND(AVG(r.latency_ms)),0) AS avg_latency_ms
                 FROM requests r LEFT JOIN api_keys ak ON ak.id = r.dkey_id
-                WHERE r.ts >= ?{(" AND r.user_id = ?" if user_id is not None else "")}
+                WHERE r.ts >= ?{ucond}
                 GROUP BY 1 ORDER BY total_tokens DESC
             """
-            params = (since, int(user_id)) if user_id is not None else (since,)
+            params = (since,) + uargs
             with self._lock:
                 return [dict(r) for r in self._conn.execute(q, params)]
         group = {
@@ -470,7 +478,7 @@ class Store:
             "key": "platform || ' · ' || COALESCE(NULLIF(key_hint, ''), '(未记录)') AS k",
             "account": "COALESCE(CAST(user_id AS TEXT), '(历史)') AS k",
         }.get(group_by, "platform AS k")
-        where, args = self._user_clause(user_id)
+        ucond, uargs = self._user_cond(user_id)
         q = f"""
             SELECT {group},
                    COUNT(*) AS requests,
@@ -480,10 +488,10 @@ class Store:
                    COALESCE(SUM(cached_tokens),0) AS cached_tokens,
                    COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS errors,
                    COALESCE(ROUND(AVG(latency_ms)),0) AS avg_latency_ms
-            FROM requests WHERE ts >= ?{(" AND user_id = ?" if user_id is not None else "")}
+            FROM requests WHERE ts >= ?{ucond}
             GROUP BY 1 ORDER BY total_tokens DESC
         """
-        params = (since, int(user_id)) if user_id is not None else (since,)
+        params = (since,) + uargs
         with self._lock:
             return [dict(r) for r in self._conn.execute(q, params)]
 
@@ -498,7 +506,7 @@ class Store:
     }
 
     def series(self, days: int = 30, group_by: str = "platform",
-               user_id: int | None = None) -> dict:
+               user_id: int | list | None = None) -> dict:
         """按天 × 分组的时间序列。
 
         返回 {"days": [...], "keys": [...], "rows": [{day, total, requests, <key>: tokens}]}。
@@ -509,8 +517,8 @@ class Store:
         expr = self.SERIES_GROUPS.get(group_by, self.SERIES_GROUPS["platform"])
         if dkey:
             from_clause = "FROM requests r LEFT JOIN api_keys ak ON ak.id = r.dkey_id"
-            where = (" AND r.user_id = ?" if user_id is not None else "")
-            args = (since, int(user_id)) if user_id is not None else (since,)
+            where, uargs = self._user_cond(user_id, "r.", "AND")
+            args = (since,) + uargs
             with self._lock:
                 rows = [dict(r) for r in self._conn.execute(
                     f"SELECT substr(r.ts,1,10) AS day, {expr} AS k,"
@@ -521,8 +529,8 @@ class Store:
                     f" {from_clause} WHERE r.ts >= ?{where} GROUP BY day, k ORDER BY day",
                     args)]
         else:
-            where = (" AND user_id = ?" if user_id is not None else "")
-            args = (since, int(user_id)) if user_id is not None else (since,)
+            where, uargs = self._user_cond(user_id)
+            args = (since,) + uargs
             with self._lock:
                 rows = [dict(r) for r in self._conn.execute(
                     f"SELECT substr(ts,1,10) AS day, {expr} AS k,"
@@ -556,7 +564,7 @@ class Store:
         idx = min(len(vs) - 1, int(0.95 * len(vs)))
         return int(round(vs[idx]))
 
-    def period(self, days: int = 30, user_id: int | None = None) -> dict:
+    def period(self, days: int = 30, user_id: int | list | None = None) -> dict:
         """区间 KPI：请求/tokens/平均&P95 耗时/TTFT/缓存命中/错误/流式/推理。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
@@ -592,7 +600,7 @@ class Store:
                 "p95_latency_ms": self._p95(lats),
                 "avg_ttft_ms": round(t["ttft"] or 0)}
 
-    def latency_series(self, days: int = 30, user_id: int | None = None) -> dict:
+    def latency_series(self, days: int = 30, user_id: int | list | None = None) -> dict:
         """每日耗时序列（仅成功请求）：avg / p95 / TTFT 平均。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
@@ -620,7 +628,7 @@ class Store:
         return {"days": day_list, "group_by": "day",
                 "keys": ["avg", "p95", "ttft"], "rows": out_rows}
 
-    def heatmap(self, days: int = 30, user_id: int | None = None) -> dict:
+    def heatmap(self, days: int = 30, user_id: int | list | None = None) -> dict:
         """星期 × 小时 请求量矩阵（7 行周一..周日 × 24 列）。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
@@ -645,7 +653,7 @@ class Store:
         return {"days": days, "matrix": matrix, "max": mx,
                 "labels": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
 
-    def mix(self, days: int = 30, user_id: int | None = None) -> dict:
+    def mix(self, days: int = 30, user_id: int | list | None = None) -> dict:
         """区间结构：下游协议 / 流式 / 状态 / 思考策略 / 错误 HTTP 码分布。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
@@ -671,7 +679,7 @@ class Store:
                 "by_reasoning": {k: v for k, v in by_reason.items() if k != "(未记录)"},
                 "by_http_error": {str(h["k"]): h["c"] for h in http}}
 
-    def top_errors(self, days: int = 30, limit: int = 8, user_id: int | None = None) -> list[dict]:
+    def top_errors(self, days: int = 30, limit: int = 8, user_id: int | list | None = None) -> list[dict]:
         """区间内 Top 错误原因（截断 140 字符），按次数降序。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
@@ -695,7 +703,7 @@ class Store:
             conds.append(f"{col} IN ({', '.join('?' * len(vals))})")
             args.extend(vals)
 
-    def _log_filters(self, user_id: int | None, days: int,
+    def _log_filters(self, user_id: int | list | None, days: int,
                      platform: str | list | None, model: str | list | None,
                      status: str | list | None,
                      stream: list | None = None, key_hint: list | None = None,
@@ -705,9 +713,10 @@ class Store:
         """统一的日志筛选条件构造（recent / record_count 共用，保证总数与列表一致）。"""
         conds: list[str] = []
         args: list = []
-        if user_id is not None:
-            conds.append("user_id = ?")
-            args.append(int(user_id))
+        uc, ua = self._user_cond(user_id, "", "")
+        if uc:
+            conds.append(uc)
+            args.extend(ua)
         if days:
             conds.append("ts >= ?")
             args.append(self._since(days))
@@ -774,7 +783,7 @@ class Store:
 
     def recent(self, limit: int = 100, platform: str | None = None, model: str | None = None,
                status: str | None = None, days: int = 0,
-               user_id: int | None = None, offset: int = 0,
+               user_id: int | list | None = None, offset: int = 0,
                stream: list | None = None, key_hint: list | None = None,
                client_ip: list | None = None, user_ids: list | None = None,
                date_from: str | None = None, date_to: str | None = None) -> list[dict]:
@@ -802,7 +811,7 @@ class Store:
                 r["dkey_label"] = ""
         return rows
 
-    def record_count(self, days: int = 0, user_id: int | None = None,
+    def record_count(self, days: int = 0, user_id: int | list | None = None,
                     **kw) -> int:
         """kw 同 recent() 的筛选参数（platform/model/status 列表、stream、key_hint、
         client_ip、user_ids、date_from、date_to）。"""
@@ -815,9 +824,10 @@ class Store:
         with self._lock:
             return int(self._conn.execute(q, args).fetchone()[0])
 
-    def log_facets(self, user_id: int | None = None) -> dict:
+    def log_facets(self, user_id: int | list | None = None) -> dict:
         """全量（不限页）的日志筛选项：各列 distinct 值 + 账号映射 + 时间范围。"""
-        where, args = ("WHERE user_id = ?" , [int(user_id)]) if user_id is not None else ("", [])
+        where, args = self._user_cond(user_id, "", "WHERE")
+        args = list(args)
         with self._lock:
             def _vals(col: str, default: str = "") -> list:
                 q = f"SELECT DISTINCT {col} FROM requests {where} ORDER BY {col}"
@@ -832,6 +842,11 @@ class Store:
         if user_id is None:
             for u in self.list_users():
                 emails[str(u["id"])] = u["email"]
+        elif isinstance(user_id, (list, tuple, set)):
+            want = {str(int(u)) for u in user_id}
+            for u in self.list_users():
+                if str(u["id"]) in want:
+                    emails[str(u["id"])] = u["email"]
         accounts = [{"id": i, "email": emails.get(str(i), "")}
                     for i in sorted(x for x in uid_rows if x is not None)]
         return {
@@ -846,7 +861,7 @@ class Store:
             "total": self.record_count(user_id=user_id),
         }
 
-    def model_options(self, user_id: int | None = None) -> list[dict]:
+    def model_options(self, user_id: int | list | None = None) -> list[dict]:
         where, args = self._user_clause(user_id)
         with self._lock:
             return [dict(r) for r in self._conn.execute(
@@ -855,13 +870,13 @@ class Store:
                 " FROM requests" + where +
                 " GROUP BY platform, model ORDER BY total_tokens DESC", args)]
 
-    def export_csv(self, days: int = 30, user_id: int | None = None) -> str:
+    def export_csv(self, days: int = 30, user_id: int | list | None = None) -> str:
         since = self._since(days)
         sql = "SELECT * FROM requests WHERE ts >= ?"
         params: tuple = (since,)
-        if user_id is not None:
-            sql += " AND user_id = ?"
-            params = (since, int(user_id))
+        uc, ua = self._user_cond(user_id)
+        sql += uc
+        params = params + ua
         with self._lock:
             rows = [dict(r) for r in self._conn.execute(sql + " ORDER BY id", params)]
         buf = io.StringIO()
