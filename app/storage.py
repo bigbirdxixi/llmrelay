@@ -712,9 +712,11 @@ class Store:
                      status: str | list | None,
                      stream: list | None = None, key_hint: list | None = None,
                      client_ip: list | None = None, user_ids: list | None = None,
-                     date_from: str | None = None, date_to: str | None = None
+                     date_from: str | None = None, date_to: str | None = None,
+                     dkey_ids: list | None = None
                      ) -> tuple[list[str], list]:
-        """统一的日志筛选条件构造（recent / record_count 共用，保证总数与列表一致）。"""
+        """统一的日志筛选条件构造（recent / record_count 共用，保证总数与列表一致）。
+        dkey_ids = 下游 key id 列表；0 是哨兵 = 「未记录」（dkey_id IS NULL，历史数据）。"""
         conds: list[str] = []
         args: list = []
         uc, ua = self._user_cond(user_id, "", "")
@@ -743,6 +745,16 @@ class Store:
         self._in_clause("key_hint", key_hint, args, conds)
         self._in_clause("client_ip", client_ip, args, conds)
         self._in_clause("user_id", user_ids, args, conds)
+        if dkey_ids:
+            d_in = [i for i in dkey_ids if i]
+            d_null = 0 in dkey_ids
+            parts: list[str] = []
+            if d_in:
+                parts.append(f"dkey_id IN ({','.join('?' * len(d_in))})")
+                args.extend(d_in)
+            if d_null:
+                parts.append("dkey_id IS NULL")
+            conds.append("(" + " OR ".join(parts) + ")")
         if date_from:
             conds.append("ts >= ?")
             args.append(self._ts_boundary(date_from, end=False))
@@ -790,10 +802,11 @@ class Store:
                user_id: int | list | None = None, offset: int = 0,
                stream: list | None = None, key_hint: list | None = None,
                client_ip: list | None = None, user_ids: list | None = None,
-               date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+               date_from: str | None = None, date_to: str | None = None,
+               dkey_ids: list | None = None) -> list[dict]:
         conds, args = self._log_filters(
             user_id, days, platform, model, status, stream, key_hint,
-            client_ip, user_ids, date_from, date_to)
+            client_ip, user_ids, date_from, date_to, dkey_ids)
         q = self._log_q(conds, "SELECT * FROM requests")
         q += " ORDER BY id DESC LIMIT ? OFFSET ?"
         args.append(max(1, min(int(limit), 1000)))
@@ -825,7 +838,8 @@ class Store:
             user_id, days,
             kw.get("platform"), kw.get("model"), kw.get("status"),
             kw.get("stream"), kw.get("key_hint"), kw.get("client_ip"),
-            kw.get("user_ids"), kw.get("date_from"), kw.get("date_to"))
+            kw.get("user_ids"), kw.get("date_from"), kw.get("date_to"),
+            kw.get("dkey_ids"))
         q = self._log_q(conds, "SELECT COUNT(*) FROM requests")
         with self._lock:
             return int(self._conn.execute(q, args).fetchone()[0])
@@ -844,6 +858,16 @@ class Store:
                 f"SELECT DISTINCT user_id FROM requests {where}", args)]
             rng = self._conn.execute(
                 f"SELECT MIN(ts), MAX(ts) FROM requests {where}", args).fetchone()
+            # 下游 key 筛选项：distinct dkey_id（0 = 未记录/NULL），标签解析与 recent() 一致
+            dk_rows = [r[0] for r in self._conn.execute(
+                f"SELECT DISTINCT dkey_id FROM requests {where}", args)]
+            dk_ids = sorted({int(x) for x in dk_rows if x is not None})
+            dk_map: dict[int, str] = {}
+            if dk_ids:
+                marks = ",".join("?" * len(dk_ids))
+                for r in self._conn.execute(
+                        f"SELECT id, label FROM api_keys WHERE id IN ({marks})", tuple(dk_ids)):
+                    dk_map[r["id"]] = r["label"] or ""
         emails = {}
         if user_id is None:
             for u in self.list_users():
@@ -855,6 +879,11 @@ class Store:
                     emails[str(u["id"])] = u["email"]
         accounts = [{"id": i, "email": emails.get(str(i), "")}
                     for i in sorted(x for x in uid_rows if x is not None)]
+        dkeys: list[dict] = []
+        if any(x is None for x in dk_rows):
+            dkeys.append({"id": 0, "label": "（未记录）"})
+        for i in dk_ids:
+            dkeys.append({"id": i, "label": (dk_map[i] or "（无名称）") if i in dk_map else "（key 已删除）"})
         return {
             "platform": _vals("platform"),
             "model": _vals("model"),
@@ -863,6 +892,7 @@ class Store:
             "key_hint": _vals("key_hint", "-"),
             "client_ip": _vals("client_ip", "-"),
             "accounts": accounts,
+            "dkeys": dkeys,
             "min_ts": rng[0] or "", "max_ts": rng[1] or "",
             "total": self.record_count(user_id=user_id),
         }
@@ -1177,10 +1207,15 @@ class Store:
             r = self._conn.execute("SELECT * FROM api_keys WHERE id = ?", (int(key_id),)).fetchone()
         return self._clean_key_row(r) if r else None
 
-    def list_api_keys(self, user_id: int) -> list[dict]:
+    def list_api_keys(self, user_id: int | None) -> list[dict]:
+        """user_id=None 时列全部账号的 key（管理员汇总视图用；行里自带 user_id 归属）。"""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM api_keys WHERE user_id = ? ORDER BY id", (int(user_id),)).fetchall()
+            if user_id is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM api_keys ORDER BY user_id, id").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM api_keys WHERE user_id = ? ORDER BY id", (int(user_id),)).fetchall()
         return [self._clean_key_row(r) for r in rows]
 
     @staticmethod

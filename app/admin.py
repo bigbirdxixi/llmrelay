@@ -920,12 +920,14 @@ async def stats_records(request: Request, limit: int = 100, offset: int = 0,
                        status: str | None = None, days: int = 0,
                        stream: str | None = None, key: str | None = None,
                        ip: str | None = None, users: str | None = None,
+                       dkey: str | None = None,
                        date_from: str | None = Query(None, alias="from"),
                        date_to: str | None = Query(None, alias="to"),
                        range_: str | None = Query(None, alias="range"),
                        _: None = Depends(auth)):
     """请求日志（全局筛选：每个参数可逗号分隔多选；from/to 支持 YYYY-MM-DD 或到秒的
-    YYYY-MM-DDTHH:MM:SS 日历区间；range=15m/30m/1h/6h/today 相对快捷区间，锚定服务端当前时间）。"""
+    YYYY-MM-DDTHH:MM:SS 日历区间；range=15m/30m/1h/6h/today 相对快捷区间，锚定服务端当前时间。
+    dkey=下游 key id 列表（0 = 未记录）。"""
     store = request.app.state.store
     uid = _data_user(request)
     def _csv(v: str | None, cast=None) -> list | None:
@@ -943,12 +945,14 @@ async def stats_records(request: Request, limit: int = 100, offset: int = 0,
     slist = _csv(status)
     stream_list = _csv(stream, lambda p: int(p) if p in ("0", "1") else p)
     uid_list = _csv(users, lambda p: int(p))
+    dkey_list = _csv(dkey, lambda p: int(p))
     if range_:   # 相对快捷区间优先；显式 from/to 仍然可以叠加收窄
         rf, rt = store.resolve_range(range_)
         date_from = date_from or rf
         date_to = date_to or rt
     fkw = dict(stream=stream_list, key_hint=_csv(key), client_ip=_csv(ip),
-               user_ids=uid_list, date_from=date_from, date_to=date_to)
+               user_ids=uid_list, dkey_ids=dkey_list,
+               date_from=date_from, date_to=date_to)
     rows = store.recent(limit, plist, mlist, slist, days, uid, offset, **fkw)
     emap = _email_map(store)
     for r in rows:
@@ -980,30 +984,57 @@ async def settings(request: Request, _: None = Depends(auth)):
     user = _user(request)
     store = request.app.state.store
     viewing = user
-    # 管理员切数据视角（?tenant=<id>）时，key 清单显示该账号的（掩码、只读）；key 仍只有账号本人能操作
+    keys = []
+    keys_scope = "self"
+    uids: list[int] = []
+    # 管理员切数据视角：?tenant=<id> 单账号 → 该账号的 key（掩码、只读）；
+    # 「全部账号（汇总）」tenant=all 或多选逗号列表 → 列全部账号的 key（带归属），
+    # 别人的行只读；key 仍只有账号本人能操作（复制明文/改/删）
     if user.get("role") == "admin":
         tid = (request.query_params.get("tenant") or "").strip()
         if tid.isdigit():
             tu = store.get_user(int(tid))
             if tu:
                 viewing = tu
-    keys = []
+        else:
+            # 「全部账号（汇总）」tenant=all → 全账号；多选逗号列表 → 勾选账号；
+            # 缺省（不带 tenant = 只看我的数据）保持 self 视角不变
+            if tid:
+                uids = [] if tid == "all" else [int(x) for x in tid.split(",") if x.strip().isdigit()]
+                keys_scope = "all"
     reg = request.app.state.registry.get(viewing["id"])
     opts = reg.binding_options() if reg is not None else {"full": [], "bare": [], "aggs": []}
     valid = set(reg.all_model_ids()) if reg is not None else set()
-    for k in store.list_api_keys(viewing["id"]):
-        models = k.get("models")
-        keys.append({"id": k["id"], "key": A.mask_key(k["key"]), "label": k["label"],
-                     "created_at": k["created_at"], "last_used": k["last_used"],
-                     "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at"),
-                     "models": models,                     # 模型绑定（list）；None = 不限制
-                     "models_missing": [m for m in (models or []) if m not in valid]})
+    if keys_scope == "all":
+        emap = _email_map(store)
+        tenants = request.app.state.tenants
+        keep = set(uids)   # 空 = 全部账号
+        for k in store.list_api_keys(None):
+            owner = k.get("user_id")
+            if keep and owner not in keep:
+                continue
+            oreg = tenants.get(owner) if tenants is not None else None
+            ovalid = set(oreg.all_model_ids()) if oreg is not None else set()
+            k["key"] = A.mask_key(k["key"])      # 掩码外泄：明文只有 key 本人能取回
+            k["owner_email"] = emap.get(str(owner), "") if owner is not None else ""
+            k["self"] = owner == user["id"]
+            k["models_missing"] = [m for m in (k.get("models") or []) if m not in ovalid] if ovalid else []
+            keys.append(k)
+    else:
+        for k in store.list_api_keys(viewing["id"]):
+            models = k.get("models")
+            keys.append({"id": k["id"], "key": A.mask_key(k["key"]), "label": k["label"],
+                         "created_at": k["created_at"], "last_used": k["last_used"],
+                         "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at"),
+                         "models": models,                     # 模型绑定（list）；None = 不限制
+                         "models_missing": [m for m in (models or []) if m not in valid]})
     return {
         "version": config.VERSION,
         "user": A.public_user(user),
         "is_admin": user.get("role") == "admin",
         "viewing_user": (A.public_user(viewing) if viewing["id"] != user["id"] else None),
         "api_keys": keys,
+        "keys_scope": keys_scope,     # "all" = 管理员汇总/多选视角：清单跨全部账号（行带 owner_email/self）
         "model_name_options": (opts["full"] if reg is not None else []),
         "bare_model_names": (opts["bare"] if reg is not None else []),
         "aggregate_names": (opts["aggs"] if reg is not None else []),

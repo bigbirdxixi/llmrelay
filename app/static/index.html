@@ -881,13 +881,15 @@ function yearlyActivityHtml(d){
   return `<div style="overflow-x:auto"><div style="min-width:fit-content">${colHead}${grid}</div>
     <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该月该星期的请求量（${Y} 年 · 活跃 ${nf(d.active_days || 0)} 天 · 共 ${nf(d.total_requests || 0)} 次 / ${fmtTok(d.total_tokens || 0)} tokens）</div></div>`;
 }
-/* 年份下拉框：选项 = 有数据的年份 ∪ 浏览器当前年（倒序），onchange 触发重新取数 */
-function ovYearSelectHtml(d, yr){
+/* 年份下拉框：选项 = 有数据的年份 ∪ 浏览器当前年（倒序），onchange 触发重新取数。
+   v1.2.3 起活跃情况 panel 在用量统计页，which="usage" 时切年重渲用量页 */
+function ovYearSelectHtml(d, yr, which){
   const set = new Set(d && d.years ? d.years : []);
   set.add(String(new Date().getFullYear()));
   const opts = [...set].sort((a, b) => Number(b) - Number(a)).map(y =>
     `<option value="${y}" ${String(y) === String(yr) ? "selected" : ""}>${y} 年</option>`).join("");
-  return `<select id="ovYear" style="width:100px" onchange="ovYearPick(this.value)">${opts}</select>`;
+  const wa = which ? `"${which}"` : "''";
+  return `<select id="ovYear" style="width:100px" onchange="ovYearPick(this.value, ${wa})">${opts}</select>`;
 }
 /* 地域访问地图：点击省份下钻城市排名（S.regPick 记忆选中省；再点同一省取消） */
 function pickProv(p){ S.regPick = S.regPick === p ? "" : p; renderOverview(); }
@@ -997,7 +999,7 @@ function regionMapHtml(rg){
     + '<div style="min-width:0">' + side.join("") + "</div></div>";
 }
 
-function ovYearPick(v){ S.ovYear = v; renderOverview(); }
+function ovYearPick(v, which){ S.ovYear = v; (which === "usage" ? renderUsage() : renderOverview()); }
 
 /* 概览活动图的时间范围：今日按小时 / 7 天按天 / 30 天按天 */
 function setOvPeriod(p){ S.ovPeriod = p; if(S.pick) S.pick.ovStack = []; renderOverview(); }
@@ -1016,20 +1018,16 @@ async function renderOverview(){
   const t = ov.totals;
   const p = S.ovPeriod || 1;
   const split = S.ovSplit || "platform";
-  // 活跃情况：选定的年份（默认浏览器当前年），按 ts 年份前缀精确取数
-  const curYear = String(new Date().getFullYear());
-  const yr = S.ovYear || curYear;
-  const yearUrl = `/api/stats/year?year=${yr}`;
   // KPI 永远基于今日；活动图按所选时间范围（今日按小时，7/30 天按天）+ 平台/模型维度堆叠；
-  // 年度活跃固定取所选年份按「星期 × 月份」的请求量
+  // v1.2.3 起「活跃情况」挪到用量统计页，概览页放「星期 × 时段」热力图（随概览范围 chip 取数）
   const h1 = await api(`/api/stats/hourly?days=1&group=hour&split=${split}`);
   const hd = h1.today || h1.total || {requests: 0, errors: 0, avg_latency_ms: 0};
   const rgRange = p === 1 ? "today" : (p === 7 ? "7d" : "30d");
-  const [chart, act, rg] = p === 1
-    ? await Promise.all([h1, api(yearUrl), api(`/api/stats/regions?range=${rgRange}`)])
+  const [chart, hm, rg] = p === 1
+    ? await Promise.all([h1, api(`/api/stats/heatmap?days=${p}`), api(`/api/stats/regions?range=${rgRange}`)])
     : await Promise.all([
         api(`/api/stats/hourly?days=${p}&group=day&split=${split}`),
-        api(yearUrl),
+        api(`/api/stats/heatmap?days=${p}`),
         api(`/api/stats/regions?range=${rgRange}`),
       ]);
   const oc = bucketOpts(p);
@@ -1039,7 +1037,7 @@ async function renderOverview(){
     ? hourlyBarHtml(chart.buckets || [], oc.x, oc.tip, oc.every)
     : hourlyStackedHtml(chart.buckets || [], split === "platform" ? "by_platform" : split === "dkey" ? "by_dkey" : "by_model",
                         oc.x, oc.tip, oc.every);
-  const actChart = yearlyActivityHtml(act);
+  const hmChart = heatmapHtml(hm);
   box.innerHTML = `
     <div class="grid kpis" style="margin-bottom:16px">
       <div class="kpi"><div class="k">今日请求</div><div class="v">${nf(t.today_requests)}</div>
@@ -1057,11 +1055,8 @@ async function renderOverview(){
     </div>
     <div class="split ov">
       <div class="panel">
-        <h2>活跃情况 <small>请求量日历 · 纵轴为星期、横轴为月份 · 格子深浅 = 该月该星期请求次数</small>
-          <span style="flex:1"></span>
-          ${ovYearSelectHtml(act, yr)}
-        </h2>
-        ${actChart}
+        <h2>星期 × 时段 <small>${p === 1 ? "今日" : "近 " + p + " 天"}请求分布</small></h2>
+        ${hmChart}
       </div>
       <div class="panel">
       <h2>近期活动 <small>${gran} · 纵轴为 tokens · ${{"none":"合计","platform":"按上游平台堆叠","model":"按模型堆叠","dkey":"按下游 key 堆叠"}[split] || "合计"}${(S.pick && S.pick.ovStack || []).length ? " · 已选 " + S.pick.ovStack.length + " 项" : ""}</small>
@@ -1740,12 +1735,15 @@ async function renderUsage(){
   const box = $("#tab-usage");
   const days = S.usageDays || 30, group = S.usageGroup || "platform";
   const seriesGroup = ["platform","model","key","dkey","account"].indexOf(group) >= 0 ? group : "total";
-  const [sum, series, period, latency, heatmap, mix, errors, byModel, seriesPlat] = await Promise.all([
+  // v1.2.3：「星期 × 时段」挪去概览页，这里放「活跃情况」（年份选择与概览共享 S.ovYear）
+  const curYear = String(new Date().getFullYear());
+  const yrU = S.ovYear || curYear;
+  const [sum, series, period, latency, act, mix, errors, byModel, seriesPlat] = await Promise.all([
     api(`/api/stats/summary?days=${days}&group_by=${group}`),
     api(`/api/stats/series?days=${days}&group_by=${seriesGroup}`),
     api(`/api/stats/period?days=${days}`),
     api(`/api/stats/latency?days=${days}`),
-    api(`/api/stats/heatmap?days=${days}`),
+    api(`/api/stats/year?year=${yrU}`),
     api(`/api/stats/mix?days=${days}`),
     api(`/api/stats/errors?days=${days}&limit=8`),
     api(`/api/stats/summary?days=${days}&group_by=model_only`),
@@ -1845,8 +1843,11 @@ async function renderUsage(){
         ${latencyChartHtml(latency)}
       </div>
       <div class="panel">
-        <h2>星期 × 时段 <small>近 ${days} 天请求分布</small></h2>
-        ${heatmapHtml(heatmap)}
+        <h2>活跃情况 <small>请求量日历 · 纵轴为星期、横轴为月份 · 格子深浅 = 该月该星期请求次数</small>
+          <span style="flex:1"></span>
+          ${ovYearSelectHtml(act, yrU, "usage")}
+        </h2>
+        ${yearlyActivityHtml(act)}
       </div>
     </div>
     <div class="split">
@@ -1901,6 +1902,10 @@ async function renderLogs(page){
     const ids = f.account.map(e => S.logAcctMap[e]).filter(v => v != null);
     if (ids.length) q.set("users", ids.join(","));
   }
+  if ((f.dkey || []).length && S.logDkeyMap){
+    const ids = f.dkey.map(l => S.logDkeyMap[l]).filter(v => v != null);
+    if (ids.length) q.set("dkey", ids.join(","));
+  }
   if (S.logRange) q.set("range", S.logRange);
   else { if (S.logDateFrom) q.set("from", S.logDateFrom); if (S.logDateTo) q.set("to", S.logDateTo); }
   const [r, fc] = await Promise.all([
@@ -1911,14 +1916,16 @@ async function renderLogs(page){
   S.logTotal = r.total || 0;
   S.logFacets = fc || {};
   if (fc.accounts) S.logAcctMap = Object.fromEntries(fc.accounts.map(a => [a.email, a.id]));
+  if (fc.dkeys) S.logDkeyMap = Object.fromEntries(fc.dkeys.map(x => [x.label, x.id]));
   // 剔除全局 facets 里已不存在的筛选值，避免显示与生效条件不一致
   const valid = {
     status: new Set(fc.status || []), platform: new Set(fc.platform || []),
     model: new Set(fc.model || []), key: new Set(fc.key_hint || []),
     ip: new Set(fc.client_ip || []),
     account: new Set((fc.accounts || []).map(a => a.email).filter(Boolean)),
+    dkey: new Set((fc.dkeys || []).map(x => x.label)),
   };
-  for (const field of ["status", "platform", "model", "key", "ip", "account"]){
+  for (const field of ["status", "platform", "model", "key", "ip", "account", "dkey"]){
     if (!(S.logFilters[field] || []).length) continue;
     const keep = S.logFilters[field].filter(v => valid[field].has(v));
     if (keep.length) S.logFilters[field] = keep; else delete S.logFilters[field];
@@ -1951,6 +1958,7 @@ function logFilterValues(field){
     if (field === "key")      return fc.key_hint || [];
     if (field === "ip")       return fc.client_ip || [];
     if (field === "account")  return (fc.accounts || []).map(a => a.email).filter(Boolean);
+    if (field === "dkey")     return (fc.dkeys || []).map(x => x.label);
   }
   const rows = S.logRows || [];   // facets 未就绪时的回退
   if (field === "status")   return uniqSorted(rows.map(x => x.status));
@@ -1959,12 +1967,13 @@ function logFilterValues(field){
   if (field === "key")      return uniqSorted(rows.map(x => x.key_hint || "-"));
   if (field === "ip")       return uniqSorted(rows.map(x => x.client_ip || "-"));
   if (field === "account")  return uniqSorted(rows.map(x => x.user_email || "-"));
+  if (field === "dkey")     return uniqSorted(rows.map(x => x.dkey_label || "-"));
   return [];
 }
 
 const LOG_FILTER_FIELDS = {
   status: "状态", platform: "平台", model: "上游模型", type: "类型",
-  account: "账号", key: "API Key", ip: "来源 IP",
+  account: "账号", key: "API Key", dkey: "下游 Key", ip: "来源 IP",
 };
 
 /* 表头内联箭头筛选：列标题旁只显一个小箭头，选中后追加值/"N 项"并高亮；点开 checkbox 面板可多选 */
@@ -2132,7 +2141,7 @@ function drawLogsPanel(){
     thCell("耗时", null, true), thCell("首字", null, true),
     ...(admin ? [thCell("账号", logFilterBtn("account"))] : []),
     thCell("API Key", logFilterBtn("key")),
-    thCell("下游 Key"),
+    thCell("下游 Key", logFilterBtn("dkey")),
     thCell("来源 IP", logFilterBtn("ip")),
   ].join("");
 
@@ -2497,6 +2506,7 @@ async function renderSettings(){
   const s = await api("/api/settings");
   S.settings = s;   // key 弹窗（新建/改绑定）复用这份数据（model_name_options 等）
   const ro = !!s.viewing_user;   // 管理员切到租户视角：key 清单只读
+  const agg = s.keys_scope === "all";   // 管理员汇总/多选视角：清单跨全部账号，别人的行只读
   const base = location.origin + BASE;
   const code = (t) => `<div class="code">${esc(t)}</div>`;
   const bpPanel = !s.is_admin ? "" : `
@@ -2571,19 +2581,23 @@ async function renderSettings(){
   box.innerHTML = `
     <div class="panel">
       <h2>${ro ? "API Key · " + esc(s.viewing_user.email) + " <small>只读（管理员视角）</small>"
-               : "我的 API Key <small>下游客户端用这个连中转站</small>"}
+               : (agg ? "我的 API Key <small>全部账号 · 下游客户端用这个连中转站</small>"
+                      : "我的 API Key <small>下游客户端用这个连中转站</small>")}
         <span style="flex:1"></span>
         ${ro ? "" : '<button class="btn sm primary" onclick="newKey()">+ 新建 Key</button>'}
       </h2>
       <div class="dim" style="font-size:12px;margin-bottom:10px">
         ${ro
           ? "你正在查看这个账号的 key 清单（掩码、只读）。创建 / 复制 / 改过期 / 删除 key 只能由账号本人操作，管理员也取不回、改不了对方的 key。"
-          : "每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。" +
-            (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : "")}
+          : (agg
+            ? "汇总视角：列出了全部账号的 key（掩码）。key 属于账号本人——复制明文 / 改名称 / 模型 / 改过期 / 删除只能由本人操作；你只能动自己名下的行（标「（我）」），别人的行只读。"
+            : "每个账号的 key 只看得到、管得了自己的；列表里显示的是掩码，点「复制」会取回完整 key 并复制到剪贴板（只有你自己能取）。" +
+              (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : ""))}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
-        <th>Key</th><th>名称</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
+        <th>Key</th>${agg ? "<th>用户</th>" : ""}<th>名称</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
       </tr></thead><tbody>${(s.api_keys||[]).map(k => {
+        const ror = ro || (agg && !k.self);
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
         const mm = k.models_missing || [];
         const modelsCell = (k.models && k.models.length)
@@ -2591,8 +2605,9 @@ async function renderSettings(){
             + (mm.length ? ` <span style="color:var(--red,#f87171)" title="${esc(mm.join("、"))}">⚠ ${mm.length} 个已不存在</span>` : "")
           : '<span class="dim">不限制</span>';
         return `<tr>
-        <td class="mono">${esc(k.key)}${ro ? "" : `
-          <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button>`}</td>
+        <td class="mono">${esc(k.key)}${!ror ? `
+          <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button>` : ""}</td>
+        ${agg ? `<td class="mono dim">${esc(k.owner_email || "（历史）")}${k.self ? "（我）" : ""}</td>` : ""}
         <td>${esc(k.label || "-")}</td>
         <td class="mono dim">${esc((k.created_at||"").replace("T"," ").slice(0,19))}</td>
         <td class="mono ${expired ? "num" : "dim"}">${k.expires_at
@@ -2600,12 +2615,12 @@ async function renderSettings(){
           : "永不过期"}</td>
         <td>${modelsCell}</td>
         <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
-        <td class="num">${ro ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyLabel(${k.id}, ${esc(JSON.stringify(k.label || ""))})'>改名称</button>
+        <td class="num">${ror ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyLabel(${k.id}, ${esc(JSON.stringify(k.label || ""))})'>改名称</button>
           <button class="btn sm" onclick="editKeyModels(${k.id})">模型</button>
           <button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
           <button class="btn sm danger" onclick="delKey(${k.id})">删除</button>`}</td>
       </tr>`;
-      }).join("")}</tbody></table>` : `<div class="empty">${ro ? "该账号还没有 key" : "还没有 key，点右上角新建"}</div>`}
+      }).join("")}</tbody></table>` : `<div class="empty">${ro ? "该账号还没有 key" : (agg ? "还没有任何账号创建 key" : "还没有 key，点右上角新建")}</div>`}
     </div>
 
     <div class="panel">

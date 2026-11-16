@@ -3600,3 +3600,94 @@ def test_r128_binding_options_groups_sorted(client, hdr, upstream_port):
         for kid in keys:
             client.delete(f"/api/keys/{kid}", headers=hdr)
         client.delete("/api/providers/r128plat", headers=hdr)
+
+# ---------------------------------------------------------------- R129 请求日志「下游 Key」列可筛选（v1.2.3）
+def test_r129_dkey_log_filter(client, hdr, upstream_port):
+    """请求日志页「下游 Key」列像其他列一样带筛选箭头（v1.2.3）：
+    后端 /api/stats/records 接受 dkey=<key id 逗号列表>（0 = 未记录/NULL），
+    /api/stats/logs/facets 返回 dkeys 选项（{id, label}，标签解析与日志行一致：
+    名称 /（无名称）/（key 已删除）/（未记录））。列表与 total 走同一筛选条件。"""
+    r1 = client.post("/api/keys", headers=hdr, json={"label": "r129-key-A"}).json()
+    r2 = client.post("/api/keys", headers=hdr, json={"label": "r129-key-B"}).json()
+    assert r1.get("id") and r2.get("id"), (r1, r2)
+    try:
+        for k in (r1["key"], r2["key"]):
+            rr = client.post("/v1/chat/completions",
+                             headers={"authorization": f"Bearer {k}"},
+                             json={"model": "fake/fake-gpt",
+                                   "messages": [{"role": "user", "content": "hi"}]})
+            assert rr.status_code == 200, rr.text
+        # facets 带 dkeys 选项（含本次两把 key 的标签）
+        fc = client.get("/api/stats/logs/facets", headers=hdr).json()
+        assert "dkeys" in fc, f"facets 缺 dkeys: {list(fc.keys())}"
+        by_label = {x["label"]: x["id"] for x in fc["dkeys"]}
+        assert "r129-key-A" in by_label and "r129-key-B" in by_label, by_label
+        # 按单把 key 筛：所有行都是它的标签，total 一致
+        recs = client.get(f"/api/stats/records?limit=50&dkey={by_label['r129-key-A']}",
+                          headers=hdr).json()
+        assert recs["total"] == 1, f"只应有 1 条 A 的请求: {recs['total']}"
+        assert all(x["dkey_label"] == "r129-key-A" for x in recs["data"])
+        # 多选两把：并集
+        recs2 = client.get(
+            f"/api/stats/records?limit=50&dkey={by_label['r129-key-A']},{by_label['r129-key-B']}",
+            headers=hdr).json()
+        assert recs2["total"] == 2, recs2["total"]
+        assert {x["dkey_label"] for x in recs2["data"]} == {"r129-key-A", "r129-key-B"}
+        # 0 = 未记录（NULL dkey_id）：行标签恒为空串
+        recs0 = client.get("/api/stats/records?limit=10&dkey=0", headers=hdr).json()
+        assert all(x["dkey_label"] == "" for x in recs0["data"]), \
+            "dkey=0 只能命中未记录（dkey_id 为 NULL）的行"
+        # 与现有筛选可叠加（平台 + 下游 key）
+        recs3 = client.get(
+            f"/api/stats/records?limit=50&platform=fake&dkey={by_label['r129-key-B']}",
+            headers=hdr).json()
+        assert recs3["total"] == 1
+        assert all(x["dkey_label"] == "r129-key-B" for x in recs3["data"])
+    finally:
+        client.delete(f"/api/keys/{r1['id']}", headers=hdr)
+        client.delete(f"/api/keys/{r2['id']}", headers=hdr)
+
+
+# ---------------------------------------------------------------- R130 设置页「全部账号（汇总）」列出全部用户的下游 key（v1.2.3）
+def test_r130_settings_aggregate_keys(client, hdr):
+    """管理员选「全部账号（汇总）」(?tenant=all) 或多选时，/api/settings 的「我的 API Key」
+    panel 列出全部用户的下游 key（bug 修复：此前只显示管理员自己的 key）：
+    行带 owner_email/self，key 打掩码（明文不泄露），别人的行前端只读；
+    单账号视角 (?tenant=<id>) 与缺省（只看我的数据）行为不变。"""
+    from app import auth as auth_mod
+    from app.main import store
+    dave = store.create_user("dave130@test.local", auth_mod.hash_password("dave-pw"))
+    dk = store.create_api_key(dave["id"], auth_mod.new_api_key(), label="dave-key")
+    erin = store.create_user("erin130@test.local", auth_mod.hash_password("erin-pw"))
+    try:
+        # all：跨账号罗列
+        st = client.get("/api/settings?tenant=all", headers=hdr).json()
+        assert st["keys_scope"] == "all"
+        labels = {k["label"] for k in st["api_keys"]}
+        assert "dave-key" in labels and "测试" in labels, \
+            f"汇总视角要同时列出管理员与他人的 key: {labels}"
+        mine = [k for k in st["api_keys"] if k["self"]]
+        others = [k for k in st["api_keys"] if not k["self"]]
+        assert mine and others, "应同时包含自己与他人的行"
+        drow = [k for k in st["api_keys"] if k["label"] == "dave-key"][0]
+        assert drow["owner_email"] == "dave130@test.local" and not drow["self"]
+        # 掩码：明文 key 不得出现在响应里
+        blob = str(st["api_keys"])
+        assert dk["key"] not in blob, "汇总视角泄露了明文 key"
+        assert all("…" in k["key"] for k in st["api_keys"]), "key 必须是掩码形式"
+        # 多选：只列勾选账号的 key
+        st2 = client.get(f"/api/settings?tenant={dave['id']},{erin['id']}", headers=hdr).json()
+        assert st2["keys_scope"] == "all"
+        assert {k.get("owner_email") for k in st2["api_keys"]} == {"dave130@test.local"}, \
+            f"只应列 dave（erin 还没建 key）: {st2['api_keys']}"
+        # 单账号视角：不变（ro，只看该账号）
+        st3 = client.get(f"/api/settings?tenant={dave['id']}", headers=hdr).json()
+        assert st3["keys_scope"] == "self" and st3["viewing_user"]["email"] == "dave130@test.local"
+        assert all("owner_email" not in k for k in st3["api_keys"])
+        # 缺省（只看我的数据）：不变
+        st4 = client.get("/api/settings", headers=hdr).json()
+        assert st4["keys_scope"] == "self" and st4["viewing_user"] is None
+        assert all(k["label"] != "dave-key" for k in st4["api_keys"]), "自己视角不得看到他人 key"
+    finally:
+        store.delete_user_full(dave["id"])
+        store.delete_user_full(erin["id"])
