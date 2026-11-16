@@ -3,7 +3,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-VER="1.2.2"
+# 版本号从 app/config.py 的 VERSION 自动读（避免打包时与代码版本错位，v1.2.3 起）
+VER="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' app/config.py | head -1)"
+[ -n "$VER" ] || { echo "读不到 app/config.py 的 VERSION"; exit 1; }
 STAMP="$(date +%Y%m%d-%H%M)"
 NAME="llm-relay-${VER}"
 STAGE=".pkgbuild/${NAME}"
