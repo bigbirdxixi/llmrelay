@@ -132,9 +132,9 @@ tbody tr:hover td{background:#101a28}
 #toast .t.err{border-color:#4a2530;color:#ffb4b4}
 #toast .t.ok{border-color:#1f4438;color:#a7f3d0}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-/* 概览页：活跃情况（左）× 近期活动（右）——左 45% / 右 55%：
-   日历格子已改弹性列（随 panel 伸缩），留白消失；堆叠图更宽更舒展 */
-.split.ov{grid-template-columns:minmax(0,9fr) minmax(0,11fr);gap:14px}
+/* 概览页：星期 × 时段（左，热力图）× 近期活动（右）——v1.2.3 panel 互换后左宽右窄（11:9）：
+   热力图 24 个时段列弹性铺满（minmax 列，不出现横向滚动条），留白消失；堆叠图相应收窄仍舒展 */
+.split.ov{grid-template-columns:minmax(0,11fr) minmax(0,9fr);gap:14px}
 .regionmap{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px;align-items:start}
 .regionmap svg .rm0{fill:var(--panel2)}
 @media (max-width:900px){.split,.split.ov{grid-template-columns:1fr}.regionmap{grid-template-columns:1fr}}
@@ -703,22 +703,24 @@ function donutHtml(items, centerLabel){
     <div style="flex:1;min-width:220px;max-width:420px">${legend}</div></div>`;
 }
 
-/* 星期 × 小时 请求量热力图 */
+/* 星期 × 小时 请求量热力图（v1.2.3：时段列改弹性列铺满 panel，无横向滚动条；
+   颜色由蓝改绿，与「活跃情况」日历同色系 rgba(52,211,153)） */
 function heatmapHtml(data){
   const mx = data.max || 0;
   if(!mx) return '<div class="empty">这个区间还没有请求记录</div>';
   const cell = 19, gap = 3;
   const HOURS = [...Array(24).keys()];
-  let head = `<div style="display:grid;grid-template-columns:40px repeat(24, ${cell}px);gap:${gap}px;margin-bottom:2px">
+  const cols = `40px repeat(24, minmax(11px, 1fr))`;   // 时段列弹性：格子随 panel 伸缩
+  let head = `<div style="display:grid;grid-template-columns:${cols};gap:${gap}px;margin-bottom:2px">
     <span></span>${HOURS.map(h => `<span style="font-size:9.5px;color:var(--dim);text-align:center">${h % 3 === 0 ? h : ""}</span>`).join("")}</div>`;
   let grid = data.matrix.map((row, wd) =>
-    `<div style="display:grid;grid-template-columns:40px repeat(24, ${cell}px);gap:${gap}px">
+    `<div style="display:grid;grid-template-columns:${cols};gap:${gap}px">
       <span style="font-size:11px;color:var(--dim);line-height:${cell}px">${data.labels[wd]}</span>
       ${row.map((v, h) => {
         const a = v ? 0.18 + 0.82 * Math.sqrt(v / mx) : 0;
         return `<i title="${data.labels[wd]} ${String(h).padStart(2, "0")}:00 · ${nf(v)} 次"
-          style="width:${cell}px;height:${cell}px;border-radius:4px;display:block;
-          background:${v ? `rgba(79,140,255,${a.toFixed(2)})` : "var(--panel2)"}"></i>`;
+          style="width:100%;height:${cell}px;border-radius:4px;display:block;
+          background:${v ? `rgba(52,211,153,${a.toFixed(2)})` : "var(--panel2)"}"></i>`;
       }).join("")}</div>`).join("");
   return `<div style="overflow-x:auto"><div style="min-width:fit-content">${head}${grid}</div>
     <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该星期几该小时的请求量（近 ${data.days} 天合并）</div></div>`;
@@ -850,9 +852,9 @@ function toggleOvStack(k){
   renderOverview();
 }
 
-/* 活跃情况（概览）：所选年份的「星期 × 月份」日历（纵轴=星期、横轴=1~12 月），
+/* 活跃情况（v1.2.3 起在用量统计页）：所选年份的「星期 × 月份」日历（纵轴=星期、横轴=1~12 月），
    格子深浅 = 该月该星期几的请求量合计；颜色为绿色深浅（主题 --ok），
-   与用量统计「星期 × 时段」蓝色热力图区分；
+   与概览页「星期 × 时段」热力图同色系（v1.2.3 起热力图也改绿）；
    d 为 /api/stats/year 响应 {year, cells[12][7]{requests,tokens,errors},
    total_requests, total_tokens, active_days, years[]}，cells 恒为完整 12×7 */
 function yearlyActivityHtml(d){
