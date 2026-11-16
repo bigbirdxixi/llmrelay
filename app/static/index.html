@@ -122,6 +122,11 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:10px}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px}
+/* 曲线图的可点选图例 chip（v1.2.3）：点击隐藏/恢复该曲线，与聚合明细表行共享 S.pick.usage */
+.legend .legbtn{font:inherit;font-size:12px;color:var(--dim);background:none;border:0;padding:0;cursor:pointer;line-height:1.4}
+.legend .legbtn:hover{color:var(--fg);text-decoration:underline}
+.legend .legbtn.off{opacity:.45;text-decoration:line-through}
+.legend .legbtn.off i{opacity:.6}
 tbody tr.sel td{background:#132238}
 tbody tr.sel td:first-child::before{content:"✓ ";color:#4f8cff;font-weight:700}
 tbody tr:hover td{background:#101a28}
@@ -576,7 +581,13 @@ function lineChart(series, opts){
       const d = pts.map((pt, i) => (i ? " L" : "M") + pt[0].toFixed(1) + " " + pt[1].toFixed(1)).join("");
       paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>`;
     }
-    legend += `<span><i style="background:${color}"></i>${esc(labels[k] || k)}</span>`;
+    if(opts.clickLegend){
+      /* 可点选图例：off = 白名单模式下该曲线被隐藏；点按切换 隐藏/恢复 */
+      const off = opts.selected && opts.selected.length && opts.selected.indexOf(k) < 0;
+      legend += `<button class="legbtn${off?" off":""}" data-dim="${opts.dim || "usage"}" data-k="${esc(k)}"
+        title="${off ? "点击恢复显示这条曲线" : "点击隐藏这条曲线"}"><i style="background:${color}"></i>${esc(labels[k] || k)}</button>`;
+    } else
+      legend += `<span><i style="background:${color}"></i>${esc(labels[k] || k)}</span>`;
   });
   let total = "";
   if(keys.length > 1 && !opts.noTotal){
@@ -597,22 +608,37 @@ function _pick(dim){
   return (S.pick[dim] = S.pick[dim] || []);
 }
 
-/* 点用量表行 → 选中或取消，曲线立刻跟着变 */
+/* 点用量表行 / 曲线图例 chip → 选中或取消，曲线与表格高亮立刻同步（共享 S.pick.usage） */
+function usagePickSync(){
+  const cur = _pick("usage");
+  const box = $("#usageChart");
+  if(box) box.innerHTML = usageChartHtml();
+  document.querySelectorAll('tr[data-dim="usage"]').forEach(tr =>
+    tr.classList.toggle("sel", cur.indexOf(tr.dataset.k) >= 0));
+}
 function togglePick(el){
   const dim = el.dataset.dim, k = el.dataset.k;
   if(dim !== "usage") return;
   const cur = _pick(dim);
   const i = cur.indexOf(k);
   if(i >= 0) cur.splice(i, 1); else cur.push(k);
-  const box = $("#usageChart");
-  if(box) box.innerHTML = usageChartHtml();
-  el.classList.toggle("sel", i < 0);
+  usagePickSync();
 }
+/* 曲线图例 chip 可点选（v1.2.3：去掉「显示全部」按钮，图例直接承担 选中/取消/恢复）：
+   #usageChart 每次重渲染，故委托绑在 document 上 */
+document.addEventListener("click", e => {
+  const b = e.target.closest('.legbtn[data-dim="usage"]');
+  if(!b) return;
+  const k = b.dataset.k, cur = _pick("usage");
+  const i = cur.indexOf(k);
+  if(i >= 0) cur.splice(i, 1); else cur.push(k);
+  usagePickSync();
+});
 
 function usageChartHtml(){
   const ds = (S.ds && S.ds.usage) || {days: [], rows: [], keys: []};
   const sel = _pick("usage");
-  return lineChart(ds, {selected: sel});
+  return lineChart(ds, {selected: sel, clickLegend: true, dim: "usage"});
 }
 
 /* 延迟曲线：每日 平均 / P95 / TTFT 三线（y 轴 ms，无合计线） */
@@ -1821,12 +1847,10 @@ async function renderUsage(){
         <th class="num">缓存命中</th><th class="num">合计</th><th>占比</th>
         <th class="num">平均耗时</th><th class="num">错误</th></tr></thead><tbody>${table}</tbody></table>`
         : '<div class="empty">这个区间还没有请求记录</div>'}
-      ${pickable && rows.length ? '<div class="dim" style="font-size:12px;margin-top:8px">点表格任意一行可以只看那条曲线，点多行同时对比；再点一次取消。</div>' : ""}
+      ${pickable && rows.length ? '<div class="dim" style="font-size:12px;margin-top:8px">点表格任意一行或下方曲线图例可以只看那条曲线，点多行同时对比；再点一次取消。</div>' : ""}
     </div>
     <div class="panel"><h2>每日 token 曲线
-        <small>${sel.length ? "已选 " + sel.length + " 条" : "点上面聚合明细的行来筛选"}</small>
-        <span style="flex:1"></span>
-        <button class="btn sm" onclick="S.pick.usage.length=0;renderUsage()">显示全部</button>
+        <small>${sel.length ? "已选 " + sel.length + " 条 · 点下方图例可取消" : "点下方图例或上面聚合明细的行来筛选"}</small>
       </h2>
       <div id="usageChart">${usageChartHtml()}</div></div>
     <div class="split">
