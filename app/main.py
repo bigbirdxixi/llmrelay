@@ -352,28 +352,83 @@ async def _generate_endpoint(request: Request, kind: str):
         m = re.search(rb'name="model"[^\r\n]*\r?\n\r?\n([^\r\n]+)', raw or b"")
         model = m.group(1).decode("utf-8", "replace").strip() if m else ""
         if not model:
+            with contextlib.suppress(Exception):
+                request.app.state.store.record(
+                    platform="", model="",
+                    in_format="openai", status="error", http_status=400,
+                    error="multipart 表单缺少 model 字段（生成类端点本地校验失败）",
+                    client_ip=(request.client.host if request.client else ""),
+                    user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                    dkey_id=(user or {}).get("_key_id"))
             return error_response("openai", 400, "multipart 表单缺少 model 字段", "invalid_request")
         body = None
     else:
+        body = None
         try:
             body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
-                raise ValueError
+                body = None
         except Exception:
-            return error_response("openai", 400, "请求体不是合法 JSON", "invalid_json")
+            body = None
+        if body is None and raw:
+            # 中文 Windows 命令行（cmd/PowerShell/MSYS 转发原生 curl）会把非 ASCII 参数
+            # 按 GBK/GB18030 编码发出，而 JSON 规范只收 UTF-8 → 抢救一次：
+            # gb18030 下 ASCII 结构字符不变，只有中文会被修回正确字节
+            try:
+                cand = json.loads(raw.decode("gb18030").encode("utf-8"))
+                if isinstance(cand, dict):
+                    body = cand
+            except Exception:
+                body = None
+        if body is None:
+            with contextlib.suppress(Exception):
+                request.app.state.store.record(
+                    platform="", model="",
+                    in_format="openai", status="error", http_status=400,
+                    error="请求体不是合法 JSON（含 GBK 抢救失败）：检查 JSON 格式与 UTF-8 编码"
+                          "（中文 Windows 命令行跑 curl 时中文可能被 GBK 编码，改用 UTF-8 客户端或 SDK）",
+                    client_ip=(request.client.host if request.client else ""),
+                    user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                    dkey_id=(user or {}).get("_key_id"))
+            return error_response("openai", 400, "请求体不是合法 JSON（若命令行含中文，"
+                                "可能是 GBK 编码所致：确认终端 UTF-8，或改用 SDK/文件传参）", "invalid_json")
         model = str(body.get("model") or "")
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
         return gate
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform="", model=model,
+                in_format="openai", status="error", http_status=404,
+                error=f"没有找到模型 {model!r} 对应的上游平台（生成类端点本地校验失败）",
+                client_ip=(request.client.host if request.client else ""),
+                user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
         return error_response("openai", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
     upstream, up_model = resolved
     if upstream.type != "openai":
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model,
+                in_format="openai", status="error", http_status=400,
+                error="生成类端点只支持 OpenAI 兼容上游（本地校验失败）",
+                client_ip=(request.client.host if request.client else ""),
+                user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
         return error_response("openai", 400, "生成类端点只支持 OpenAI 兼容上游", "unsupported")
     # model_kind 严格匹配：标了别的生成类（或标了生成类却来错端点）→ 400 指路
     g = _kind_guard(upstream, up_model, _REQ_KIND_MAP.get(kind, kind), "openai")
     if g is not None:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model,
+                in_format="openai", status="error", http_status=400,
+                error="模型类型与请求端点不匹配（model_kind 校验失败，详见响应指路）",
+                client_ip=(request.client.host if request.client else ""),
+                user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
         return g
     ip = request.client.host if request.client else ""
     try:

@@ -3980,3 +3980,64 @@ def test_r136_probe_autofill_model_kind(client, hdr, upstream_port):
             "模糊签名模型未配 kind，chat 端点不应本地拦截"
     finally:
         client.delete("/api/providers/r136probe", headers=hdr)
+
+# ---------------------------------------------------------------- R137 GBK 中文 body 抢救（v1.2.4）
+def test_r137_gbk_body_rescued(client, hdr, upstream_port):
+    """中文 Windows 命令行 curl 会把中文 body 按 GBK 发出（非法 JSON UTF-8）：
+    relay 抢救为 UTF-8 后照常透传，上游收到的是正确中文与替换后的模型名。"""
+    import json as _json
+    from tests import fake_upstream
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r137gbk", "name": "R137 gbk(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["img-model"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        body = _json.dumps(
+            {"model": "img-model", "prompt": "一只可爱的小猫咪", "size": "512x512"},
+            ensure_ascii=False).encode("gbk")  # 模拟中文 Windows curl 的出站字节
+        fake_upstream.RECEIVED.clear()
+        ri = client.post("/v1/images/generations",
+                         headers={**bh, "content-type": "application/json"},
+                         content=body)
+        assert ri.status_code == 200, ri.text
+        assert ri.json()["data"][0]["url"].startswith(
+            "https://fake.example/gen-img-model"), ri.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/images/generations"]
+        assert got, "上游应收到抢救后的请求"
+        assert got[0]["body"].get("prompt") == "一只可爱的小猫咪", got[0]["body"]
+    finally:
+        client.delete("/api/providers/r137gbk", headers=hdr)
+
+
+# ---------------------------------------------------------------- R138 生成类本地 4xx 也落日志（v1.2.4）
+def test_r138_local_4xx_logged(client, hdr, upstream_port):
+    """生成类端点本地校验失败（非法 JSON / 找不到模型）也记请求日志 error 行，
+    不再出现「调用没记录」的黑洞。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r138loc", "name": "R138 local(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["img-model"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    store = client.app.state.store
+    try:
+        # 彻底非法 JSON（GBK 也救不回来）→ 400 + error 行
+        rb = client.post("/v1/images/generations",
+                         headers={**bh, "content-type": "application/json"},
+                         content=b"\x00\x01\x02not json")
+        assert rb.status_code == 400 and "invalid_json" in rb.text, rb.text
+        erow = [x for x in store.recent(5)
+                if x.get("status") == "error" and "不是合法 JSON" in (x.get("error") or "")]
+        assert erow and erow[0].get("http_status") == 400, erow
+        # 找不到模型 → 404 + error 行
+        ru = client.post("/v1/images/generations", headers=bh,
+                         json={"model": "no-such-model-x"})
+        assert ru.status_code == 404, ru.text
+        erow = [x for x in store.recent(5)
+                if x.get("model") == "no-such-model-x" and x.get("status") == "error"]
+        assert erow, "model_not_found 应落 error 日志行"
+        assert "没有找到模型" in erow[0].get("error"), erow[0]
+    finally:
+        client.delete("/api/providers/r138loc", headers=hdr)
