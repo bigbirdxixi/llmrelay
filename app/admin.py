@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import html as html_mod
 import json
+import re
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -565,6 +566,21 @@ async def test_provider(platform: str, request: Request, _: None = Depends(auth)
 # 不能按 300s 平台超时干等——每个模型 20s 封顶，连不通时第一个模型就快速放弃整轮探测。
 PROBE_PING_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
+# 生成类模型（图像/视频/音频）在 chat 端点的错误签名：上游回 4xx 并提示走专用端点
+# （agnes「需使用 /v1/images…」、zhipu「当前模型不支持SSE调用方式」等）。
+# 这类模型没坏、只是 chat relay 转发不了——探测判「gen 保留」而不是「removed 删除」。
+GEN_MODEL_RES = [
+    re.compile(r"/v1/(images|videos|audio)", re.I),
+    re.compile(r"images?/generations", re.I),
+    re.compile(r"不支持SSE|不支持流式", re.I),
+    re.compile(r"does not support (sse|streaming)", re.I),
+    re.compile(r"(image|video|speech) (generation|model)", re.I),
+]
+
+
+def _looks_gen_model(reason: str) -> bool:
+    return any(p.search(reason) for p in GEN_MODEL_RES)
+
 
 async def _client_gone_async(request: Request) -> bool:
     """客户端是否已断开（点取消/关页面）。uvicorn 客户端断开后不会取消 app task、
@@ -597,6 +613,9 @@ async def _probe_model(gw, reg, up, url: str, m: str) -> tuple:
         if exc.status in (401, 403):
             return "keyerr", exc.status, exc.message()[:160]
         if exc.status in (404, 400):
+            # 生成类模型（图像/视频/音频）在 chat 端点的特征报错 → 判 gen 保留（不是模型坏了）
+            if _looks_gen_model(exc.message()):
+                return "gen", exc.status, exc.message()[:160]
             return "removed", exc.status, exc.message()[:160]
         return "transient", exc.status, exc.message()[:160]
     except Exception as exc:  # noqa: BLE001
@@ -623,6 +642,8 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
     """探测全部已登记模型并把可用清单写回：每个模型 ping 一条（max_tokens=1）。
     - 2xx（含网关瞬时重试后成功）→ 保留；
     - 模型级 404/400（NVIDIA NIM「Function not found for account」= 账号未授权这类）→ 移除并写回；
+    - 生成类模型（图像/视频/音频，报错带「需使用 /v1/images…」「不支持SSE」这类特征）→ 判 gen 保留
+      （chat relay 转发不了但它没坏，不删清单，UI 单独标注）；
     - 429/5xx（重试后仍失败，疑似瞬时故障）→ 保留不误删，transient 里列出；
     - key 级 401/403 → 提前停止（剩下的测了也没意义）、一律保留不动，只报 key_error。
     被移除的模型随时可「拉取模型」恢复（拉的是全量目录）。
@@ -650,6 +671,7 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
 
     async def probe_events():
         kept, removed, transient = [], [], []
+        genlist: list[dict] = []
         connfails: list[str] = []
         key_error, connect_fail, cancelled, skipped = False, False, False, 0
         conn_reason, consec_fail = "", 0
@@ -662,12 +684,20 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
                 # 401/403 先分清是 key 坏了还是「这个模型没权限」：
                 # 同一 key 能列出 /models 目录 → key 没问题，单模型未授权 → 按「移除」处理继续探测
                 if await _key_alive(gw, up):
-                    res, reason = "removed", f"{code}: 无此模型授权（key 可用，该模型未开通）"
+                    if _looks_gen_model(reason):
+                        res, reason = "gen", f"{code}: {reason}"
+                    else:
+                        res, reason = "removed", f"{code}: 无此模型授权（key 可用，该模型未开通）"
             if res == "ok":
                 kept.append(m)
                 consec_fail = 0
             elif res == "removed":
                 removed.append({"model": m, "reason": reason})
+                consec_fail = 0
+            elif res == "gen":
+                # 生成类模型（图像/视频/音频）：chat relay 转发不了，但不是坏了——保留在清单，单独标注
+                genlist.append({"model": m, "reason": reason})
+                kept.append(m)
                 consec_fail = 0
             elif res == "transient":
                 transient.append(m)
@@ -705,8 +735,8 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
         if removed and not key_error and not connect_fail and not cancelled:
             reg.set_models(platform, kept)
             written = True
-        yield {"done": True, "kept": kept, "removed": removed, "transient": transient,
-               "connfails": connfails,
+        yield {"done": True, "kept": kept, "removed": removed, "gen": genlist,
+               "transient": transient, "connfails": connfails,
                "key_error": key_error, "connect_fail": connect_fail,
                "connect_fail_reason": conn_reason,
                "cancelled": cancelled, "skipped": skipped, "written": written}

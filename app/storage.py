@@ -35,6 +35,7 @@ COLUMNS: dict[str, str] = {
     "key_index": "INTEGER",   # 该 key 在平台 key 列表里的序号（0 起）
     "user_id": "INTEGER",     # 属于哪个账号（NULL = 多账号改造前的历史数据）
     "dkey_id": "INTEGER",     # 这次请求用的下游客户端 key（api_keys.id，NULL = 历史数据）
+    "output_info": "TEXT",    # 生成类结果（v1.2.4 图像生成透传）：{"images": N, "urls": [...]}，chat 请求为空
 }
 
 BASE_DDL = """
@@ -173,6 +174,7 @@ class Store:
             "reasoning_policy": (kw.get("reasoning_policy") or "")[:16],
             "key_hint": (kw.get("key_hint") or "")[:32],
             "key_index": int(kw.get("key_index") or 0),
+            "output_info": (kw.get("output_info") or "")[:4000],
             "user_id": kw.get("user_id"),
             "dkey_id": kw.get("dkey_id"),
         }

@@ -63,7 +63,7 @@ class Upstream(BaseModel):
         return self.name or self.platform
 
     def url_for(self, kind: str) -> str:
-        """kind: chat | messages | models | count_tokens。
+        """kind: chat | messages | models | count_tokens | images。
 
         anthropic 协议默认路径带 /v1 前缀（按官方 base_url 不带 /v1 设计）；
         若 base_url 已以 /v1 结尾（如 Agnes 等 OpenAI 风格 hub 同时提供 Messages），
@@ -74,6 +74,12 @@ class Upstream(BaseModel):
             "messages": "/v1/messages",
             "models": "/v1/models" if self.type == "anthropic" else "/models",
             "count_tokens": "/v1/messages/count_tokens",
+            # 生成类端点（v1.2.4 透传）：默认 OpenAI/通用风格路径，
+            # 平台可用 extra 的 images_path / videos_path / audio_speech_path / audio_trans_path 覆盖
+            "images": "/images/generations",
+            "videos": "/videos",
+            "audio_speech": "/audio/speech",
+            "audio_trans": "/audio/transcriptions",
         }[kind]
         path = str(self.extra.get(f"{kind}_path") or default)
         if not path.startswith("/"):

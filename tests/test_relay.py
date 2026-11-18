@@ -3691,3 +3691,198 @@ def test_r130_settings_aggregate_keys(client, hdr):
     finally:
         store.delete_user_full(dave["id"])
         store.delete_user_full(erin["id"])
+
+
+# ---------------------------------------------------------------- R131 探测生成类模型判「gen」保留（v1.2.4）
+def test_r131_probe_gen_models_kept(client, hdr, upstream_port):
+    """图像/视频/音频类模型在 chat 端点 4xx + 专用端点提示：探测判 gen 保留（不写回删掉），
+    真 404 仍移除；无 removed 的平台不写回、模型清单原样。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r131mix", "name": "R131 mix(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-ok-plain", "m-genimg", "m-genvid", "m-x404"]})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r131gen", "name": "R131 gen-only(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-ok-plain", "m-genimg", "m-400sse"]})
+    assert r2.status_code == 200, r2.text
+    try:
+        # 混合平台：2 个 gen 保留 + 1 个 x404 移除 → 写回时去掉 x404、保留 gen
+        rp = client.post("/api/providers/r131mix/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        assert sorted(x["model"] for x in j["gen"]) == ["m-genimg", "m-genvid"], j
+        assert [x["model"] for x in j["removed"]] == ["m-x404"], j
+        assert sorted(x for x in j["kept"]) == ["m-genimg", "m-genvid", "m-ok-plain"], j
+        assert j["written"] is True, "有 removed 应写回模型清单"
+        assert any("/v1/images" in x["reason"] for x in j["gen"]), j
+        models_now = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+                      if p["platform"] == "r131mix"][0]["models"]
+        assert models_now == ["m-ok-plain", "m-genimg", "m-genvid"], \
+            f"生成类模型必须保留在清单里: {models_now}"
+        # 仅 gen 平台：没有 removed → 不写回，清单原样
+        rp2 = client.post("/api/providers/r131gen/probe", headers=hdr, json={})
+        j2 = rp2.json()
+        assert sorted(x["model"] for x in j2["gen"]) == ["m-400sse", "m-genimg"], j2
+        assert not j2["removed"] and j2["written"] is False, j2
+        models2 = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+                   if p["platform"] == "r131gen"][0]["models"]
+        assert models2 == ["m-ok-plain", "m-genimg", "m-400sse"], \
+            f"无 removed 时清单必须原样: {models2}"
+    finally:
+        client.delete("/api/providers/r131mix", headers=hdr)
+        client.delete("/api/providers/r131gen", headers=hdr)
+
+
+# ---------------------------------------------------------------- R132 /v1/images/generations 透传（v1.2.4）
+def test_r132_images_generations_passthrough(client, hdr, upstream_port):
+    """POST /v1/images/generations → 上游 /v1/images/generations 透传：2xx 产物 URL 抓进日志
+    output_info（images=N）；上游 400 记 error 行并透传错误；未知模型 404；
+    anthropic 上游 400 unsupported；下游 key 绑定门禁对生成类端点同样生效。"""
+    import json as _json
+    from tests import fake_upstream
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r132img", "name": "R132 images(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["img-model", "m-genbad"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    kid = None
+    try:
+        store = client.app.state.store
+        # 正常透传：n=2 → 2 个 URL，日志 output_info 记产物
+        ri = client.post("/v1/images/generations", headers=bh,
+                         json={"model": "img-model", "prompt": "a cat", "n": 2})
+        assert ri.status_code == 200, ri.text
+        data = ri.json()["data"]
+        assert [d["url"] for d in data] == ["https://fake.example/gen-img-model-0.png",
+                                            "https://fake.example/gen-img-model-1.png"], data
+        rows = [x for x in store.recent(5)
+                if x.get("model") == "img-model" and x.get("status") == "ok"]
+        assert rows, "图像透传应落请求日志"
+        row = rows[0]
+        oi = _json.loads(row["output_info"])
+        assert oi["images"] == 2 and len(oi["urls"]) == 2, row
+        assert row["total_tokens"] == 0 and row["estimated"], \
+            "生成类请求 0 token 且标 estimated"
+        # 上游 400 → 透传错误（400）+ 日志记 error 行（含上游原文）
+        fake_upstream.RECEIVED.clear()
+        rb = client.post("/v1/images/generations", headers=bh, json={"model": "m-genbad"})
+        assert rb.status_code == 400, rb.text
+        erow = [x for x in store.recent(5)
+                if x.get("model") == "m-genbad" and x.get("status") == "error"]
+        assert erow and "not enabled" in erow[0]["error"], erow
+        # 未知模型 → 404
+        ru = client.post("/v1/images/generations", headers=bh, json={"model": "no-such-model"})
+        assert ru.status_code == 404, ru.text
+        # anthropic 上游 → 400 unsupported
+        ra = client.post("/v1/images/generations", headers=bh,
+                         json={"model": "fakeclaude/fake-claude"})
+        assert ra.status_code == 400 and "只支持 OpenAI 兼容" in ra.text, ra.text
+        # 绑定门禁：只绑 img-model 的 key 调 m-genbad → 403，绑定的 img-model 放行
+        cr = client.post("/api/keys", headers=hdr,
+                         json={"label": "r132bound", "models": ["r132img/img-model"]})
+        assert cr.status_code == 200, cr.text
+        kid = cr.json()["id"]
+        bkey = {"authorization": f"Bearer {cr.json()['key']}"}
+        rg = client.post("/v1/images/generations", headers=bkey, json={"model": "m-genbad"})
+        assert rg.status_code == 403, rg.text
+        ro = client.post("/v1/images/generations", headers=bkey,
+                         json={"model": "r132img/img-model"})
+        assert ro.status_code == 200, ro.text
+        # 转发到上游的 model 字段 = 客户端模型名（无别名时同名透传）；
+        # 取最后一条（绑定 key 成功调用的 r132img/img-model → 上游名 img-model）
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/images/generations"]
+        assert sent and sent[-1]["body"]["model"] == "img-model", sent[-1]
+    finally:
+        if kid is not None:
+            client.app.state.store.revoke_api_key(me_id(client), kid)
+        client.delete("/api/providers/r132img", headers=hdr)
+
+
+# ---------------------------------------------------------------- R133 /v1/videos + /v1/audio/speech 透传（v1.2.4）
+def test_r133_videos_and_speech_passthrough(client, hdr, upstream_port):
+    """videos：任务型 JSON 原样透传，任务 id 抓进 output_info；
+    audio/speech：二进制原样透传（content-type + 字节），字节数抓进 output_info。"""
+    import json as _json
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r133av", "name": "R133 av(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["vid-model", "tts-model"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        store = client.app.state.store
+        # videos：任务型 JSON
+        rv = client.post("/v1/videos", headers=bh, json={"model": "vid-model", "prompt": "a dog"})
+        assert rv.status_code == 200, rv.text
+        jv = rv.json()
+        assert jv["id"] == "vid-vid-model" and jv["status"] == "queued", jv
+        vrow = [x for x in store.recent(3)
+                if x.get("model") == "vid-model" and x.get("status") == "ok"][0]
+        assert "vid-vid-model" in vrow["output_info"], vrow
+        # audio speech：二进制透传
+        speech = b"ID3\x04fake-mp3-audio"
+        rs = client.post("/v1/audio/speech", headers=bh,
+                         json={"model": "tts-model", "input": "hi"})
+        assert rs.status_code == 200, rs.text
+        assert rs.content == speech, "二进制必须原样透传"
+        assert "audio/mpeg" in (rs.headers.get("content-type") or "")
+        srow = [x for x in store.recent(3)
+                if x.get("model") == "tts-model" and x.get("status") == "ok"][0]
+        oi = _json.loads(srow["output_info"])
+        assert oi["audio_bytes"] == len(speech) and \
+            oi["content_type"].startswith("audio/"), srow
+    finally:
+        client.delete("/api/providers/r133av", headers=hdr)
+
+
+# ---------------------------------------------------------------- R134 /v1/audio/transcriptions multipart 透传（v1.2.4）
+def test_r134_audio_transcriptions_multipart(client, hdr, upstream_port):
+    """multipart 音频转写：file 二进制原样透传（不重编码），form 的 model 字段按别名做
+    字节级替换（客户端别名 → 上游模型名）；转写文本抓进 output_info；缺 model → 400。"""
+    import json as _json
+    from tests import fake_upstream
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r134tr", "name": "R134 trans(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["trans-model"], "model_map": {"trans-alias": "trans-model"}})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        store = client.app.state.store
+        audio = b"RIFF0000fakeaudiobytes"
+        # 直呼上游模型名
+        rt = client.post("/v1/audio/transcriptions", headers=bh,
+                         data={"model": "trans-model", "language": "zh"},
+                         files={"file": ("a.wav", audio, "audio/wav")})
+        assert rt.status_code == 200, rt.text
+        assert rt.json()["text"] == "hello from fake transcription"
+        trow = [x for x in store.recent(3)
+                if x.get("model") == "trans-model" and x.get("status") == "ok"][0]
+        assert "hello from fake transcription" in trow["output_info"], trow
+        # 别名：客户端发 trans-alias → 转发到上游的 form model 字段须是 trans-model
+        fake_upstream.RECEIVED.clear()
+        ra = client.post("/v1/audio/transcriptions", headers=bh,
+                         data={"model": "trans-alias", "language": "zh"},
+                         files={"file": ("a.wav", audio, "audio/wav")})
+        assert ra.status_code == 200, ra.text
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/audio/transcriptions"]
+        assert sent and sent[0]["body"]["model"] == "trans-model", sent[0]
+        assert sent[0]["body"]["file_bytes"] == len(audio), "file 字段字节数必须完整"
+        # 缺 model 字段 → 400
+        fake_upstream.RECEIVED.clear()
+        rm = client.post("/v1/audio/transcriptions", headers=bh,
+                         data={"language": "zh"},
+                         files={"file": ("a.wav", audio, "audio/wav")})
+        assert rm.status_code == 400, rm.text
+        assert not [x for x in fake_upstream.RECEIVED
+                    if x["path"] == "/v1/audio/transcriptions"], "缺 model 不应打到上游"
+        # 未知模型 → 404
+        rn = client.post("/v1/audio/transcriptions", headers=bh,
+                         data={"model": "no-such"},
+                         files={"file": ("a.wav", audio, "audio/wav")})
+        assert rn.status_code == 404, rn.text
+    finally:
+        client.delete("/api/providers/r134tr", headers=hdr)

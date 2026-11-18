@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +23,7 @@ from .auth import authenticate, current_user, tenant_of
 from .crypto import KeyCipher, resolve_master_secret
 from .tenants import (TenantRegistries, has_encrypted_tenant_files,
                       migrate_one_tenant_file, migrate_tenant_files)
-from .gateway import Gateway, error_response, new_request_id
+from .gateway import Gateway, UpstreamError, error_response, new_request_id
 from .registry import Registry
 from .storage import Store
 
@@ -302,6 +304,77 @@ async def embeddings(request: Request):
         return error_response("openai", 502, f"上游调用失败: {exc}", "upstream_error")
 
 
+# ---------------------------------------------------------------- 生成类端点透传（v1.2.4）
+# 图像/视频/语音：客户端 OpenAI 风格路径 → 上游对应端点（平台 extra 可覆盖路径）。
+# - images/videos/audio_speech：JSON body（model 改写为上游名，走多 key 轮换）
+# - audio_transcriptions：multipart 原样透传（model 从 form 提取做路由，别名字节级替换）
+# 产物/字节数抓进请求日志 output_info；上游 4xx/5xx 记 error 行后透传错误给客户端。
+
+
+async def _generate_endpoint(request: Request, kind: str):
+    user, reason = authenticate(request)
+    if reason:
+        return _auth_error("openai", reason, bearer_token(request), str(request.url.path), request)
+    reg = tenants.get(user["id"])
+    started_at = time.perf_counter()
+    request_id = new_request_id()
+    raw = await request.body()
+    ct = request.headers.get("content-type") or ""
+    if kind == "audio_trans":
+        m = re.search(rb'name="model"[^\r\n]*\r?\n\r?\n([^\r\n]+)', raw or b"")
+        model = m.group(1).decode("utf-8", "replace").strip() if m else ""
+        if not model:
+            return error_response("openai", 400, "multipart 表单缺少 model 字段", "invalid_request")
+        body = None
+    else:
+        try:
+            body = json.loads(raw or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except Exception:
+            return error_response("openai", 400, "请求体不是合法 JSON", "invalid_json")
+        model = str(body.get("model") or "")
+    gate = _model_binding_gate(user, request, "openai", model)
+    if gate is not None:
+        return gate
+    resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
+    if not resolved:
+        return error_response("openai", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
+    upstream, up_model = resolved
+    if upstream.type != "openai":
+        return error_response("openai", 400, "生成类端点只支持 OpenAI 兼容上游", "unsupported")
+    ip = request.client.host if request.client else ""
+    try:
+        return await gw.passthrough_generate(
+            kind=kind, body=body, raw=raw, content_type=ct, upstream=upstream,
+            client_model=up_model, request_id=request_id, started_at=started_at,
+            user_id=user["id"], client=user.get("email") or "", dkey_id=user.get("_key_id"),
+            client_ip=ip,
+        )
+    except UpstreamError as exc:
+        # 错误行已由 gateway 记入请求日志（含上游报错原文）
+        status = exc.status if exc.status < 500 else 502
+        return error_response("openai", status, f"上游调用失败: {exc.message()}", "upstream_error")
+
+
+@app.post("/v1/images/generations")
+async def images_generations(request: Request):
+    return await _generate_endpoint(request, "images")
+
+
+@app.post("/v1/videos")
+async def videos(request: Request):
+    return await _generate_endpoint(request, "videos")
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(request: Request):
+    return await _generate_endpoint(request, "audio_speech")
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(request: Request):
+    return await _generate_endpoint(request, "audio_trans")
 # ---------------------------------------------------------------- Anthropic 兼容入口
 @app.post("/v1/messages")
 async def messages(request: Request):

@@ -183,6 +183,7 @@ tbody tr:hover td{background:#101a28}
 .probe-row.removed .pv-tag{color:#f87171;border-color:rgba(248,113,113,.4)}
 .probe-row.transient .pv-tag{color:#fbbf24;border-color:rgba(251,191,36,.4)}
 .probe-row.keyerr .pv-tag{color:#f87171;border-color:rgba(248,113,113,.5)}
+.probe-row.gen .pv-tag{color:#38bdf8;border-color:rgba(56,189,248,.4)}
 .pv-note{font-size:12.5px;color:var(--dim);padding:6px 0;line-height:1.7}
 .pv-note.err{color:#f87171}
 .pv-note.ok{color:#4ade80}
@@ -1698,7 +1699,7 @@ function renderProbeLine(ev){
   // result 事件：更新对应 pending 行
   const left = ev.total - ev.i;
   stat.textContent = `已测 ${ev.i}/${ev.total} · 剩 ${left} 个待测 · 当前：${ev.model}`;
-  const icons = { ok: "✓ 可用", removed: "✗ 未授权/不可用", transient: "⚠ 瞬时故障(保留)", keyerr: "⛔ key 错误", connfail: "⚠ 连不通上游" };
+  const icons = { ok: "✓ 可用", removed: "✗ 未授权/不可用", transient: "⚠ 瞬时故障(保留)", keyerr: "⛔ key 错误", connfail: "⚠ 连不通上游", gen: "◈ 生成类(保留)" };
   let row = list.querySelector(`[data-i="${ev.i}"]`);
   if(!row){
     row = document.createElement("div");
@@ -1715,6 +1716,9 @@ function renderProbeLine(ev){
   }
   if(ev.result === "connfail"){
     stat.textContent = `连不通上游（连接超时/代理抖动）——该模型保留不删；连续 3 个连不通会终止整轮`;
+  }
+  if(ev.result === "gen"){
+    stat.textContent = `生成类模型（图像/视频/音频）——chat 端点转发不了，保留在清单不删除`;
   }
 }
 
@@ -1735,11 +1739,15 @@ function finishProbe(ev){
     parts.push(`<div class="pv-note">移除 ${ev.removed.length} 个：${ev.removed.map(x=>esc(x.model)).join("、")}${ev.written ? " · 已写回模型清单 ✓" : ""}（随时可重新「拉取模型」补回）</div>`);
   if(ev.transient && ev.transient.length)
     parts.push(`<div class="pv-note">⚠ 疑似瞬时故障已保留 ${ev.transient.length} 个：${ev.transient.map(esc).join("、")}</div>`);
+  if(ev.gen && ev.gen.length)
+    parts.push(`<div class="pv-note">◈ ${ev.gen.length} 个生成类模型（图像/视频/音频，已保留——chat 端点转发不了，需走上游专用端点）：${ev.gen.map(x=>esc(x.model)).join("、")}</div>`);
   if(!parts.length && !ev.cancelled && !ev.connect_fail && !ev.key_error)
     parts.push(`<div class="pv-note ok">全部 ${ev.kept.length} 个模型可用 ✓</div>`);
   if(ev.skipped > 0 && !ev.connect_fail && !ev.cancelled)
     parts.unshift(`<div class="pv-note">提前停止，跳过了 ${ev.skipped} 个未测模型。</div>`);
-  stat.textContent = ev.cancelled ? "已取消" : (ev.connect_fail ? "连接失败，已停止" : `完成：可用 ${ev.kept.length} 个 · 移除 ${(ev.removed||[]).length} 个`);
+  stat.textContent = ev.cancelled ? "已取消" : (ev.connect_fail ? "连接失败，已停止" :
+    `完成：可用 ${ev.kept.length} 个 · 移除 ${(ev.removed||[]).length} 个`
+    + (ev.gen && ev.gen.length ? ` · 生成类 ${ev.gen.length} 个（保留）` : ""));
   d.innerHTML = parts.join("");
   $("#probeCancel").style.display = "none";
 }
@@ -2116,6 +2124,29 @@ function logDetail(i){
   const errBody = x.error
     ? `<pre class="mono" style="margin:0;padding:10px 12px;background:var(--panel2);border:1px solid #4a2530;border-radius:8px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;color:#ffb4b4">${esc(x.error)}</pre>`
     : '<div class="empty">这条请求没有记录上游报错细节（可能是客户端中断或超时）</div>';
+  // v1.2.4 生成类结果（图像缩略图 / 转写文本 / 音频字节 / 任务 id）：来自 output_info
+  let genOut = "";
+  try{
+    if(x.output_info){
+      const oi = JSON.parse(x.output_info);
+      if(Array.isArray(oi.urls) && oi.urls.length)
+        genOut = `<div style="font-size:12px;color:var(--dim);margin-bottom:6px">生成结果：${oi.urls.length} 张图像</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${
+            oi.urls.slice(0,6).map(u => `<img src="${esc(u)}" alt="生成图像" style="max-height:140px;max-width:200px;border-radius:6px;border:1px solid var(--line);object-fit:contain;background:#000">`).join("")
+          }${oi.urls.length > 6 ? `<span class="dim" style="font-size:12px;align-self:center">等 ${oi.urls.length} 张…</span>` : ""}</div>`;
+      else if(oi.text)
+        genOut = `<div style="font-size:12px;color:var(--dim);margin-bottom:6px">转写结果</div>
+          <pre class="mono" style="margin:0;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55">${esc(oi.text)}</pre>`;
+      else if(oi.audio_bytes != null)
+        genOut = `<div style="font-size:12px;color:var(--dim);margin-bottom:12px">音频文件 ${nf(oi.audio_bytes)} 字节${oi.content_type ? "（" + esc(oi.content_type) + "）" : ""}——文件经 relay 原样透传，不存档，可回看字节数/类型</div>`;
+      else if(oi.id)
+        genOut = `<div style="font-size:12px;color:var(--dim);margin-bottom:12px">生成任务 id：<span class="mono">${esc(oi.id)}</span>${oi.status ? " · 状态 " + esc(oi.status) : ""}（产物在上游任务侧，可用上游 API 轮询/查询）</div>`;
+    }
+  }catch(e){}
+  // 生成类模型（如 zhipu 图像模型）报「不支持 SSE」→ 给出可操作的提示
+  const sseHint = x.error && /不支持SSE|不支持流式|does not support (sse|streaming)/i.test(x.error)
+    ? `<div style="font-size:12px;color:#fbbf24;margin-top:8px;line-height:1.6">💡 该模型不支持流式（SSE）调用：客户端改用 <span class="mono" style="padding:1px 4px;background:var(--panel2);border-radius:4px">stream: false</span> 重试通常即可（图像/视频生成模型一般只支持非流式；非流式调图像模型时，结果图 URL 在响应 content 里返回）。</div>`
+    : "";
   $("#modalBody").innerHTML = `
     <h3>请求详情 <span class="pill ${pill}">${esc(x.status)}</span></h3>
     <table style="width:100%;font-size:12.5px;margin-bottom:14px">
@@ -2124,8 +2155,10 @@ function logDetail(i){
         <td class="mono" style="padding:3px 0;word-break:break-all">${esc(String(v ?? "-"))}</td>
       </tr>`).join("")}
     </table>
+    ${genOut ? genOut : ""}
     <div style="font-size:12px;color:var(--dim);margin-bottom:6px">报错信息（上游返回 / 鉴权拦截）</div>
     ${errBody}
+    ${sseHint}
     <div style="margin-top:14px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>`;
   $("#modal").classList.add("on");
 }
@@ -2145,12 +2178,23 @@ function drawLogsPanel(){
     const st = x.status === "ok" ? '<span class="pill ok">ok</span>'
       : x.status === "aborted" ? '<span class="pill warn">aborted</span>'
       : `<span class="pill err" title="点击查看上游报错" style="cursor:pointer;text-decoration:underline dotted" onclick="logDetail(${i})">${esc(x.status)}</span>`;
+    // v1.2.4 生成类端点（images/videos/audio）：有 output_info 就标一类小 pill，详情弹层看产物
+    let genPill = "";
+    try{
+      if(x.output_info){
+        const oi = JSON.parse(x.output_info);
+        if(Array.isArray(oi.urls) && oi.urls.length) genPill = `<span class="pill" title="生成结果：${oi.urls.length} 张图像">图像 ${oi.urls.length}</span>`;
+        else if(oi.audio_bytes != null) genPill = '<span class="pill" title="语音合成（TTS）">音频</span>';
+        else if(oi.text) genPill = '<span class="pill" title="转写结果">转写</span>';
+        else if(oi.id) genPill = '<span class="pill" title="生成任务（产物在上游任务侧）">任务</span>';
+      }
+    }catch(e){}
     return `<tr>
       <td>${st}</td>
       <td class="mono dim">${esc(fullTs(x.ts))}</td>
       <td class="mono">${esc(x.platform || "-")}</td>
       <td class="mono">${esc(x.model)}</td>
-      <td><span class="pill">${logType(x)}</span><span class="pill">${esc(x.in_format||"openai")}</span></td>
+      <td><span class="pill">${logType(x)}</span><span class="pill">${esc(x.in_format||"openai")}</span>${genPill}</td>
       <td class="num">${nf(x.prompt_tokens)}</td>
       <td class="num">${nf(x.completion_tokens)}</td>
       <td class="num">${nf(x.total_tokens)}${x.estimated ? '<span class="dim" title="估算值"> est</span>' : ""}</td>

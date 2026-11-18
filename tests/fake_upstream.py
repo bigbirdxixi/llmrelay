@@ -9,7 +9,8 @@ import json
 import time
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.datastructures import UploadFile
 
 app = FastAPI()
 RECEIVED: list[dict] = []
@@ -100,6 +101,19 @@ async def chat(request: Request):
         return JSONResponse(status_code=404, content={
             "status": 404, "title": "Not Found",
             "detail": "Function: Not found for account 'TEST'"})
+    # 生成类模型（图像/视频）：chat 端点 400 + 专用端点提示（模拟 agnes/zhipu 行为，
+    # 探测应判「gen 保留」而非 removed）
+    if mname.startswith("m-genimg"):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "image model 'm-genimg' 需使用 /v1/images/generations 端点调用",
+                      "type": "invalid_request_error"}})
+    if mname.startswith("m-genvid"):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "该模型为视频模型，请使用 /v1/videos 端点生成",
+                      "type": "invalid_request_error"}})
+    if mname.startswith("m-400sse"):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "当前模型不支持SSE调用方式", "type": "invalid_request_error"}})
     # 慢模型加长版：3s 才响应（R91 读超时区分测试用：探测短超时 1s 时触发 ReadTimeout，
     # 验证「上游响应慢」不算连接级 connfail、不触发连续 3 个放弃）
     if mname.startswith("m-slow3"):
@@ -168,6 +182,51 @@ async def chat(request: Request):
         yield _sse("[DONE]")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------- 生成类端点（images/videos/audio，v1.2.4 透传测试）
+@app.post("/v1/images/generations")
+async def images_gen(request: Request):
+    body = await request.json()
+    _record("/v1/images/generations", body)
+    m = str(body.get("model") or "")
+    if m.startswith("m-genbad"):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "fake image gen rejected: model not enabled",
+                      "type": "invalid_request_error"}})
+    n = max(1, min(int(body.get("n") or 1), 8))
+    return {"created": int(time.time()),
+            "data": [{"url": f"https://fake.example/gen-{m}-{i}.png"} for i in range(n)]}
+
+
+@app.post("/v1/videos")
+async def videos_gen(request: Request):
+    body = await request.json()
+    _record("/v1/videos", body)
+    m = str(body.get("model") or "")
+    return {"id": f"vid-{m}", "status": "queued", "model": m,
+            "expires_at": int(time.time()) + 3600}
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(request: Request):
+    body = await request.json()
+    _record("/v1/audio/speech", body)
+    audio = b"ID3\x04fake-mp3-audio"
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_trans(request: Request):
+    form = await request.form()
+    model = str(form.get("model") or "")
+    f = form.get("file")
+    nbytes = 0
+    if isinstance(f, UploadFile):
+        nbytes = len(f.file.read())
+    _record("/v1/audio/transcriptions",
+            {"model": model, "file_bytes": nbytes, "language": str(form.get("language") or "")})
+    return {"text": "hello from fake transcription", "model": model}
 
 
 # ---------------------------------------------------------------- Anthropic

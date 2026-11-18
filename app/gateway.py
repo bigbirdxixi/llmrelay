@@ -5,13 +5,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
 import httpx
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import config
 from . import translate as T
@@ -743,3 +744,120 @@ class Gateway:
             user_id=user_id, client=client or "master", dkey_id=dkey_id,
         )
         return JSONResponse(content=data, headers={"x-request-id": request_id})
+
+    # ---------------- 生成类端点透传（images / videos / audio，v1.2.4） ----------------
+    # JSON 类（images/videos/audio_speech）走 send（多 key 轮换 + 健康度）；
+    # multipart 类（audio_trans）表单重编码易损坏二进制 file 字段，边界原样透传，
+    # 只做字节级替换 model 字段值（别名 → 上游模型名）。
+    _MPART_MODEL_RE = re.compile(rb'(name="model"[^\r\n]*\r?\n\r?\n)([^\r\n]+)(\r?\n)')
+    @classmethod
+    def gen_output_info(cls, kind: str, data: Any, resp: "httpx.Response") -> str:
+        """生成结果抓进 output_info（请求日志可回看）：JSON → 产物 url/文本/任务 id；二进制 → 字节数。"""
+        if isinstance(data, dict):
+            items = data.get("data")
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                urls = [str(x["url"]) for x in items if isinstance(x, dict) and x.get("url")]
+                if urls:
+                    return json.dumps({"images": len(urls), "urls": urls[:16]}, ensure_ascii=False)
+            for k in ("text", "output"):
+                v = data.get(k)
+                if isinstance(v, str) and v:
+                    return json.dumps({"text": v[:2000]}, ensure_ascii=False)
+            if data.get("id"):
+                keep = {k: data[k] for k in ("id", "status", "model") if data.get(k)}
+                return json.dumps(keep, ensure_ascii=False)
+        ct = str(resp.headers.get("content-type") or "application/octet-stream")
+        return json.dumps({"audio_bytes": len(resp.content), "content_type": ct}, ensure_ascii=False)
+
+    async def _send_multipart(self, reg, up: Upstream, url: str, raw: bytes,
+                              content_type: str, up_model: str) -> "httpx.Response":
+        """multipart 透传（音频转写）：key 轮换语义与 send 一致；4xx 不换 key（参数问题），
+        连接级失败换下一个 key；form 的 model 字段值按别名替换为上游模型名（字节级）。"""
+        client = self.client_for(up)
+        ts = httpx.Timeout(up.timeout_s, connect=CONNECT_TIMEOUT_S)
+        attempts = max(1, min(len(up.api_keys), 3))
+        last_status, last_body = 502, b"no available key"
+        hint = ""
+        for i in range(attempts):
+            key, idx = reg.next_key(up)
+            hint = mask_key(key)
+            m = self._MPART_MODEL_RE.search(raw)
+            if m and up_model and m.group(2).decode("utf-8", "replace") != up_model:
+                raw = self._MPART_MODEL_RE.sub(
+                    lambda mm: mm.group(1) + up_model.encode("utf-8") + mm.group(3), raw, count=1)
+            headers = build_headers(up, key, stream=False)
+            # build_headers 用小写键（content-type/accept）：先 pop 掉再设，避免大小写双头
+            # 同发（h11/uvicorn 两个都收到，服务端按先到者解析 → multipart 边界丢失）
+            headers.pop("content-type", None)
+            headers.pop("accept", None)
+            headers["Content-Type"] = content_type or "application/octet-stream"
+            headers["Accept"] = "application/json"
+            headers.pop("anthropic-version", None)
+            req = client.build_request("POST", url, content=raw, headers=headers, timeout=ts)
+            try:
+                resp = await client.send(req)
+            except httpx.HTTPError as exc:
+                reg.report(up, idx, False)
+                last_status, last_body = _classify_http_error(exc)
+                break
+            if resp.status_code < 400:
+                reg.report(up, idx, True)
+                with contextlib.suppress(Exception):
+                    resp.extensions["relay_key_hint"] = hint
+                    resp.extensions["relay_key_index"] = int(idx)
+                return resp
+            reg.report(up, idx, True)   # 上游有应答 = key 没坏，4xx 是参数问题，重试无益
+            last_status = resp.status_code
+            last_body = await resp.aread()
+            break
+        raise UpstreamError(last_status, last_body, up.platform, key_hint=hint)
+
+    async def passthrough_generate(self, *, kind: str, body: dict | None, raw: bytes,
+                                   content_type: str, upstream: Upstream,
+                                   client_model: str, request_id: str, started_at: float,
+                                   user_id: int | None = None, client: str = "",
+                                   dkey_id: int | None = None, client_ip: str = "") -> Any:
+        """生成类端点透传：kind ∈ images | videos | audio_speech | audio_trans。
+        - images/videos/audio_speech：JSON body，model 字段改写为上游模型名，走 send（key 轮换）；
+        - audio_trans：multipart 原样透传（见 _send_multipart），别名 model 字节级替换；
+        - 记账：0 token（生成类不按 token 计），产物/字节数抓进 output_info；
+          上游 4xx/5xx 也记一条 status=error（请求日志可查），随后抛出由入口转 4xx/502。"""
+        reg = self.tenants.get(user_id) if user_id is not None else None
+        url = upstream.url_for(kind)
+        try:
+            if kind == "audio_trans":
+                resp = await self._send_multipart(reg, upstream, url, raw, content_type, client_model)
+            else:
+                payload = dict(body or {})
+                payload["model"] = client_model
+                resp = await self.send(reg, upstream, url, payload, stream=False)
+        except UpstreamError as exc:
+            self.record(request_id=request_id, platform=upstream.platform,
+                        model=client_model, model_alias=client_model, in_format="openai",
+                        stream=False, status="error", http_status=exc.status,
+                        error=exc.message()[:800],
+                        latency_ms=int((time.perf_counter() - started_at) * 1000),
+                        client_ip=client_ip, user_id=user_id, client=client or "master", dkey_id=dkey_id)
+            raise
+        try:
+            ct = str(resp.headers.get("content-type") or "")
+            data = None
+            if "json" in ct.lower():
+                with contextlib.suppress(Exception):
+                    data = resp.json()
+            out_info = self.gen_output_info(kind, data, resp) if isinstance(data, dict) else \
+                (json.dumps({"audio_bytes": len(resp.content), "content_type": ct}, ensure_ascii=False)
+                 if data is None else "")
+            self.record(resp=resp, request_id=request_id, platform=upstream.platform,
+                        model=client_model, model_alias=client_model, in_format="openai",
+                        stream=False, status="ok", http_status=resp.status_code,
+                        latency_ms=int((time.perf_counter() - started_at) * 1000),
+                        client_ip=client_ip, user_id=user_id, client=client or "master",
+                        dkey_id=dkey_id, estimated=True, output_info=out_info[:4000])
+        finally:
+            with contextlib.suppress(Exception):
+                await resp.aclose()
+        if isinstance(data, dict):
+            return JSONResponse(content=data, headers={"x-request-id": request_id})
+        return Response(content=resp.content, media_type=ct or "application/octet-stream",
+                        headers={"x-request-id": request_id})

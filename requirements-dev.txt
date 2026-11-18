@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=8
+# fake 上游解析 /v1/audio/transcriptions 的 multipart form（R134）需要
+python-multipart>=0.0.30
