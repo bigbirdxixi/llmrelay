@@ -2084,7 +2084,12 @@ document.addEventListener("click", ev => {
   if (ev.target.closest && ev.target.closest(".thfb")) return;   // 列头按钮交给它自己的 onclick 切换
   thfPopClose();
 });
-document.addEventListener("scroll", () => { if (S.thfPop != null) thfPopClose(); }, true);
+document.addEventListener("scroll", ev => {
+  if (S.thfPop == null) return;
+  const pop = document.getElementById("thfpop");
+  if (pop && (ev.target === pop || pop.contains(ev.target))) return;   // 面板自身列表滚动（滚轮/拖滚条/点下箭头）不收起；页面或表格容器滚动时 fixed 面板会脱离列头，仍需收起
+  thfPopClose();
+}, true);
 
 function clearLogFilters(){
   S.logFilters = {};
