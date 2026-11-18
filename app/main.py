@@ -9,6 +9,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -244,6 +245,10 @@ async def _handle(request: Request, in_fmt: str, kind: str):
             "model_not_found",
         )
     upstream, up_model = resolved
+    # 生成类模型误入聊天端点：直接指路，别让上游回费解的 4xx（如「不支持SSE」）
+    g = _kind_guard(upstream, up_model, "chat", in_fmt)
+    if g is not None:
+        return g
     est_prompt = T.estimate_tokens(T.flatten_messages_text(body))
     client_ip = request.client.host if request.client else ""
     return await gw.relay(
@@ -309,6 +314,29 @@ async def embeddings(request: Request):
 # - images/videos/audio_speech：JSON body（model 改写为上游名，走多 key 轮换）
 # - audio_transcriptions：multipart 原样透传（model 从 form 提取做路由，别名字节级替换）
 # 产物/字节数抓进请求日志 output_info；上游 4xx/5xx 记 error 行后透传错误给客户端。
+#
+# 模型类型（extra.model_kind：模型名 -> image|video|audio_tts|audio_trans）：
+# - 生成类端点：模型标了别的类型 → 400 提示正确端点（严格模式，配置即事实来源）；
+# - 聊天端点：生成类模型误入 chat → 400 提示改用扁平路径（不再让上游回费解的 4xx）。
+
+_GEN_KIND_LABEL = {"image": "图像", "video": "视频", "audio_tts": "音频合成(TTS)",
+                   "audio_trans": "音频转写"}
+_GEN_KIND_ENDPOINT = {"image": "/v1/images", "video": "/v1/videos",
+                      "audio_tts": "/v1/audio（JSON 请求体）", "audio_trans": "/v1/audio（multipart 带 file）"}
+# 请求 kind -> model_kind 值
+_REQ_KIND_MAP = {"images": "image", "videos": "video", "audio_speech": "audio_tts",
+                 "audio_trans": "audio_trans"}
+
+
+def _kind_guard(upstream, up_model: str, req_kind: str, in_fmt: str) -> Any:
+    """extra.model_kind 与请求端点不匹配 → 400；未配置 → 放行（返回 None）。"""
+    mk = (upstream.extra.get("model_kind") or {}).get(up_model) if upstream.extra else None
+    if mk and mk != req_kind:
+        return error_response(
+            in_fmt, 400,
+            f"模型 {up_model} 是{_GEN_KIND_LABEL.get(mk, mk)}模型，请改用 {_GEN_KIND_ENDPOINT.get(mk, '对应')} 端点调用",
+            "model_kind_mismatch")
+    return None
 
 
 async def _generate_endpoint(request: Request, kind: str):
@@ -343,6 +371,10 @@ async def _generate_endpoint(request: Request, kind: str):
     upstream, up_model = resolved
     if upstream.type != "openai":
         return error_response("openai", 400, "生成类端点只支持 OpenAI 兼容上游", "unsupported")
+    # model_kind 严格匹配：标了别的生成类（或标了生成类却来错端点）→ 400 指路
+    g = _kind_guard(upstream, up_model, _REQ_KIND_MAP.get(kind, kind), "openai")
+    if g is not None:
+        return g
     ip = request.client.host if request.client else ""
     try:
         return await gw.passthrough_generate(
@@ -375,6 +407,21 @@ async def audio_speech(request: Request):
 @app.post("/v1/audio/transcriptions")
 async def audio_transcriptions(request: Request):
     return await _generate_endpoint(request, "audio_trans")
+
+
+@app.post("/v1/images")
+async def images_flat(request: Request):
+    """扁平主路径（OpenAI 深路径 /v1/images/generations 保留为别名，同一 handler）。"""
+    return await _generate_endpoint(request, "images")
+
+
+@app.post("/v1/audio")
+async def audio_flat(request: Request):
+    """扁平音频端点：按 content-type 确定性分流——JSON 请求体 = TTS 合成（audio_speech），
+    multipart（带 file）= 转写（audio_trans）。OpenAI 系两家（OpenAI/zhipu）的 TTS/STT 都符合此约定。"""
+    kind = "audio_trans" if "multipart/form-data" in (request.headers.get("content-type") or "").lower() \
+        else "audio_speech"
+    return await _generate_endpoint(request, kind)
 # ---------------------------------------------------------------- Anthropic 兼容入口
 @app.post("/v1/messages")
 async def messages(request: Request):

@@ -197,8 +197,9 @@ tbody tr:hover td{background:#101a28}
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
 .mrow{display:flex;align-items:center;gap:8px}
-.mrow .mono.mname{flex:0 0 auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
+.mrow .mono.mname{flex:0 0 auto;max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:128px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
+.mrow select.mkd{width:112px}
 .mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
 .mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
@@ -1143,6 +1144,8 @@ function editProvider(platform){
   S.editModelMap = Object.assign({}, (p && p.model_map) || {});
   S.editAlias = {};
   for (const [a, t] of Object.entries(S.editModelMap)) if (!S.editAlias[t]) S.editAlias[t] = a;
+  // 模型类型（生成类）：extra.model_kind 模型名 -> image|video|audio_tts|audio_trans（聊天模型无条目）
+  S.editKind = Object.assign({}, ((p && p.extra) || {}).model_kind || {});
   S.availFetched = false;
   $("#modalBody").innerHTML = `
     <h3>${p ? "编辑平台 · " + esc(p.platform) : "新增上游平台"}</h3>
@@ -1186,10 +1189,10 @@ function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
+    <div class="field"><label>模型级设置：「类型」选生成类（图像/视频/音频）后走 /v1/images /v1/videos /v1/audio 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
-    <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由上面「别名」列自动生成，不必手写）</label>
+    <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
       <textarea id="f_extra" rows="3" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
     <div class="field"><label><input type="checkbox" id="f_enabled" ${(!p || p.enabled) ? "checked":""} style="width:auto;margin-right:6px">启用该平台</label></div>
     <div class="row" style="justify-content:flex-end">
@@ -1309,6 +1312,15 @@ function syncRowField(sel){
   if(row && sel.value === "off" && f) previewOffRow(f);
 }
 
+function kindChanged(sel){
+  const row = sel.closest(".mrow"); if(!row) return;
+  const model = row.dataset.model;
+  if(sel.value) S.editKind[model] = sel.value; else delete S.editKind[model];
+  // 生成类模型没有思考策略/关闭写法：置灰这两列
+  const gen = !!sel.value;
+  row.querySelectorAll(".mrs,.mrf").forEach(el => { el.disabled = gen; el.style.opacity = gen ? ".45" : ""; });
+}
+
 function renderModelReasoning(){
   const box = $("#f_modelrows");
   if(!box) return;
@@ -1324,11 +1336,15 @@ function renderModelReasoning(){
     const fld = (v && typeof v === "object" && v.field) || "auto";
     const opts = MR_OPTS.map(([k,l]) => `<option value="${k}" ${pol === k ? "selected" : ""}>${l}</option>`).join("");
     const fopts = OFF_FIELDS.map(([k,l]) => `<option value="${k}" ${fld === k ? "selected" : ""}>${l}</option>`).join("");
+    const k = S.editKind[m] || "";
+    const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"]]
+      .map(([v,l]) => `<option value="${v}" ${k === v ? "selected" : ""}>${l}</option>`).join("");
     return `<div class="mrow" data-model="${esc(m)}">
       <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
+      <select class="mkd" title="模型类型：选生成类后走 /v1/images /v1/videos /v1/audio 端点转发（聊天端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
       <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
-      <select class="mrs" onchange="syncRowField(this)">${opts}</select>
-      <select class="mrf" onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
+      <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
+      <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
       <button class="mdel" title="删除这个模型" onclick="delModel('${esc(m)}')">×</button>
     </div>`;
   }).join("");
@@ -1467,6 +1483,9 @@ async function saveProvider(platform){
   extra = collectModelReasoning(extra);
   delete extra.reasoning;        // 平台级思考开关已取消：默认永远跟随客户端
   delete extra.thinking_off;     // 平台级"关闭写法"也取消：改到模型级
+  // 模型类型（生成类）：只保留当前模型清单内的条目（删掉的模型不留陈旧分类）
+  extra.model_kind = {};
+  for (const m of S.editModels) if (S.editKind[m]) extra.model_kind[m] = S.editKind[m];
   const keys = $("#f_keys").value.split("\n").map(s => s.trim()).filter(Boolean);
   const models = S.editModels.slice();
   const body = {
@@ -1739,8 +1758,11 @@ function finishProbe(ev){
     parts.push(`<div class="pv-note">移除 ${ev.removed.length} 个：${ev.removed.map(x=>esc(x.model)).join("、")}${ev.written ? " · 已写回模型清单 ✓" : ""}（随时可重新「拉取模型」补回）</div>`);
   if(ev.transient && ev.transient.length)
     parts.push(`<div class="pv-note">⚠ 疑似瞬时故障已保留 ${ev.transient.length} 个：${ev.transient.map(esc).join("、")}</div>`);
-  if(ev.gen && ev.gen.length)
-    parts.push(`<div class="pv-note">◈ ${ev.gen.length} 个生成类模型（图像/视频/音频，已保留——chat 端点转发不了，需走上游专用端点）：${ev.gen.map(x=>esc(x.model)).join("、")}</div>`);
+  if(ev.gen && ev.gen.length){
+    const gk = ev.gen.filter(x=>x.kind);
+    const KLBL = {image:"图像",video:"视频",audio_tts:"音频TTS",audio_trans:"音频转写"};
+    parts.push(`<div class="pv-note">◈ ${ev.gen.length} 个生成类模型（图像/视频/音频，已保留——chat 端点转发不了，需走上游专用端点）：${ev.gen.map(x=>esc(x.model)).join("、")}${gk.length ? `<br>已自动分类 ${gk.length} 个（${gk.map(x=>esc(x.model)+"→"+KLBL[x.kind]).join("、")}），配置后即可用 /v1/images /v1/videos /v1/audio 端点直接调用；其余需到平台编辑页模型行「类型」列手动选。` : "（未识别出端点签名，请到平台编辑页模型行「类型」列手动选）"}</div>`);
+  }
   if(!parts.length && !ev.cancelled && !ev.connect_fail && !ev.key_error)
     parts.push(`<div class="pv-note ok">全部 ${ev.kept.length} 个模型可用 ✓</div>`);
   if(ev.skipped > 0 && !ev.connect_fail && !ev.cancelled)

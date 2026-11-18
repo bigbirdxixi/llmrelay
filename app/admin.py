@@ -582,6 +582,21 @@ def _looks_gen_model(reason: str) -> bool:
     return any(p.search(reason) for p in GEN_MODEL_RES)
 
 
+def _auto_kind_from_reason(reason: str) -> str:
+    """生成类签名里明确指向了哪个端点 → 模型类型（自动回填 extra.model_kind）；
+    模糊签名（如仅「不支持SSE」）返回 ''，类型留给平台页模型行手动选。"""
+    r = (reason or "").lower()
+    if "/v1/images" in r or "images/generations" in r:
+        return "image"
+    if "/v1/videos" in r:
+        return "video"
+    if "/v1/audio/transcriptions" in r:
+        return "audio_trans"
+    if "/v1/audio/speech" in r:
+        return "audio_tts"
+    return ""
+
+
 async def _client_gone_async(request: Request) -> bool:
     """客户端是否已断开（点取消/关页面）。uvicorn 客户端断开后不会取消 app task、
     只是静默吞掉后续 send，所以探测循环必须自己查，否则「取消」后服务端还在空跑。
@@ -672,6 +687,7 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
     async def probe_events():
         kept, removed, transient = [], [], []
         genlist: list[dict] = []
+        kind_updates: dict[str, str] = {}
         connfails: list[str] = []
         key_error, connect_fail, cancelled, skipped = False, False, False, 0
         conn_reason, consec_fail = "", 0
@@ -695,8 +711,14 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
                 removed.append({"model": m, "reason": reason})
                 consec_fail = 0
             elif res == "gen":
-                # 生成类模型（图像/视频/音频）：chat relay 转发不了，但不是坏了——保留在清单，单独标注
-                genlist.append({"model": m, "reason": reason})
+                # 生成类模型（图像/视频/音频）：chat relay 转发不了，但不是坏了——保留在清单，单独标注；
+                # 签名明确指向端点时自动回填类型（extra.model_kind），探测完即可用扁平路径调用
+                k = _auto_kind_from_reason(reason)
+                item = {"model": m, "reason": reason}
+                if k:
+                    item["kind"] = k
+                    kind_updates[m] = k
+                genlist.append(item)
                 kept.append(m)
                 consec_fail = 0
             elif res == "transient":
@@ -735,11 +757,18 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
         if removed and not key_error and not connect_fail and not cancelled:
             reg.set_models(platform, kept)
             written = True
+        # 类型回填不依赖 removed：即使零移除，探测识别出的生成类签名也写进 extra.model_kind
+        gen_kind_set: list[str] = []
+        if kind_updates and not cancelled:
+            with contextlib.suppress(Exception):
+                reg.set_model_kind(platform, kind_updates)
+                gen_kind_set = sorted(kind_updates)
         yield {"done": True, "kept": kept, "removed": removed, "gen": genlist,
                "transient": transient, "connfails": connfails,
                "key_error": key_error, "connect_fail": connect_fail,
                "connect_fail_reason": conn_reason,
-               "cancelled": cancelled, "skipped": skipped, "written": written}
+               "cancelled": cancelled, "skipped": skipped, "written": written,
+               "gen_kind_set": gen_kind_set}
 
     if body.get("stream"):
         async def gen():

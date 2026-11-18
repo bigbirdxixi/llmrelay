@@ -322,6 +322,27 @@ class Registry:
                 return
         raise KeyError(platform)
 
+    def set_model_kind(self, platform: str, kind_map: dict[str, str]) -> None:
+        """合并写 extra.model_kind（模型名 -> image|video|audio_tts|audio_trans）：
+        探测识别出生成类签名时自动回填，也可被 UI 保存覆盖。空串值 = 清掉该模型的分类。"""
+        rows = self.raw()
+        for r in rows:
+            if r.get("platform") == platform:
+                extra = r.get("extra") or {}
+                if not isinstance(extra, dict):
+                    extra = {}
+                mk = dict(extra.get("model_kind") or {})
+                for m, k in kind_map.items():
+                    if k:
+                        mk[m] = k
+                    else:
+                        mk.pop(m, None)
+                extra["model_kind"] = mk
+                r["extra"] = extra
+                self.save(rows)
+                return
+        raise KeyError(platform)
+
     # ---------- 路由 ----------
     def enabled(self) -> list[Upstream]:
         return [u for u in self.upstreams if u.enabled and u.api_keys]

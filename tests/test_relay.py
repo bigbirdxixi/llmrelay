@@ -3886,3 +3886,97 @@ def test_r134_audio_transcriptions_multipart(client, hdr, upstream_port):
         assert rn.status_code == 404, rn.text
     finally:
         client.delete("/api/providers/r134tr", headers=hdr)
+
+
+# ---------------------------------------------------------------- R135 model_kind 路由 + 扁平路径（v1.2.4）
+def test_r135_model_kind_routing(client, hdr, upstream_port):
+    """extra.model_kind 路由：类型与端点不匹配 → 400 指路（严格模式）；未配置 → 放行。
+    扁平 /v1/images、/v1/audio（JSON=TTS，multipart=转写）；深路径别名照旧；
+    生成类模型误入 chat 端点 → 400 指路，不影响普通聊天模型。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r135gen", "name": "R135 kinds(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["img-model", "vid-model", "tts-model", "trans-model", "plain-model"],
+        "extra": {"model_kind": {"img-model": "image", "vid-model": "video",
+                                  "tts-model": "audio_tts", "trans-model": "audio_trans"}}})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        # 扁平 /v1/images（深路径 /v1/images/generations 同 handler）
+        ri = client.post("/v1/images", headers=bh,
+                         json={"model": "r135gen/img-model", "n": 1})
+        assert ri.status_code == 200, ri.text
+        assert ri.json()["data"][0]["url"].startswith("https://fake.example/gen-img-model"), ri.text
+        rd = client.post("/v1/images/generations", headers=bh,
+                         json={"model": "r135gen/img-model"})
+        assert rd.status_code == 200, rd.text
+        # 类型不匹配：图像模型调 /v1/videos → 400 指路
+        rv = client.post("/v1/videos", headers=bh, json={"model": "r135gen/img-model"})
+        assert rv.status_code == 400 and "/v1/images" in rv.text, rv.text
+        # 未配 kind → 放行（照转上游）
+        rp = client.post("/v1/videos", headers=bh, json={"model": "plain-model"})
+        assert rp.status_code == 200, rp.text
+        # /v1/audio：JSON → TTS
+        rs = client.post("/v1/audio", headers=bh, json={"model": "tts-model", "input": "hi"})
+        assert rs.status_code == 200, rs.text
+        assert "audio/mpeg" in (rs.headers.get("content-type") or ""), rs.headers
+        # /v1/audio：multipart → 转写
+        rt = client.post("/v1/audio", headers=bh,
+                         data={"model": "trans-model"},
+                         files={"file": ("a.wav", b"RIFFfake", "audio/wav")})
+        assert rt.status_code == 200, rt.text
+        assert rt.json()["text"] == "hello from fake transcription"
+        # TTS 模型带文件调 → 400 指路（multipart 判为转写端点）
+        ra = client.post("/v1/audio", headers=bh,
+                         data={"model": "tts-model", "language": "zh"},
+                         files={"file": ("a.wav", b"RIFFfake", "audio/wav")})
+        assert ra.status_code == 400, ra.text
+        # 生成类模型误入 chat → 400 指路
+        rc = client.post("/v1/chat/completions", headers=bh, json={
+            "model": "r135gen/img-model", "messages": [{"role": "user", "content": "hi"}]})
+        assert rc.status_code == 400 and "/v1/images" in rc.text, rc.text
+        # 普通聊天模型不受影响
+        rk = client.post("/v1/chat/completions", headers=bh, json={
+            "model": "plain-model", "messages": [{"role": "user", "content": "hi"}]})
+        assert rk.status_code == 200, rk.text
+    finally:
+        client.delete("/api/providers/r135gen", headers=hdr)
+
+
+# ---------------------------------------------------------------- R136 探测自动回填 model_kind（v1.2.4）
+def test_r136_probe_autofill_model_kind(client, hdr, upstream_port):
+    """探测生成类签名明确指向端点时自动回填 extra.model_kind（不依赖有没有 removed），
+    回填后模型立即可用扁平端点调用；模糊签名（仅「不支持SSE」）不自动回填。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r136probe", "name": "R136 probe(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-ok-plain", "m-genimg", "m-genvid", "m-400sse"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        rp = client.post("/api/providers/r136probe/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        kinds = {x["model"]: x.get("kind") for x in j["gen"]}
+        assert kinds.get("m-genimg") == "image", j["gen"]
+        assert kinds.get("m-genvid") == "video", j["gen"]
+        assert not kinds.get("m-400sse"), "模糊签名（不支持SSE）不应自动回填"
+        assert sorted(j["gen_kind_set"]) == ["m-genimg", "m-genvid"], j
+        # 回填已持久化（零 removed 也写）
+        p = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+             if x["platform"] == "r136probe"][0]
+        assert (p.get("extra") or {}).get("model_kind") == \
+            {"m-genimg": "image", "m-genvid": "video"}, p.get("extra")
+        # 回填后直接调扁平端点
+        ri = client.post("/v1/images", headers=bh, json={"model": "m-genimg", "n": 1})
+        assert ri.status_code == 200, ri.text
+        assert ri.json()["data"][0]["url"].startswith(
+            "https://fake.example/gen-m-genimg"), ri.text
+        # 未回填的模糊签名模型：chat 端点照旧透传上游 400（不是 kind 拦截）
+        rc = client.post("/v1/chat/completions", headers=bh, json={
+            "model": "m-400sse", "messages": [{"role": "user", "content": "hi"}]})
+        assert rc.status_code == 400, rc.text
+        assert "model_kind" not in rc.text and "请改用" not in rc.text, \
+            "模糊签名模型未配 kind，chat 端点不应本地拦截"
+    finally:
+        client.delete("/api/providers/r136probe", headers=hdr)
