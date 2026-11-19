@@ -309,7 +309,7 @@ async def embeddings(request: Request):
         return error_response("openai", 502, f"上游调用失败: {exc}", "upstream_error")
 
 
-# ---------------------------------------------------------------- 生成类端点透传（v1.2.4）
+# ---------------------------------------------------------------- 生成类端点透传（v2.0.0）
 # 图像/视频/语音：客户端 OpenAI 风格路径 → 上游对应端点（平台 extra 可覆盖路径）。
 # - images/videos/audio_speech：JSON body（model 改写为上游名，走多 key 轮换）
 # - audio_transcriptions：multipart 原样透传（model 从 form 提取做路由，别名字节级替换）
@@ -456,7 +456,7 @@ async def videos(request: Request):
 
 @app.get("/v1/videos")
 async def videos_status(request: Request):
-    """视频任务状态查询（v1.2.4，GET 透传）：query 参数原样转发上游，
+    """视频任务状态查询（v2.0.0，GET 透传）：query 参数原样转发上游，
     model/model_name 自动替换为上游模型名（别名→上游名，与创建端点同语义）；
     查询 URL 取 extra.videos_status_path（默认与创建同路径 /videos，可给完整 URL，
     如 Agnes 的 https://apihub.agnes-ai.com/agnesapi）。

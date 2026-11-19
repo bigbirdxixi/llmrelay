@@ -3693,7 +3693,7 @@ def test_r130_settings_aggregate_keys(client, hdr):
         store.delete_user_full(erin["id"])
 
 
-# ---------------------------------------------------------------- R131 探测生成类模型判「gen」保留（v1.2.4）
+# ---------------------------------------------------------------- R131 探测生成类模型判「gen」保留（v2.0.0）
 def test_r131_probe_gen_models_kept(client, hdr, upstream_port):
     """图像/视频/音频类模型在 chat 端点 4xx + 专用端点提示：探测判 gen 保留（不写回删掉），
     真 404 仍移除；无 removed 的平台不写回、模型清单原样。"""
@@ -3735,7 +3735,7 @@ def test_r131_probe_gen_models_kept(client, hdr, upstream_port):
         client.delete("/api/providers/r131gen", headers=hdr)
 
 
-# ---------------------------------------------------------------- R132 /v1/images/generations 透传（v1.2.4）
+# ---------------------------------------------------------------- R132 /v1/images/generations 透传（v2.0.0）
 def test_r132_images_generations_passthrough(client, hdr, upstream_port):
     """POST /v1/images/generations → 上游 /v1/images/generations 透传：2xx 产物 URL 抓进日志
     output_info（images=N）；上游 400 记 error 行并透传错误；未知模型 404；
@@ -3801,7 +3801,7 @@ def test_r132_images_generations_passthrough(client, hdr, upstream_port):
         client.delete("/api/providers/r132img", headers=hdr)
 
 
-# ---------------------------------------------------------------- R133 /v1/videos + /v1/audio/speech 透传（v1.2.4）
+# ---------------------------------------------------------------- R133 /v1/videos + /v1/audio/speech 透传（v2.0.0）
 def test_r133_videos_and_speech_passthrough(client, hdr, upstream_port):
     """videos：任务型 JSON 原样透传，任务 id 抓进 output_info；
     audio/speech：二进制原样透传（content-type + 字节），字节数抓进 output_info。"""
@@ -3838,7 +3838,7 @@ def test_r133_videos_and_speech_passthrough(client, hdr, upstream_port):
         client.delete("/api/providers/r133av", headers=hdr)
 
 
-# ---------------------------------------------------------------- R134 /v1/audio/transcriptions multipart 透传（v1.2.4）
+# ---------------------------------------------------------------- R134 /v1/audio/transcriptions multipart 透传（v2.0.0）
 def test_r134_audio_transcriptions_multipart(client, hdr, upstream_port):
     """multipart 音频转写：file 二进制原样透传（不重编码），form 的 model 字段按别名做
     字节级替换（客户端别名 → 上游模型名）；转写文本抓进 output_info；缺 model → 400。"""
@@ -3888,7 +3888,7 @@ def test_r134_audio_transcriptions_multipart(client, hdr, upstream_port):
         client.delete("/api/providers/r134tr", headers=hdr)
 
 
-# ---------------------------------------------------------------- R135 model_kind 路由 + 扁平路径（v1.2.4）
+# ---------------------------------------------------------------- R135 model_kind 路由 + 扁平路径（v2.0.0）
 def test_r135_model_kind_routing(client, hdr, upstream_port):
     """extra.model_kind 路由：类型与端点不匹配 → 400 指路（严格模式）；未配置 → 放行。
     扁平 /v1/images、/v1/audio（JSON=TTS，multipart=转写）；深路径别名照旧；
@@ -3943,7 +3943,7 @@ def test_r135_model_kind_routing(client, hdr, upstream_port):
         client.delete("/api/providers/r135gen", headers=hdr)
 
 
-# ---------------------------------------------------------------- R136 探测自动回填 model_kind（v1.2.4）
+# ---------------------------------------------------------------- R136 探测自动回填 model_kind（v2.0.0）
 def test_r136_probe_autofill_model_kind(client, hdr, upstream_port):
     """探测生成类签名明确指向端点时自动回填 extra.model_kind（不依赖有没有 removed），
     回填后模型立即可用扁平端点调用；模糊签名（仅「不支持SSE」）不自动回填。"""
@@ -3981,7 +3981,7 @@ def test_r136_probe_autofill_model_kind(client, hdr, upstream_port):
     finally:
         client.delete("/api/providers/r136probe", headers=hdr)
 
-# ---------------------------------------------------------------- R137 GBK 中文 body 抢救（v1.2.4）
+# ---------------------------------------------------------------- R137 GBK 中文 body 抢救（v2.0.0）
 def test_r137_gbk_body_rescued(client, hdr, upstream_port):
     """中文 Windows 命令行 curl 会把中文 body 按 GBK 发出（非法 JSON UTF-8）：
     relay 抢救为 UTF-8 后照常透传，上游收到的是正确中文与替换后的模型名。"""
@@ -4011,7 +4011,7 @@ def test_r137_gbk_body_rescued(client, hdr, upstream_port):
         client.delete("/api/providers/r137gbk", headers=hdr)
 
 
-# ---------------------------------------------------------------- R138 生成类本地 4xx 也落日志（v1.2.4）
+# ---------------------------------------------------------------- R138 生成类本地 4xx 也落日志（v2.0.0）
 def test_r138_local_4xx_logged(client, hdr, upstream_port):
     """生成类端点本地校验失败（非法 JSON / 找不到模型）也记请求日志 error 行，
     不再出现「调用没记录」的黑洞。"""
@@ -4043,7 +4043,7 @@ def test_r138_local_4xx_logged(client, hdr, upstream_port):
         client.delete("/api/providers/r138loc", headers=hdr)
 
 
-# ---------------------------------------------------------------- R139 GET /v1/videos 任务状态查询（v1.2.4）
+# ---------------------------------------------------------------- R139 GET /v1/videos 任务状态查询（v2.0.0）
 def test_r139_video_status_get_passthrough(client, hdr, upstream_port):
     """GET /v1/videos?model_name=..&video_id=.. 透传上游查询：
     别名替换为上游模型名；query 原样转发；extra.videos_status_path 完整 URL 覆盖；

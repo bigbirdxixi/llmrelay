@@ -2,7 +2,11 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
-## [1.2.4] - 2026-11-19
+## [2.0.0] - 2026-11-19
+
+> **大版本号说明（无破坏性变更）**：本版为纯能力扩展——全部存量 chat/messages 端点、配置与计费语义不变；
+> 升 major 是因为探测语义变更（生成类模型不再被探测移除，改为判 `gen` 保留并自动回填 `model_kind`）
+> 与新增配置面（`model_kind`、`*_path` 覆盖、`videos_status_path`），对既有部署是行为升级。
 
 ### 功能：生成类（图像/视频/音频）端点透传
 - 新增 `POST /v1/images`、`POST /v1/videos`、`POST /v1/audio`（JSON=TTS，multipart=转写）扁平路径，OpenAI 深路径（`/v1/images/generations`、`/v1/audio/speech`、`/v1/audio/transcriptions`）保留为别名；JSON 类复用多 key 轮换发送（model 字段改写成上游模型名），multipart 转写原始字节透传 + 只替换 form 的 model 字段（绝不重编码）

@@ -307,7 +307,7 @@ class Gateway:
 
     async def send_get(self, reg, up: Upstream, url: str, params: dict, *,
                        timeout: "httpx.Timeout | None" = None) -> httpx.Response:
-        """GET 透传（v1.2.4 生成任务状态查询）：与 send() 同一套多 key 轮换 / 健康度语义，
+        """GET 透传（v2.0.0 生成任务状态查询）：与 send() 同一套多 key 轮换 / 健康度语义，
         无请求体，query 参数原样转发（model/model_name 的别名替换在 main 层做完）。"""
         ts = timeout if timeout is not None else httpx.Timeout(up.timeout_s, connect=CONNECT_TIMEOUT_S)
         attempts = max(1, min(len(up.api_keys), 3))
@@ -791,7 +791,7 @@ class Gateway:
         )
         return JSONResponse(content=data, headers={"x-request-id": request_id})
 
-    # ---------------- 生成类端点透传（images / videos / audio，v1.2.4） ----------------
+    # ---------------- 生成类端点透传（images / videos / audio，v2.0.0） ----------------
     # JSON 类（images/videos/audio_speech）走 send（多 key 轮换 + 健康度）；
     # multipart 类（audio_trans）表单重编码易损坏二进制 file 字段，边界原样透传，
     # 只做字节级替换 model 字段值（别名 → 上游模型名）。

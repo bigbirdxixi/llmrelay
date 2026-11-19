@@ -184,7 +184,7 @@ async def chat(request: Request):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-# ---------------------------------------------------------------- 生成类端点（images/videos/audio，v1.2.4 透传测试）
+# ---------------------------------------------------------------- 生成类端点（images/videos/audio，v2.0.0 透传测试）
 @app.post("/v1/images/generations")
 async def images_gen(request: Request):
     body = await request.json()
@@ -210,7 +210,7 @@ async def videos_gen(request: Request):
 
 @app.get("/v1/videos")
 async def videos_status_q(request: Request):
-    """视频任务状态查询（GET，v1.2.4）：echo query 参数，便于回归断言别名替换。"""
+    """视频任务状态查询（GET，v2.0.0）：echo query 参数，便于回归断言别名替换。"""
     qp = dict(request.query_params)
     _record("/v1/videos[GET]", qp)
     return {"video_id": qp.get("video_id"), "model_name": qp.get("model_name"),

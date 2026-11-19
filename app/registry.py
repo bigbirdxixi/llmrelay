@@ -74,11 +74,11 @@ class Upstream(BaseModel):
             "messages": "/v1/messages",
             "models": "/v1/models" if self.type == "anthropic" else "/models",
             "count_tokens": "/v1/messages/count_tokens",
-            # 生成类端点（v1.2.4 透传）：默认 OpenAI/通用风格路径，
+            # 生成类端点（v2.0.0 透传）：默认 OpenAI/通用风格路径，
             # 平台可用 extra 的 images_path / videos_path / audio_speech_path / audio_trans_path 覆盖
             "images": "/images/generations",
             "videos": "/videos",
-            # 视频任务状态查询（GET，v1.2.4）：默认与创建同路径；上游查询地址独立时
+            # 视频任务状态查询（GET，v2.0.0）：默认与创建同路径；上游查询地址独立时
             # （如 Agnes 走 /agnesapi?video_id=..）用 extra.videos_status_path 给完整 URL
             "videos_status": "/videos",
             "audio_speech": "/audio/speech",

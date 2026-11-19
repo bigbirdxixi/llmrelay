@@ -2146,7 +2146,7 @@ function logDetail(i){
   const errBody = x.error
     ? `<pre class="mono" style="margin:0;padding:10px 12px;background:var(--panel2);border:1px solid #4a2530;border-radius:8px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;color:#ffb4b4">${esc(x.error)}</pre>`
     : '<div class="empty">这条请求没有记录上游报错细节（可能是客户端中断或超时）</div>';
-  // v1.2.4 生成类结果（图像缩略图 / 转写文本 / 音频字节 / 任务 id）：来自 output_info
+  // v2.0.0 生成类结果（图像缩略图 / 转写文本 / 音频字节 / 任务 id）：来自 output_info
   let genOut = "";
   try{
     if(x.output_info){
@@ -2200,7 +2200,7 @@ function drawLogsPanel(){
     const st = x.status === "ok" ? '<span class="pill ok">ok</span>'
       : x.status === "aborted" ? '<span class="pill warn">aborted</span>'
       : `<span class="pill err" title="点击查看上游报错" style="cursor:pointer;text-decoration:underline dotted" onclick="logDetail(${i})">${esc(x.status)}</span>`;
-    // v1.2.4 生成类端点（images/videos/audio）：有 output_info 就标一类小 pill，详情弹层看产物
+    // v2.0.0 生成类端点（images/videos/audio）：有 output_info 就标一类小 pill，详情弹层看产物
     let genPill = "";
     try{
       if(x.output_info){
