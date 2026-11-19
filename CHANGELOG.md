@@ -2,6 +2,31 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [1.2.4] - 2026-11-19
+
+### 功能：生成类（图像/视频/音频）端点透传
+- 新增 `POST /v1/images`、`POST /v1/videos`、`POST /v1/audio`（JSON=TTS，multipart=转写）扁平路径，OpenAI 深路径（`/v1/images/generations`、`/v1/audio/speech`、`/v1/audio/transcriptions`）保留为别名；JSON 类复用多 key 轮换发送（model 字段改写成上游模型名），multipart 转写原始字节透传 + 只替换 form 的 model 字段（绝不重编码）
+- 请求日志新增 `output_info` 列记生成产物（图/视频 URL 数、音频字节数、任务 id），生成类记 0 token 且标 `estimated`
+- 平台 `extra.model_kind`（上游模型名 → `image|video|audio_tts|audio_trans`）：模型行「类型」下拉维护；生成类端点严格匹配（不匹配 400 指路，未配置放行），聊天端点反向拦截生成类模型（400 指路正确端点）
+- 平台 `extra` 可覆盖各端点路径（`images_path`/`videos_path`/`audio_speech_path`/`audio_trans_path`）
+
+### 功能：视频任务状态查询（GET /v1/videos）
+- `GET /v1/videos?model_name=...&video_id=...`：query 原样转发上游，`model`/`model_name` 自动替换为上游模型名；查询 URL 取 `extra.videos_status_path`（默认与创建同路径 `/videos`，可给完整 URL——如 Agnes 的 `https://apihub.agnes-ai.com/agnesapi`，与创建端点不同前缀）
+- 轮询是高频读：成功/上游错误不写请求日志（防刷屏），本地校验 4xx（缺 model/找不到模型/kind 不匹配）照记 error 行；GET 与 POST 同一套多 key 轮换与健康度语义
+
+### 功能：探测生成类模型判「gen 保留」并自动回填 model_kind
+- 探测不再把需要专用端点的生成类模型误判「未授权/已移除」删掉：错误签名明确指向端点（如「需使用 /v1/images…」）判 `gen` 保留进模型清单，且自动写 `extra.model_kind`；模糊签名（仅「不支持 SSE」）不回填，留给手动配置；探测面板 `gen` 状态蓝色标记
+
+### 修复：中文 Windows 命令行 curl 的 GBK 请求体
+- 中文 Windows 命令行（cmd/PowerShell/MSYS 转发原生 curl）会把含中文的 body 按 GBK/GB18030 发出（非 ASCII 参数走系统代码页 CP936），而 JSON 只认 UTF-8 → 报 `invalid_json`。现解析失败时按 gb18030 抢救一次（ASCII 结构字符不变，中文修回正确字节）后照常透传；救不回时 400 文案明确指路（「可能是 GBK 编码所致」）
+- 生成类端点所有本地 4xx/404（invalid_json、model_not_found、kind 不匹配、unsupported、multipart 缺 model）现在都落请求日志 error 行，不再「调用没记录」
+
+### 修复：请求日志筛选面板内滚动误关
+- 筛选面板（多选 checkbox）内部纵向滚动/滚轮/拖拽不再触发全局 `scroll` 监听把面板关掉；外部页面滚动照关
+
+### 回归测试
+- R131（探测 gen 保留）～ R139（GBK 抢救 / 本地 4xx 落日志 / GET 视频状态查询 + 完整 URL 覆盖），全量 126 通过
+
 ## [1.2.3] - 2026-11-16
 
 ### 修复：设置页「全部账号（汇总）」视角列出全部用户的下游 key

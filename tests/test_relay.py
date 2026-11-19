@@ -4041,3 +4041,66 @@ def test_r138_local_4xx_logged(client, hdr, upstream_port):
         assert "没有找到模型" in erow[0].get("error"), erow[0]
     finally:
         client.delete("/api/providers/r138loc", headers=hdr)
+
+
+# ---------------------------------------------------------------- R139 GET /v1/videos 任务状态查询（v1.2.4）
+def test_r139_video_status_get_passthrough(client, hdr, upstream_port):
+    """GET /v1/videos?model_name=..&video_id=.. 透传上游查询：
+    别名替换为上游模型名；query 原样转发；extra.videos_status_path 完整 URL 覆盖；
+    缺 model 400 / 未知模型 404 / kind 不匹配 400（均落 error 行）；成功 GET 不落日志（防轮询刷屏）。"""
+    from tests import fake_upstream
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r139vid", "name": "R139 video(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["vid-model", "img-model"],
+        "extra": {"model_kind": {"img-model": "image"}}})
+    assert r1.status_code == 200, r1.text
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r139vid2", "name": "R139 video url-override(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["vid2-model"],
+        "extra": {"videos_status_path":
+                  f"http://127.0.0.1:{upstream_port}/custom_video_status"}})
+    assert r2.status_code == 200, r2.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    store = client.app.state.store
+    try:
+        # 默认路径（未覆盖）：GET → 假上游 GET /v1/videos，别名替换 + video_id 透传
+        fake_upstream.RECEIVED.clear()
+        rs = client.get("/v1/videos", params={"model_name": "vid-model", "video_id": "t-1"},
+                        headers=bh)
+        assert rs.status_code == 200, rs.text
+        assert rs.json()["video_id"] == "t-1" and rs.json()["status"] == "completed", rs.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/videos[GET]"]
+        assert got and got[0]["body"].get("video_id") == "t-1", got
+        assert got[0]["body"].get("model_name") == "vid-model", got
+        # 完整 URL 覆盖（模拟 Agnes：查询地址与创建不同前缀）
+        fake_upstream.RECEIVED.clear()
+        rc = client.get("/v1/videos", params={"model": "r139vid2/vid2-model", "video_id": "t-2"},
+                        headers=bh)
+        assert rc.status_code == 200, rc.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/custom_video_status[GET]"]
+        assert got and got[0]["body"].get("video_id") == "t-2", got
+        assert got[0]["body"].get("model") == "vid2-model", got  # model 参数也被替换
+        # 成功 GET 不落请求日志（轮询防刷屏）
+        rows = [x for x in store.recent(5)
+                if x.get("model") in ("vid-model", "vid2-model")
+                and x.get("in_format") == "openai"]
+        assert not rows, "GET 状态查询成功不应写请求日志"
+        # 缺 model → 400 + error 行
+        rm = client.get("/v1/videos", params={"video_id": "t-3"}, headers=bh)
+        assert rm.status_code == 400 and "missing_model" in rm.text, rm.text
+        erow = [x for x in store.recent(5)
+                if "缺少 model 参数" in (x.get("error") or "")]
+        assert erow, "缺 model 400 应落 error 行"
+        # 未知模型 → 404
+        ru = client.get("/v1/videos", params={"model_name": "no-such-v", "video_id": "t-4"},
+                        headers=bh)
+        assert ru.status_code == 404 and "model_not_found" in ru.text, ru.text
+        # kind 不匹配：image 模型来查视频 → 400 指路
+        rk = client.get("/v1/videos", params={"model_name": "img-model", "video_id": "t-5"},
+                        headers=bh)
+        assert rk.status_code == 400 and "model_kind_mismatch" in rk.text, rk.text
+    finally:
+        client.delete("/api/providers/r139vid", headers=hdr)
+        client.delete("/api/providers/r139vid2", headers=hdr)

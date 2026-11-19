@@ -208,6 +208,24 @@ async def videos_gen(request: Request):
             "expires_at": int(time.time()) + 3600}
 
 
+@app.get("/v1/videos")
+async def videos_status_q(request: Request):
+    """视频任务状态查询（GET，v1.2.4）：echo query 参数，便于回归断言别名替换。"""
+    qp = dict(request.query_params)
+    _record("/v1/videos[GET]", qp)
+    return {"video_id": qp.get("video_id"), "model_name": qp.get("model_name"),
+            "status": "completed",
+            "content": [{"url": "https://fake.example/vid-out.mp4"}]}
+
+
+@app.get("/custom_video_status")
+async def custom_video_status(request: Request):
+    """完整 URL 覆盖（extra.videos_status_path）的目标端点。"""
+    qp = dict(request.query_params)
+    _record("/custom_video_status[GET]", qp)
+    return {"video_id": qp.get("video_id"), "status": "completed"}
+
+
 @app.post("/v1/audio/speech")
 async def audio_speech(request: Request):
     body = await request.json()

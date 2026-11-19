@@ -78,12 +78,22 @@ class Upstream(BaseModel):
             # 平台可用 extra 的 images_path / videos_path / audio_speech_path / audio_trans_path 覆盖
             "images": "/images/generations",
             "videos": "/videos",
+            # 视频任务状态查询（GET，v1.2.4）：默认与创建同路径；上游查询地址独立时
+            # （如 Agnes 走 /agnesapi?video_id=..）用 extra.videos_status_path 给完整 URL
+            "videos_status": "/videos",
             "audio_speech": "/audio/speech",
             "audio_trans": "/audio/transcriptions",
         }[kind]
-        path = str(self.extra.get(f"{kind}_path") or default)
-        if not path.startswith("/"):
-            path = "/" + path
+        override = self.extra.get(f"{kind}_path")
+        if override:
+            o = str(override)
+            if o.startswith(("http://", "https://")):
+                return o  # 完整 URL 覆盖：上游查询端点不与 base_url 同前缀时用
+            path = o if o.startswith("/") else "/" + o
+        else:
+            path = default
+            if not path.startswith("/"):
+                path = "/" + path
         base = self.base_url
         if base.endswith("/v1") and path.startswith("/v1/"):
             path = path[len("/v1"):]

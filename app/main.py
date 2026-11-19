@@ -454,6 +454,83 @@ async def videos(request: Request):
     return await _generate_endpoint(request, "videos")
 
 
+@app.get("/v1/videos")
+async def videos_status(request: Request):
+    """视频任务状态查询（v1.2.4，GET 透传）：query 参数原样转发上游，
+    model/model_name 自动替换为上游模型名（别名→上游名，与创建端点同语义）；
+    查询 URL 取 extra.videos_status_path（默认与创建同路径 /videos，可给完整 URL，
+    如 Agnes 的 https://apihub.agnes-ai.com/agnesapi）。
+    查询是高频轮询：成功/上游错误不写请求日志（避免刷屏），本地校验 4xx 照记。"""
+    user, reason = authenticate(request)
+    if reason:
+        return _auth_error("openai", reason, bearer_token(request), str(request.url.path), request)
+    reg = tenants.get(user["id"])
+    qp = request.query_params
+    model = qp.get("model") or qp.get("model_name") or ""
+    gate = _model_binding_gate(user, request, "openai", model)
+    if gate is not None:
+        return gate
+    ip = request.client.host if request.client else ""
+    if not model:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform="", model="", in_format="openai", status="error", http_status=400,
+                error="视频状态查询缺少 model 参数（本地校验失败）",
+                client_ip=ip, user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
+        return error_response("openai", 400, "缺少 model 参数（query: model 或 model_name）",
+                              "missing_model")
+    resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
+    if not resolved:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform="", model=model, in_format="openai", status="error", http_status=404,
+                error=f"没有找到模型 {model!r} 对应的上游平台（生成类端点本地校验失败）",
+                client_ip=ip, user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
+        return error_response("openai", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
+    upstream, up_model = resolved
+    if upstream.type != "openai":
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model, in_format="openai",
+                status="error", http_status=400,
+                error="生成类端点只支持 OpenAI 兼容上游（本地校验失败）",
+                client_ip=ip, user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
+        return error_response("openai", 400, "生成类端点只支持 OpenAI 兼容上游", "unsupported")
+    g = _kind_guard(upstream, up_model, "video", "openai")
+    if g is not None:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model, in_format="openai",
+                status="error", http_status=400,
+                error="模型类型与请求端点不匹配（model_kind 校验失败，详见响应指路）",
+                client_ip=ip, user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
+        return g
+    params = dict(qp)
+    for k in ("model", "model_name"):
+        if k in params:
+            params[k] = up_model  # 别名 → 上游模型名（与上游文档里的模型名对齐）
+    try:
+        resp = await gw.send_get(reg, upstream, upstream.url_for("videos_status"), params)
+    except UpstreamError as exc:
+        return error_response("openai", exc.status if exc.status < 500 else 502,
+                              f"上游调用失败: {exc.message()}", "upstream_error")
+    ct = str(resp.headers.get("content-type") or "")
+    data = None
+    if "json" in ct.lower():
+        with contextlib.suppress(Exception):
+            data = resp.json()
+    if data is not None:
+        return JSONResponse(content=data)
+    content = await resp.aread()
+    with contextlib.suppress(Exception):
+        await resp.aclose()
+    return Response(content=content, media_type=ct or "application/octet-stream")
+
+
 @app.post("/v1/audio/speech")
 async def audio_speech(request: Request):
     return await _generate_endpoint(request, "audio_speech")

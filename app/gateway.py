@@ -305,6 +305,52 @@ class Gateway:
                 break  # 重试预算用完（或 401/403）→ 换下一个 key
         raise UpstreamError(last_status, last_body, up.platform, key_hint=hint)
 
+    async def send_get(self, reg, up: Upstream, url: str, params: dict, *,
+                       timeout: "httpx.Timeout | None" = None) -> httpx.Response:
+        """GET 透传（v1.2.4 生成任务状态查询）：与 send() 同一套多 key 轮换 / 健康度语义，
+        无请求体，query 参数原样转发（model/model_name 的别名替换在 main 层做完）。"""
+        ts = timeout if timeout is not None else httpx.Timeout(up.timeout_s, connect=CONNECT_TIMEOUT_S)
+        attempts = max(1, min(len(up.api_keys), 3))
+        last_status, last_body = 502, b"no available key"
+        hint = ""
+        client = self.client_for(up)
+        MAX_TRANSIENT = 2
+        for i in range(attempts):
+            key, idx = reg.next_key(up)
+            hint = mask_key(key)
+            headers = build_headers(up, key, stream=False)
+            for t in range(1 + MAX_TRANSIENT):
+                req = client.build_request(
+                    "GET", url, params=params, headers=headers, timeout=ts,
+                )
+                try:
+                    resp = await client.send(req)
+                except httpx.HTTPError as exc:
+                    reg.report(up, idx, False)
+                    last_status, last_body = _classify_http_error(exc)
+                    break
+                if resp.status_code < 400:
+                    reg.report(up, idx, True)
+                    with contextlib.suppress(Exception):
+                        resp.extensions["relay_key_hint"] = hint
+                        resp.extensions["relay_key_index"] = int(idx)
+                    return resp
+                with contextlib.suppress(Exception):
+                    last_body = await resp.aread()
+                with contextlib.suppress(Exception):
+                    await resp.aclose()
+                last_status = resp.status_code
+                transient = last_status in (408, 409, 425, 429) or last_status >= 500
+                switch_key = last_status in (401, 403)
+                reg.report(up, idx, not (transient or switch_key))
+                if not (transient or switch_key):
+                    break  # 其他 4xx：参数/资源问题，重发没意义
+                if transient and t < MAX_TRANSIENT:
+                    await asyncio.sleep(0.5 * (t + 1))
+                    continue
+                break  # 重试预算用完（或 401/403）→ 换下一个 key
+        raise UpstreamError(last_status, last_body, up.platform, key_hint=hint)
+
     async def relay_aggregate(self, *, in_fmt: str, kind: str, body: dict,
                               agg_name: str, client_model: str,
                               request_id: str, started_at: float, stream: bool,
