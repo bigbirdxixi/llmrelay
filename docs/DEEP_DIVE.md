@@ -112,6 +112,8 @@ ollama（`ollama.com/v1`）实测接受 `reasoning_effort:"none"`，正常返回
 | `key_hint` | 这次用的是平台里的哪个 API Key（打码后，如 `sk-3x3…mnD1`） |
 | `key_index` | 对应的 key 序号（0 起，按平台配置里的顺序） |
 | `user_id` | 属于哪个账号（多租户） |
+| `dkey_id` | 发起请求的下游客户端 key（历史未记录为 NULL） |
+| `output_info` | 生成类请求产物：图像 / 音频为 base64 截断、视频为结果 URL（文本列仅审计，媒体不落库） |
 
 ## 管理员的账号维度
 
@@ -138,23 +140,24 @@ ollama（`ollama.com/v1`）实测接受 `reasoning_effort:"none"`，正常返回
 | POST | `/api/providers/{platform}/refresh-models` | 从上游拉模型列表并写回 |
 | POST | `/api/providers/{platform}/test` | 真发一条 `ping` 验证 key / base_url |
 | GET | `/api/models` | 全部 `平台/模型` |
-| GET | `/api/stats/summary?days=30&group_by=platform` | 聚合统计；`group_by` 可选 `platform` / `model` / `model_only` / **`key`** / **`dkey`**（按下游 key 备注名） / `day` / `format` / **`account`**（管理员） |
+| GET | `/api/stats/summary?days=30&group_by=platform` | 聚合统计；`group_by` 可选 `platform` / `model` / `model_only` / **`key`** / **`dkey`**（按下游 key 名称） / `day` / `format` / **`account`**（管理员） |
 | GET | `/api/stats/series?days=30&group_by=platform` | 每日 token 曲线；`group_by` 可选 `platform` / `model` / `key` / **`dkey`** / `total`，返回 `{days, keys, rows}`，前端靠它做「点选/多选 → 曲线联动」 |
-| GET | `/api/stats/records?limit=200` | 原始请求日志；每行含 `dkey_label`（发起请求的下游客户端 key 备注名，无备注为 `(无备注)`、key 已删为 `(key 已删除)`、历史未记录为 `(未记录)`）；`from`/`to` 支持纯日期（`YYYY-MM-DD`）或到秒的日期时间（`YYYY-MM-DDTHH:MM:SS`），`range=15m\|30m\|1h\|6h\|today` 为锚定服务端当前时间的相对快捷区间（日志页默认近 1 小时） |
+| GET | `/api/stats/records?limit=200&offset=0` | 原始请求日志；每行含 `dkey_label`（发起请求的下游客户端 key 名称，无名称为 `(无名称)`、key 已删为 `(key 已删除)`、历史未记录为 `(未记录)`）；支持 `platform` / `model` / `stream` / `type` / `users` / `dkey` / `key` / `ip` CSV 多值收窄；`from`/`to` 支持纯日期（`YYYY-MM-DD`）或到秒的日期时间（`YYYY-MM-DDTHH:MM:SS`），`range=15m\|30m\|1h\|6h\|today` 为锚定服务端当前时间的相对快捷区间（日志页默认近 15 分钟） |
+| GET | `/api/stats/logs/facets` | 日志页各维度多选选项：选项按「**当前时间范围 + 其他已生效筛选**」罗列（当前结果集里不出现的选项不显示；收窄某维度时排除该维度自身的筛选、可换选其他值）；接受与 `records` 相同的收窄参数；返回 `options`（`platform` / `model` / `stream` / `types` / `users` / `dkeys`（`{id, label}`）/ `keys` / `ip`）与当前结果集的 `total` / `min_ts` / `max_ts` |
 | GET | `/api/stats/regions?range=today\|7d\|30d` | 客户端 IP 地域分布（概览页「地域访问地图」）：按 IP 读时解析离线双库——中国段优先 IP2Region `IP2Region.xdb`（纯 Python 二进制查询 `app/ip2xdb.py`，精确到城市+运营商），境外与未命中落 GeoLite2（见下），私有段 local；返回 `db`（ok\|missing，双库都缺才 missing）+ 按 count 降序的 `data` + 城市热点 `cities`（含城市名/经纬度/次数，前端画到中国省地图上的橙色热点圆点，面积 ∝ 次数；中国城市坐标内置城市表、未收录落省会坐标）；库路径 `RELAY_IP2REGION_XDB` 默认 `data/IP2Region.xdb`、`RELAY_GEOIP_DB` 默认 `data/GeoLite2-City.mmdb`，见 `app/geoip.py` + `app/ip2xdb.py` |
 | GET | `/api/stats/export.csv?days=30` | 导出 CSV |
 | GET | `/api/settings` | 目录、版本、我的 Key 列表 |
 
 鉴权头写法：`Authorization: Bearer *** → 以该 Key 所属账号身份操作。
 
-## 下游 Key 备注、过期与统计
+## 下游 Key 名称、过期与统计
 
 - **数据结构**：`api_keys` 表新增 `expires_at`（ISO 时间字符串，NULL = 永不过期）；`requests` 表新增 `dkey_id`（发起请求的客户端 key 外键，可空）。旧库启动时自动迁移（`ALTER TABLE` 补列）。
 - **鉴权**：relay 入口 `authenticate()` 在 key 校验后检查禁用/过期状态：key 被吊销（`revoked=1`）返回 401「已禁用」；`now >= expires_at` 返回 401「已过期（过期时间 YYYY-MM-DD HH:MM）」——报错文案回显**实际过期时间**，控制台 Cookie 会话不受影响（仅客户端 Bearer 路径拦截）。过期/禁用 401 会作为一条 `status=error` 请求记录写进请求日志（带 `dkey_id` 归属，日志页「下游 Key」列可查；`error` 字段写明拦截原因），而 missing/invalid key 不落账（防攻击刷库）。服务端 `log.warning` 同步记录 key 打码值 + 过期时间。
 - **Key 管理 API**：
   - `POST /api/keys` body `{label?, expires_at?}` — `expires_at` 接受 `YYYY-MM-DD` / `YYYY-MM-DD HH:MM` / ISO 带时区；留空 = 永不过期；坏格式 400。
-  - `PATCH /api/keys/{id}` body `{label?, expires_at?}` — 改备注 / 过期时间（传 `""` 或 `null` 恢复永不过期）。
-- **统计归并**：`summary` / `series` / `hourly`（`split=dkey`）的 `group_by="dkey"` 维度一律按**备注名**聚合：有备注用备注；无备注 `(无备注)`；key 已删 `(key 已删除)`；历史 `dkey_id` 为空的行 `(未记录)`。日志页「下游 Key」列、概览「近期活动」按下游 key 堆叠、用量页「按下游 key」下拉都走这一条线。
+  - `PATCH /api/keys/{id}` body `{label?, expires_at?}` — 改名称 / 过期时间（传 `""` 或 `null` 恢复永不过期）。
+- **统计归并**：`summary` / `series` / `hourly`（`split=dkey`）的 `group_by="dkey"` 维度一律按**名称**聚合（v1.2.1 起原「备注」列改名「名称」）：有名称用名称；无名称 `(无名称)`；key 已删 `(key 已删除)`；历史 `dkey_id` 为空的行 `(未记录)`。日志页「下游 Key」列、概览「近期活动」按下游 key 堆叠、用量页「按下游 key」下拉都走这一条线。
 - 回归测试：`tests/test_relay.py` R68。
 
 ## 邮箱确认（magic link）
@@ -208,3 +211,7 @@ ollama（`ollama.com/v1`）实测接受 `reasoning_effort:"none"`，正常返回
 - **Anthropic 要求 `max_tokens` 必填**、消息必须 user/assistant 交替 —— 转换时补默认值并合并同角色消息。
 - **httpx 流式响应必须 `aclose()`**：在生成器的 `finally` 里收尾，客户端断开也不漏连接。
 - **只有在上游还没开始回内容前才能重试**：一旦有字节发给客户端，换 key 重试会造成重复输出。
+- **生成类端点透传（v2.0.0）**：`/v1/images` / `/v1/videos` / `/v1/audio`（TTS 走 JSON 体、转写走 multipart）
+  按端点原样透传（只换 model 别名路由）；「拉模型」签名可识别时自动回填 `extra.model_kind`，
+  对话端点 ↔ 生成端点双向 kind-guard（400 带换端点指引）；生成产物写 `output_info`（base64 截断 / 视频 URL），
+  本地 4xx（模型不存在 / 类型不符 / 参数缺失）与 GBK 兜底解码同样落日志。

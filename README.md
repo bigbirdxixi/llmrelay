@@ -39,8 +39,9 @@ LLM Relay 这些事情本地化：
 | 6 | **多账号隔离** | 邮箱密码注册登录，各账号独立上游配置 / API Key / 用量；管理员可跨账号查看 |
 | 7 | **Web 控制台** | 增删平台、一键拉模型、连通性测试、用量曲线；单文件前端、无 CDN 依赖 |
 | 8 | **部署灵活** | 裸跑 / Nginx / Caddy / Cloudflare Tunnel / 子目录部署 / 网关自跑 HTTPS，真实 IP 还原入库 |
-| 9 | **下游 key 备注 + 过期** | 客户端 key 可设备注与过期时间（默认永久）；日志/用量/概览按备注名统计，过期 key 访问即 401（报错带实际过期时间）；吊销/禁用 key 同样 401，过期与禁用事件都会写进请求日志（带下游 key 归属） |
+| 9 | **下游 key 名称 + 过期** | 客户端 key 可设名称与过期时间（默认永久；v1.2.1 起原「备注」列改名「名称」）；日志/用量/概览按名称统计，过期 key 访问即 401（报错带实际过期时间）；吊销/禁用 key 同样 401，过期与禁用事件都会写进请求日志（带下游 key 归属） |
 |10 | **只转发对话不截消息**| 只记录请求状态与失败报错，不截留任何租户信息用以模型训练 |
+|11 | **生成类端点透传** | 图像 / 视频 / 音频 TTS / 转写（OpenAI 兼容上游）一次透传：「拉模型」签名可识别时自动回填 `model_kind`；对话端点调生成模型 400 带指引、生成端点调普通模型同样 400，防误用 |
 
 ## 架构一览
 
@@ -53,7 +54,7 @@ flowchart TB
     direction TB
     auth[鉴权 · 账号 / API Key<br/>Cookie 会话或 Bearer]
     tenant[租户配置 · 一账号一份上游配置<br/>文件 5 秒热加载]
-    route[路由 · 平台/模型 前缀、model_map 别名<br/>X-Upstream-Platform 强制平台]
+    route[路由 · 平台/模型 前缀、model_map 别名<br/>X-Upstream-Platform 强制平台 · 生成端点 model_kind 把关]
     think[思考控制 · 按模型开关<br/>关闭字段按平台自动选]
     trans[协议翻译 · OpenAI ⇄ Anthropic<br/>SSE 逐块（真流式）]
     keys[多 key 轮换 · 401/429/5xx 换 key 重试<br/>出错 key 冷却 60s · 平台级出口代理]
@@ -67,11 +68,12 @@ flowchart TB
     u3[Ollama 本地 / 私有部署]
   end
 
-  store[(SQLite relay.db<br/>每请求一行：用量 / 延迟 / 错误<br/>不存对话内容)]
-  web[Web 控制台<br/>概览 / 用量统计 / 请求日志 / 地域地图 / 账号 / 设置]
+  store[(SQLite relay.db<br/>每请求一行：用量 / 延迟 / 错误<br/>生成产物 output_info（截断文本，媒体不落库）<br/>不存对话内容)]
+  web[Web 控制台<br/>概览（含地域地图）/ 上游平台 / 用量统计 / 请求日志 / 账号 / 设置]
 
   c1 -- OpenAI 协议 /v1/chat/completions --> auth
   c2 -- Anthropic 协议 /v1/messages --> auth
+  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio（绕过翻译/思考管线）" --> auth
   keys -- 转发（流式 / 非流式） --> Up
   Up -- 真实 usage --> store
   store --> web
@@ -146,12 +148,24 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
 | POST | `/v1/chat/completions` | OpenAI 协议对话，流式 / 非流式 |
 | POST | `/v1/completions` | 旧版补全（透传） |
 | POST | `/v1/embeddings` | OpenAI 兼容上游透传 |
+| POST | `/v1/images` | 图像生成透传（OpenAI 兼容上游）；别名 `/v1/images/generations` |
+| POST | `/v1/videos` | 视频生成透传（任务型）；`GET /v1/videos` 查任务状态（按视频型模型自动识别） |
+| POST | `/v1/audio` | 音频 TTS（JSON 体）/ 转写（multipart 表单）按请求形态自动分流；别名 `/v1/audio/speech` / `/v1/audio/transcriptions` |
 | POST | `/v1/messages` | Anthropic 协议对话，流式 / 非流式 |
 | POST | `/v1/messages/count_tokens` | Anthropic 上游代理；OpenAI 上游本地估算 |
 | GET | `/v1/models` | 聚合所有平台的模型；带 `anthropic-version` 头时返回 Anthropic 形状 |
 | GET | `/healthz` | 健康检查 |
 
 鉴权：`Authorization: Bearer *** 或 `x-api-key: ***
+
+> **生成类模型怎么用**（图像 / 视频 / TTS / 转写，目前仅 OpenAI 兼容上游）：「拉模型」时响应签名可识别的
+> 生成类模型会自动把类型回填进平台配置的 `extra.model_kind`——
+> 对话端点 `/v1/chat/completions` / `/v1/messages` 调生成模型返回 **400**（报错里写明该走哪个端点），
+> 生成端点调普通模型同样 400，双向防误用。上游签名有差异用 `extra` 覆盖
+> （如 Agnes 的视频状态查询走自定义 `videos_status_path`）。
+> 生成请求的产物（图像 / 音频 base64、视频结果 URL）写进日志 `output_info` 供审计（媒体不落库），
+> token 记 0（`est`），本地 4xx（模型不存在 / 类型不符 / 参数缺失）同样落日志带原因。
+
 管理 API（`/api/*`）完整清单见 [docs/DEEP_DIVE.md](docs/DEEP_DIVE.md)。
 
 ## 4. 上游平台配置
@@ -201,6 +215,9 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
   > 方便临时试新模型；但也意味着打错字会变成上游 404，而不是网关的 404。
 
 - `extra` 高级项：`chat_path` / `messages_path` / `models_path` / `count_tokens_path` 覆盖默认路径、
+  `images_path` / `videos_path` / `audio_speech_path` / `audio_trans_path` 覆盖四个生成类端点路径、
+  `videos_status_path` 指定视频任务状态查询的完整 URL（上游签名不一致时覆盖）、
+  `model_kind` 模型类型表 `{模型名: image|video|audio_tts|audio_trans}`（「拉模型」签名可识别时自动回填，也可手写补）、
   `headers` 额外请求头、`anthropic_version` / `anthropic_beta` Anthropic 版本头、
   `default_max_tokens`（OpenAI→Anthropic 转换时补的必填项）、
   `inject_stream_usage`（流式时主动向上游要 usage，默认 true）
@@ -303,10 +320,12 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
 | `client_ip` | 来源 IP（挂反代时是 `X-Forwarded-For` 还原出来的真实 IP） |
 | `reasoning_policy` | 这次请求实际生效的思考策略（`off`/`auto`/`low`/…） |
 | `key_hint` / `key_index` | 这次用的是平台里哪个 API Key（打码）及其序号 |
+| `user_id` / `dkey_id` | 所属账号（多租户）/ 发起请求的下游客户端 Key（历史未记录为 NULL） |
+| `output_info` | 生成类请求产物：图像 / 音频为 base64 截断、视频为结果 URL（文本列仅审计，媒体不落库） |
 
 完整字段表见 [docs/DEEP_DIVE.md](docs/DEEP_DIVE.md#用量统计字段全表)。
 
-控制台「用量统计」可按 **平台 / 平台+模型 / 模型 / 天 / 下游协议 / 下游 key** 聚合（管理员多一个 **按账号**），可导出 CSV。「下游 key」按客户端 key 的**备注名**统计（无备注/已删除/历史未记录分别归为「(无备注)」「(key 已删除)」「(未记录)」）。概览「近期活动」支持按平台 / 模型 / 下游 key 堆叠；请求日志多一列「下游 Key」。
+控制台「用量统计」可按 **平台 / 平台+模型 / 模型 / 天 / 下游协议 / 下游 key** 聚合（管理员多一个 **按账号**），可导出 CSV。「下游 key」按客户端 key 的**名称**统计（无名称/已删除/历史未记录分别归为「(无名称)」「(key 已删除)」「(未记录)」）。概览「近期活动」支持按平台 / 模型 / 下游 key 堆叠；请求日志多一列「下游 Key」，**且各列都可多选筛选**——筛选项按「**当前时间范围 + 其他已生效筛选**」罗列：当前结果集里不出现的选项不显示（不会勾了 0 条），收窄某维度时排除该维度自身的筛选、可直接换选别的值。
 概览页另有「**地域访问地图**」：按 `client_ip` 定位请求来源（中国到省、境外到国家、私有段算「局域网/代理出口」），
 颜色深浅 = 该省请求数，省图上叠加**城市热点圆点**（面积 ∝ 该城请求数，取 Top 30；城市名自动转中文），跟随概览的时间范围 chip（今日/7 天/30 天）。
 定位走**双离线库**：中国段优先 IP2Region `IP2Region.xdb`（开源免费、精确到城市+运营商，免费 GeoLite2 对国内家宽/运营商 IP 常常只到国家级），境外与未命中落 MaxMind `GeoLite2-City.mmdb`；

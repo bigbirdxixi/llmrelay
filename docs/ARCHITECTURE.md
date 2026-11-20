@@ -65,6 +65,7 @@ app/
 ```
 下游客户端（OpenAI 或 Anthropic 协议）
    │  POST /v1/chat/completions 或 /v1/messages（可带 stream / tools / 思考字段）
+   │  生成类透传：/v1/images、/v1/videos、/v1/audio（model_kind 自动识别，类型不符 400）
    │  Authorization: Bearer ***
    ▼
 main.py ── 鉴权（auth.authenticate）
