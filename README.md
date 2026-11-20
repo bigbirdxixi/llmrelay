@@ -149,7 +149,7 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
 | POST | `/v1/completions` | 旧版补全（透传） |
 | POST | `/v1/embeddings` | OpenAI 兼容上游透传 |
 | POST | `/v1/images` | 图像生成透传（OpenAI 兼容上游）；别名 `/v1/images/generations` |
-| POST | `/v1/videos` | 视频生成透传（任务型）；`GET /v1/videos` 查任务状态（按视频型模型自动识别） |
+| POST | `/v1/videos` | 视频生成透传（任务型）；`GET /v1/videos?model=…` 查任务状态（高频轮询，上游成败不落日志、本地校验 4xx 照记；查询 URL 可给 `extra.videos_status_path` 完整地址） |
 | POST | `/v1/audio` | 音频 TTS（JSON 体）/ 转写（multipart 表单）按请求形态自动分流；别名 `/v1/audio/speech` / `/v1/audio/transcriptions` |
 | POST | `/v1/messages` | Anthropic 协议对话，流式 / 非流式 |
 | POST | `/v1/messages/count_tokens` | Anthropic 上游代理；OpenAI 上游本地估算 |
