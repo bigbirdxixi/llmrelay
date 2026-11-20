@@ -973,6 +973,27 @@ async def stats_errors(request: Request, days: int = 30, limit: int = 8,
     return {"data": store.top_errors(days, limit, _data_user(request))}
 
 
+def _csv_list(v: str | None, cast=None) -> list | None:
+    """逗号分隔多选参数 → 列表（空 → None）。records/facets 两个端点共用。"""
+    if not v:
+        return None
+    cast = cast or str
+    vals = []
+    for part in v.split(","):
+        part = part.strip()
+        if part:
+            vals.append(cast(part))
+    return vals or None
+
+
+def _unlabel(vals: list | None) -> list | None:
+    """facet 占位标签 → DB 空串 的转回（R141/R142）：「（未解析）」= 空 platform/model，
+    「-」= 空 key_hint/client_ip。不转回的话，勾选这些选项按字面值匹配恒为零行。"""
+    if not vals:
+        return vals
+    return ["" if v in ("（未解析）", "-") else v for v in vals]
+
+
 @router.get("/stats/records")
 async def stats_records(request: Request, limit: int = 100, offset: int = 0,
                        platform: str | None = None, model: str | None = None,
@@ -989,36 +1010,20 @@ async def stats_records(request: Request, limit: int = 100, offset: int = 0,
     dkey=下游 key id 列表（0 = 未记录）。"""
     store = request.app.state.store
     uid = _data_user(request)
-    def _csv(v: str | None, cast=None) -> list | None:
-        if not v:
-            return None
-        cast = cast or str
-        vals = []
-        for part in v.split(","):
-            part = part.strip()
-            if part:
-                vals.append(cast(part))
-        return vals or None
-    plist = _csv(platform)
-    mlist = _csv(model)
-    slist = _csv(status)
-    stream_list = _csv(stream, lambda p: int(p) if p in ("0", "1") else p)
-    uid_list = _csv(users, lambda p: int(p))
-    dkey_list = _csv(dkey, lambda p: int(p))
-    # facet 占位标签 → DB 空串 的转回（R141/R142）：「（未解析）」= 空 platform/model，
-    # 「-」= 空 key_hint/client_ip。不转回的话，勾选这些选项按字面值匹配恒为零行。
-    def _unlabel(vals):
-        if not vals:
-            return vals
-        return ["" if v in ("（未解析）", "-") else v for v in vals]
+    plist = _csv_list(platform)
+    mlist = _csv_list(model)
+    slist = _csv_list(status)
+    stream_list = _csv_list(stream, lambda p: int(p) if p in ("0", "1") else p)
+    uid_list = _csv_list(users, lambda p: int(p))
+    dkey_list = _csv_list(dkey, lambda p: int(p))
     plist = _unlabel(plist)
     mlist = _unlabel(mlist)
     if range_:   # 相对快捷区间优先；显式 from/to 仍然可以叠加收窄
         rf, rt = store.resolve_range(range_)
         date_from = date_from or rf
         date_to = date_to or rt
-    fkw = dict(stream=stream_list, key_hint=_unlabel(_csv(key)),
-               client_ip=_unlabel(_csv(ip)),
+    fkw = dict(stream=stream_list, key_hint=_unlabel(_csv_list(key)),
+               client_ip=_unlabel(_csv_list(ip)),
                user_ids=uid_list, dkey_ids=dkey_list,
                date_from=date_from, date_to=date_to)
     rows = store.recent(limit, plist, mlist, slist, days, uid, offset, **fkw)
@@ -1035,10 +1040,35 @@ async def stats_records(request: Request, limit: int = 100, offset: int = 0,
 
 
 @router.get("/stats/logs/facets")
-async def stats_logs_facets(request: Request, _: None = Depends(auth)):
-    """日志页的全局筛选项（跨全量记录，不只当前页）。"""
+async def stats_logs_facets(request: Request, platform: str | None = None,
+                           model: str | None = None, status: str | None = None,
+                           stream: str | None = None, key: str | None = None,
+                           ip: str | None = None, users: str | None = None,
+                           dkey: str | None = None,
+                           range_: str | None = Query(None, alias="range"),
+                           date_from: str | None = Query(None, alias="from"),
+                           date_to: str | None = Query(None, alias="to"),
+                           _: None = Depends(auth)):
+    """日志页筛选选项（v2.0.1：不再全量）。选项按「当前时间范围 + 其他已生效筛选」
+    （即当前筛选结果集）罗列；每个维度排除自己的筛选（勾了值仍可切换其他值）。
+    前端传与 /stats/records 完全相同的参数（limit/offset 等多余参数自动忽略）。"""
     store = request.app.state.store
-    return store.log_facets(_data_user(request))
+    uid = _data_user(request)
+    if range_:   # 与 records 同口径：相对快捷区间优先；显式 from/to 仍可叠加收窄
+        rf, rt = store.resolve_range(range_)
+        date_from = date_from or rf
+        date_to = date_to or rt
+    filters = dict(
+        platform=_unlabel(_csv_list(platform)),
+        model=_unlabel(_csv_list(model)),
+        status=_csv_list(status),
+        stream=_csv_list(stream, lambda p: int(p) if p in ("0", "1") else p),
+        key_hint=_unlabel(_csv_list(key)),
+        client_ip=_unlabel(_csv_list(ip)),
+        user_ids=_csv_list(users, lambda p: int(p)),
+        dkey_ids=_csv_list(dkey, lambda p: int(p)),
+    )
+    return store.log_facets(uid, date_from, date_to, **filters)
 
 
 @router.get("/stats/export.csv")

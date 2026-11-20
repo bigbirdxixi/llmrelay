@@ -4190,3 +4190,34 @@ def test_r142_log_facets_dash_and_deleted_user(client, hdr):
     assert lab in [a["email"] for a in f2["accounts"]], f2["accounts"]
     r3 = client.get("/api/stats/records?tenant=all&users=%d" % dud, headers=hdr).json()
     assert r3["total"] == 1 and r3["data"][0]["user_email"] == lab, r3
+
+
+# ---------------------------------------------------------------- R143 日志 facets 跟随时间范围与筛选，不再全量（v2.0.1）
+def test_r143_log_facets_follow_range_and_filters(client, hdr):
+    """筛选项不再全量（R143）：按「当前时间范围 + 其他已生效筛选」罗列，每个维度排除
+    自身筛选（勾了值仍可切换其他值）。修复生产体验「选项在、勾选后 0 条」
+    （如「（未解析）」行只在 11-15，看近 15 分钟时全量 facet 仍列出该死选项）。"""
+    from datetime import datetime, timedelta
+    from app.main import store
+    uid = client.get("/api/settings", headers=hdr).json()["user"]["id"]
+    now = datetime.now().astimezone()
+    old = (now - timedelta(days=9)).isoformat(timespec="seconds")
+    store.record(ts=old, platform="r143old", model="r143-m1", stream=0,
+                 total_tokens=10, user_id=uid)
+    store.record(platform="r143new", model="r143-m2", stream=1, total_tokens=10, user_id=uid)
+
+    # 不带范围（该账号全量）：新旧平台都在选项里
+    f0 = client.get("/api/stats/logs/facets", headers=hdr).json()
+    assert "r143old" in f0["platform"] and "r143new" in f0["platform"], f0["platform"]
+    # 当日范围：旧数据选项消失（死选项问题修复），total 跟着结果集收窄
+    today = now.strftime("%Y-%m-%d")
+    f1 = client.get("/api/stats/logs/facets", params={"from": today, "to": today}, headers=hdr).json()
+    assert "r143new" in f1["platform"] and "r143old" not in f1["platform"], f1["platform"]
+    # 跨维度筛选：platform=r143new 之下，模型/类型选项只剩该行的取值
+    f2 = client.get("/api/stats/logs/facets",
+                    params={"from": today, "to": today, "platform": "r143new"}, headers=hdr).json()
+    assert f2["model"] == ["r143-m2"], f2["model"]
+    assert f2["stream"] == [1], f2["stream"]
+    # 自身排除：勾了 platform=r143new，平台选项里它仍然在（可切换到别的值）
+    assert "r143new" in f2["platform"], f2["platform"]
+    assert f2["total"] == 1, f2["total"]

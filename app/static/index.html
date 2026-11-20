@@ -1968,14 +1968,14 @@ async function renderLogs(page){
   else { if (S.logDateFrom) q.set("from", S.logDateFrom); if (S.logDateTo) q.set("to", S.logDateTo); }
   const [r, fc] = await Promise.all([
     api("/api/stats/records?" + q.toString()),
-    api("/api/stats/logs/facets"),
+    api("/api/stats/logs/facets?" + q.toString()),   // v2.0.1：筛选项与 records 同参数——按当前范围+筛选罗列（每维度排除自身）
   ]);
   S.logRows = r.data || [];
   S.logTotal = r.total || 0;
   S.logFacets = fc || {};
   if (fc.accounts) S.logAcctMap = Object.fromEntries(fc.accounts.map(a => [a.email, a.id]));
   if (fc.dkeys) S.logDkeyMap = Object.fromEntries(fc.dkeys.map(x => [x.label, x.id]));
-  // 剔除全局 facets 里已不存在的筛选值，避免显示与生效条件不一致
+  // 剔除当前范围内已不存在的筛选值，避免显示与生效条件不一致（v2.0.1：facets 已随范围/筛选收窄）
   const valid = {
     status: new Set(fc.status || []), platform: new Set(fc.platform || []),
     model: new Set(fc.model || []), key: new Set(fc.key_hint || []),
@@ -1999,7 +1999,7 @@ function uniqSorted(vals){
   return [...s].sort();
 }
 
-/* 筛选项来自全量记录（log_facets），不是当前页 */
+/* 筛选项来自 log_facets：v2.0.1 起按「当前时间范围 + 其他筛选」罗列（各维度排除自身筛选），不是无差别全量 */
 function logFilterValues(field){
   const fc = S.logFacets;
   if (field === "type"){

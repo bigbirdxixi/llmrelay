@@ -847,23 +847,44 @@ class Store:
         with self._lock:
             return int(self._conn.execute(q, args).fetchone()[0])
 
-    def log_facets(self, user_id: int | list | None = None) -> dict:
-        """全量（不限页）的日志筛选项：各列 distinct 值 + 账号映射 + 时间范围。"""
-        where, args = self._user_cond(user_id, "", "WHERE")
-        args = list(args)
+    def log_facets(self, user_id: int | list | None = None,
+                   date_from: str | None = None, date_to: str | None = None,
+                   **filters) -> dict:
+        """日志筛选项。
+
+        v2.0.1 起不再全量：选项按「当前时间范围 + 其他已生效筛选」罗列（即当前筛选
+        结果集），选项与表内数据对应，不再出现「选项有、勾选后 0 条」；计算某一维度
+        的选项时不加该维度自己的筛选（自身排除，勾了值仍可切换其他值——标准 facet 语义）。
+        也顺带避免日志页每次翻页/改筛选都对全表跑一遍 distinct（性能）。
+        filters：与 recent() 同语义的列表——platform/model/status/stream/key_hint/
+        client_ip/user_ids/dkey_ids。"""
+        def _conds(exclude: tuple) -> tuple[list, list]:
+            kw = dict(stream=filters.get("stream"), key_hint=filters.get("key_hint"),
+                      client_ip=filters.get("client_ip"), user_ids=filters.get("user_ids"),
+                      dkey_ids=filters.get("dkey_ids"))
+            for name in ("platform", "model", "status"):
+                kw[name] = filters.get(name)
+            for name in exclude:
+                kw[name] = None
+            return self._log_filters(
+                user_id, 0, kw["platform"], kw["model"], kw["status"],
+                stream=kw["stream"], key_hint=kw["key_hint"],
+                client_ip=kw["client_ip"], user_ids=kw["user_ids"],
+                date_from=date_from, date_to=date_to, dkey_ids=kw["dkey_ids"])
         with self._lock:
-            def _vals(col: str, default: str = "") -> list:
-                q = f"SELECT DISTINCT {col} FROM requests {where} ORDER BY {col}"
-                rows = [r[0] for r in self._conn.execute(q, args)]
+            def _vals(col: str, default: str = "", exclude: tuple = ()) -> list:
+                conds, args = _conds(exclude)
+                rows = [r[0] for r in self._conn.execute(
+                    self._log_q(conds, f"SELECT DISTINCT {col} FROM requests"), args)]
                 return [r if r not in (None, "") else default for r in rows]
-            stream_vals = _vals("stream", "0")
+            stream_vals = _vals("stream", "0", ("stream",))
+            conds, args = _conds(("user_ids",))
             uid_rows = [r[0] for r in self._conn.execute(
-                f"SELECT DISTINCT user_id FROM requests {where}", args)]
-            rng = self._conn.execute(
-                f"SELECT MIN(ts), MAX(ts) FROM requests {where}", args).fetchone()
+                self._log_q(conds, "SELECT DISTINCT user_id FROM requests"), args)]
+            conds, args = _conds(("dkey_ids",))
             # 下游 key 筛选项：distinct dkey_id（0 = 未记录/NULL），标签解析与 recent() 一致
             dk_rows = [r[0] for r in self._conn.execute(
-                f"SELECT DISTINCT dkey_id FROM requests {where}", args)]
+                self._log_q(conds, "SELECT DISTINCT dkey_id FROM requests"), args)]
             dk_ids = sorted({int(x) for x in dk_rows if x is not None})
             dk_map: dict[int, str] = {}
             if dk_ids:
@@ -871,8 +892,20 @@ class Store:
                 for r in self._conn.execute(
                         f"SELECT id, label FROM api_keys WHERE id IN ({marks})", tuple(dk_ids)):
                     dk_map[r["id"]] = r["label"] or ""
+            # 选项 distinct 也统一在锁内做完（_vals 是闭包，锁外再调等于裸跑 SQL）
+            plat_vals = _vals("platform", "（未解析）")
+            model_vals = _vals("model", "（未解析）")
+            status_vals = _vals("status")
+            key_vals = _vals("key_hint", "-")
+            ip_vals = _vals("client_ip", "-")
+            # min/max/total：「范围 + 全部筛选」的当前结果集（与 records 同口径）
+            conds, args = _conds(())
+            rng = self._conn.execute(
+                self._log_q(conds, "SELECT MIN(ts), MAX(ts) FROM requests"), args).fetchone()
+            total = int(self._conn.execute(
+                self._log_q(conds, "SELECT COUNT(*) FROM requests"), args).fetchone()[0])
         # 全量映射所有用户（小表）：单账号视图（int）原来没有映射分支 → accounts 全空 email
-        # → 日志页「账号」筛选框一个选项都没有（R140）。
+        # → 日志页「账号」筛选框一个选项都没有（R140）。list_users 取锁，必须在 with 外。
         emails = {str(u["id"]): u["email"] for u in self.list_users()}
         # user_id 指向已删除账号：带编号占位（唯一，前端可按标签反查 id 继续筛选）。
         accounts = [{"id": i, "email": emails.get(str(i), f"（用户已删除 #{i}）")}
@@ -886,18 +919,18 @@ class Store:
             # 本地审计行（401/403/生成类本地 4xx 等）此时尚未解析到平台，DB 里存空串；
             # 映射为「（未解析）」占位，筛选项不再出现空白项（R141）。筛选侧由
             # admin.py 的 stats_records 把占位转回空串去匹配。
-            "platform": _vals("platform", "（未解析）"),
-            "model": _vals("model", "（未解析）"),
-            "status": _vals("status"),
+            "platform": plat_vals,
+            "model": model_vals,
+            "status": status_vals,
             # stream 列是 INTEGER（0/1/NULL）：原来只认字符串 "0"/"1"，int 值永远匹配不上
             # → facet 恒为空 → 日志页「类型」筛选框一个选项都没有（R140）
             "stream": sorted({int(x) for x in stream_vals if str(x) in ("0", "1")}),
-            "key_hint": _vals("key_hint", "-"),
-            "client_ip": _vals("client_ip", "-"),
+            "key_hint": key_vals,
+            "client_ip": ip_vals,
             "accounts": accounts,
             "dkeys": dkeys,
             "min_ts": rng[0] or "", "max_ts": rng[1] or "",
-            "total": self.record_count(user_id=user_id),
+            "total": total,
         }
 
     def model_options(self, user_id: int | list | None = None) -> list[dict]:
