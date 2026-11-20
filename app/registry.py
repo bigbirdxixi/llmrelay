@@ -239,6 +239,9 @@ class Registry:
         else:
             rows.append(row)
         self.save(rows)
+        # v2.0.1: 模型清单/别名变更 → 自动清掉指向不再登记模型的聚合条目（Bug：
+        # 平台设置里去掉模型后，聚合里还保留着它的配置）
+        self.prune_stale_aggregate_entries(platform)
         return row
 
     def remove(self, platform: str) -> bool:
@@ -247,6 +250,8 @@ class Registry:
         if len(left) == len(rows):
             return False
         self.save(left)
+        # v2.0.1: 平台删除 → 其「平台/*」聚合条目全部失效，清理（聚合丢空则删）
+        self.prune_stale_aggregate_entries(platform)
         return True
 
     # ---------- 聚合模型（一个聚合名 -> 多个 平台/模型 条目，轮询 + 失败冷却自动切换） ----------
@@ -273,6 +278,63 @@ class Registry:
                 self._agg_cd.pop(k, None)
         self._persist_aggregates()
         return True
+
+    def entry_fresh(self, e: str) -> bool:
+        """单条聚合条目在配置层是否有效（v2.0.1，比 resolve 的透传更严）：
+        「平台/模型」必须指向该平台**当前登记的**模型（models 列表或 model_map 别名）；
+        裸名沿用宽松语义（可解析即有效）。用于 /api/aggregates 保存校验、
+        aggregate_info 可用判定、与平台模型清单变更时的陈旧条目清理。"""
+        res = self.resolve(e)
+        if res is None:
+            return False
+        up, _ = res
+        if "/" not in e:
+            return True
+        pf, m = e.split("/", 1)
+        if e in (up.model_map or {}):      # 整串「平台/模型」本身是 model_map 别名键
+            return True
+        exposed = set(up.models or []) | set((up.model_map or {}).keys())
+        return m in exposed
+
+    def prune_stale_aggregate_entries(self, platform: str | None = None) -> int:
+        """平台模型清单变更 / 平台删除后，自动清掉聚合里指向失效目标的条目（v2.0.1）：
+        目标平台已删、或模型不再登记在该平台 models/model_map 里的「平台/模型」条目被移除；
+        丢掉全部条目的聚合随之删除。platform=None 查全部条目，否则只查该平台前缀的。
+        裸名条目不参与清理（宽松语义不变）。返回移除条数（>0 时持久化聚合行）。"""
+        removed = 0
+        with self._lock:
+            for agg_name in list(self.aggregates):
+                entries = self.aggregates[agg_name]
+                kept = []
+                for e in entries:
+                    if "/" not in e:
+                        kept.append(e)
+                        continue
+                    pf = e.split("/", 1)[0]
+                    if platform is not None and pf != platform:
+                        kept.append(e)      # 与本次变更无关的平台，不动
+                        continue
+                    if self.entry_fresh(e):
+                        kept.append(e)
+                    else:
+                        removed += 1
+                if kept == entries:
+                    continue
+                if kept:
+                    self.aggregates[agg_name] = kept
+                    self._agg_rr[agg_name] = 0     # 条目清单变了，轮询指针归头
+                else:
+                    del self.aggregates[agg_name]
+                    self._agg_rr.pop(agg_name, None)
+                kept_names = set(self.aggregates.get(agg_name) or [])
+                for ck in [k for k in self._agg_cd
+                           if k[0] == agg_name and k[1] not in kept_names]:
+                    self._agg_cd.pop(ck, None)
+            if removed:
+                self._persist_aggregates()
+                log.info("聚合模型：移除 %d 条失效条目（platform=%s，目标平台/模型已不登记）",
+                         removed, platform or "-")
+        return removed
 
     def aggregate_entries(self, name: str) -> list[str]:
         return list(self.aggregates.get(name) or [])
@@ -316,7 +378,7 @@ class Registry:
             rows = []
             for e in entries:
                 r = self.resolve(e)
-                rows.append({"entry": e, "ok": bool(r),
+                rows.append({"entry": e, "ok": self.entry_fresh(e),
                              "up_model": r[1] if r else "",
                              "platform": r[0].platform if r else e.split("/", 1)[0]})
             out.append({"name": name, "entries": rows,
@@ -329,6 +391,8 @@ class Registry:
             if r.get("platform") == platform:
                 r["models"] = models
                 self.save(rows)
+                # v2.0.1: 模型清单被改小（探测移除无效模型、UI 手改）→ 清理聚合里的失效条目
+                self.prune_stale_aggregate_entries(platform)
                 return
         raise KeyError(platform)
 

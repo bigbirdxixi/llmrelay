@@ -336,9 +336,9 @@ async def save_aggregate(request: Request, _: None = Depends(auth)):
         raise HTTPException(400, "单个聚合最多 20 个条目")
     if len(set(entries)) != len(entries):
         raise HTTPException(400, "条目有重复")
-    bad = [e for e in entries if not reg.resolve(e)]
+    bad = [e for e in entries if not reg.entry_fresh(e)]
     if bad:
-        raise HTTPException(400, f"这些条目解析不到已启用的上游模型（平台未启用或模型未登记）：{', '.join(bad)}")
+        raise HTTPException(400, f"这些条目未指向当前登记的上游模型（平台停用/未登记该模型/平台已删，v2.0.1 起严格校验）：{', '.join(bad)}")
     reg.upsert_aggregate(name, entries)
     return {"name": name, "entries": entries}
 

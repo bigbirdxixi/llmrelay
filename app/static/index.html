@@ -1537,7 +1537,7 @@ function aggregatePanelHtml(){
         <td class="num">${ops}</td></tr>`;
   }).join("");
   return `<div class="panel">
-    <h2>聚合模型 <small>${all ? "所有账号的聚合模型都在这里，按账号列出" : "一个名字挂多个「平台/模型」，调用时自动轮换/切换（类似多 key）"}</small>
+    <h2>聚合模型 <small>${all ? "所有账号的聚合模型都在这里，按账号列出" : "一个名字挂多个「平台/模型」，调用时自动轮换/切换（类似多 key）；平台里删掉的模型/被删平台指向的条目会自动清理"}</small>
       <span style="flex:1"></span>
       ${addBtn}
     </h2>
@@ -1628,7 +1628,7 @@ async function delAggregate(name){
 }
 
 async function delProvider(platform){
-  if(!confirm("删除平台 " + platform + "？该平台的模型将不可用。")) return;
+  if(!confirm("删除平台 " + platform + "？该平台的模型将不可用，指向该平台的聚合条目会随之清理。")) return;
   try { await api("/api/providers/" + encodeURIComponent(platform), { method:"DELETE" });
     toast("已删除", "ok"); await refreshAll(); }
   catch(e){ toast("删除失败：" + e.message, "err"); }

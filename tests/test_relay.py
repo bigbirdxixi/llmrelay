@@ -4221,3 +4221,82 @@ def test_r143_log_facets_follow_range_and_filters(client, hdr):
     # 自身排除：勾了 platform=r143new，平台选项里它仍然在（可切换到别的值）
     assert "r143new" in f2["platform"], f2["platform"]
     assert f2["total"] == 1, f2["total"]
+
+
+# ---------------------------------------------------------------- R144 平台设置删掉模型后，聚合模型不再保留其配置（v2.0.1）
+def test_r144_aggregate_prune_stale_entries(client, hdr, upstream_port):
+    """聚合陈旧条目清理（R144）：Bug 为上游平台设置里去掉模型后，聚合模型仍保留
+    已删模型的配置（resolve 透传不校验模型是否登记，死条目写进配置层）。现语义：
+    1) 平台模型清单变更删掉模型 → 指向它的聚合条目自动清理，聚合丢空则整个删除；
+    2) 平台删除 → 其全部「平台/*」聚合条目清理；
+    3) 聚合保存严格校验（未登记模型 → 400）；model_map 别名不受清理影响；
+    4) 绕过 API 校验的陈旧条目（直写 registry / 手改 JSON）API 标记不可用，
+       并在下一次模型清单变更时清理。"""
+    from app.main import store, tenants
+    reg = tenants.get(store.first_admin()["id"])
+
+    P = "aggr144"
+    base = {"platform": P, "type": "openai",
+            "base_url": f"http://127.0.0.1:{upstream_port}/v1",
+            "api_keys": ["pk144"]}
+
+    def names():
+        return [a["name"] for a in client.get("/api/aggregates", headers=hdr).json()["data"]]
+
+    def entries(name):
+        for a in client.get("/api/aggregates", headers=hdr).json()["data"]:
+            if a["name"] == name:
+                return [e["entry"] for e in a["entries"]]
+        return None
+
+    def agg(name):
+        for a in client.get("/api/aggregates", headers=hdr).json()["data"]:
+            if a["name"] == name:
+                return a
+        return None
+
+    try:
+        # 两个登记模型的 fake 平台（模型清单在配置层，无需真实可达）
+        assert client.post("/api/providers", headers=hdr,
+                           json={**base, "models": ["alpha", "beta"]}).status_code == 200
+        # 1) 指向登记模型的聚合条目照常可存
+        assert client.post("/api/aggregates", headers=hdr,
+                          json={"name": "A144", "entries": [f"{P}/alpha", f"{P}/beta"]}).status_code == 200
+        assert entries("A144") == [f"{P}/alpha", f"{P}/beta"]
+
+        # 2) 改模型清单去掉 beta → 指向 beta 的聚合条目自动清理
+        r = client.post("/api/providers", headers=hdr,
+                       json={**base, "models": ["alpha"]})
+        assert r.status_code == 200, r.text
+        assert entries("A144") == [f"{P}/alpha"], entries("A144")
+
+        # 3) 严格校验：指向已不登记模型的聚合保存 → 400
+        r = client.post("/api/aggregates", headers=hdr,
+                       json={"name": "B144", "entries": [f"{P}/beta"]})
+        assert r.status_code == 400, r.text
+
+        # 4) model_map 别名是登记目标，不受清理影响
+        r = client.post("/api/providers", headers=hdr,
+                       json={**base, "models": ["alpha"], "model_map": {"fast": "alpha"}})
+        assert r.status_code == 200, r.text
+        assert client.post("/api/aggregates", headers=hdr,
+                           json={"name": "C144", "entries": [f"{P}/fast"]}).status_code == 200
+        assert entries("C144") == [f"{P}/fast"]
+
+        # 5) 陈旧条目（绕过 API 校验直写 registry，模拟手改 JSON）：
+        #    API 标记不可用；下一次模型清单变更时被清理，聚合丢空随之删除
+        reg.upsert_aggregate("D144", [f"{P}/ghost"])
+        d = agg("D144")
+        assert d and d["entries"][0]["ok"] is False and d["usable"] == 0, d
+        r = client.post("/api/providers", headers=hdr,
+                       json={**base, "models": ["alpha"], "model_map": {"fast": "alpha"}})
+        assert r.status_code == 200, r.text
+        assert entries("D144") is None, names()
+
+        # 6) 平台删除 → 指向它的聚合条目全部清理，聚合丢空删除
+        assert client.delete(f"/api/providers/{P}", headers=hdr).status_code == 200
+        assert "A144" not in names() and "C144" not in names(), names()
+    finally:
+        client.delete(f"/api/providers/{P}", headers=hdr)
+        for n in ("A144", "B144", "C144", "D144"):
+            client.delete(f"/api/aggregates/{n}", headers=hdr)
