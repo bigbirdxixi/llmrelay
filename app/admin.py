@@ -1005,17 +1005,30 @@ async def stats_records(request: Request, limit: int = 100, offset: int = 0,
     stream_list = _csv(stream, lambda p: int(p) if p in ("0", "1") else p)
     uid_list = _csv(users, lambda p: int(p))
     dkey_list = _csv(dkey, lambda p: int(p))
+    # facet 占位标签 → DB 空串 的转回（R141/R142）：「（未解析）」= 空 platform/model，
+    # 「-」= 空 key_hint/client_ip。不转回的话，勾选这些选项按字面值匹配恒为零行。
+    def _unlabel(vals):
+        if not vals:
+            return vals
+        return ["" if v in ("（未解析）", "-") else v for v in vals]
+    plist = _unlabel(plist)
+    mlist = _unlabel(mlist)
     if range_:   # 相对快捷区间优先；显式 from/to 仍然可以叠加收窄
         rf, rt = store.resolve_range(range_)
         date_from = date_from or rf
         date_to = date_to or rt
-    fkw = dict(stream=stream_list, key_hint=_csv(key), client_ip=_csv(ip),
+    fkw = dict(stream=stream_list, key_hint=_unlabel(_csv(key)),
+               client_ip=_unlabel(_csv(ip)),
                user_ids=uid_list, dkey_ids=dkey_list,
                date_from=date_from, date_to=date_to)
     rows = store.recent(limit, plist, mlist, slist, days, uid, offset, **fkw)
     emap = _email_map(store)
     for r in rows:
-        r["user_email"] = emap.get(str(r.get("user_id")), "（历史）" if r.get("user_id") is None else "")
+        # user_id 指向已删除账号（删除账号保留历史行作审计）：带编号占位，与账号
+        # facet 选项（storage.log_facets）同标签，此前渲染成空白格
+        r["user_email"] = emap.get(str(r.get("user_id")),
+                                   "（历史）" if r.get("user_id") is None
+                                   else f"（用户已删除 #{r['user_id']}）")
     total = store.record_count(days, uid, platform=plist, model=mlist,
                                status=slist, **fkw)
     return {"data": rows, "total": total, "model_options": store.model_options(uid)}

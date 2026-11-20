@@ -701,10 +701,11 @@ class Store:
             r["reason"] = r["reason"] or "(无错误详情)"
         return rows
 
-    @staticmethod
-    def _in_clause(col: str, vals: list, args: list, conds: list) -> None:
-        """vals 非空时生成 IN (?) 子句；空列表不加条件。"""
-        vals = [v for v in (vals or []) if v not in (None, "")]
+    def _in_clause(self, col: str, vals: list, args: list, conds: list) -> None:
+        """vals 非空时生成 IN (?) 子句；空列表不加条件。
+        "" 是合法筛选值（「（未解析）」「-」占位经 stats_records 转回空串后按空匹配，R141/R142），
+        只跳过 None，不再静默丢掉空串。"""
+        vals = [v for v in (vals or []) if v is not None]
         if vals:
             conds.append(f"{col} IN ({', '.join('?' * len(vals))})")
             args.extend(vals)
@@ -870,16 +871,11 @@ class Store:
                 for r in self._conn.execute(
                         f"SELECT id, label FROM api_keys WHERE id IN ({marks})", tuple(dk_ids)):
                     dk_map[r["id"]] = r["label"] or ""
-        emails = {}
-        if user_id is None:
-            for u in self.list_users():
-                emails[str(u["id"])] = u["email"]
-        elif isinstance(user_id, (list, tuple, set)):
-            want = {str(int(u)) for u in user_id}
-            for u in self.list_users():
-                if str(u["id"]) in want:
-                    emails[str(u["id"])] = u["email"]
-        accounts = [{"id": i, "email": emails.get(str(i), "")}
+        # 全量映射所有用户（小表）：单账号视图（int）原来没有映射分支 → accounts 全空 email
+        # → 日志页「账号」筛选框一个选项都没有（R140）。
+        emails = {str(u["id"]): u["email"] for u in self.list_users()}
+        # user_id 指向已删除账号：带编号占位（唯一，前端可按标签反查 id 继续筛选）。
+        accounts = [{"id": i, "email": emails.get(str(i), f"（用户已删除 #{i}）")}
                     for i in sorted(x for x in uid_rows if x is not None)]
         dkeys: list[dict] = []
         if any(x is None for x in dk_rows):
@@ -887,10 +883,15 @@ class Store:
         for i in dk_ids:
             dkeys.append({"id": i, "label": (dk_map[i] or "（无名称）") if i in dk_map else "（key 已删除）"})
         return {
-            "platform": _vals("platform"),
-            "model": _vals("model"),
+            # 本地审计行（401/403/生成类本地 4xx 等）此时尚未解析到平台，DB 里存空串；
+            # 映射为「（未解析）」占位，筛选项不再出现空白项（R141）。筛选侧由
+            # admin.py 的 stats_records 把占位转回空串去匹配。
+            "platform": _vals("platform", "（未解析）"),
+            "model": _vals("model", "（未解析）"),
             "status": _vals("status"),
-            "stream": [int(x) for x in stream_vals if x in ("0", "1")],
+            # stream 列是 INTEGER（0/1/NULL）：原来只认字符串 "0"/"1"，int 值永远匹配不上
+            # → facet 恒为空 → 日志页「类型」筛选框一个选项都没有（R140）
+            "stream": sorted({int(x) for x in stream_vals if str(x) in ("0", "1")}),
             "key_hint": _vals("key_hint", "-"),
             "client_ip": _vals("client_ip", "-"),
             "accounts": accounts,

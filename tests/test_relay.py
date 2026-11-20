@@ -4104,3 +4104,89 @@ def test_r139_video_status_get_passthrough(client, hdr, upstream_port):
     finally:
         client.delete("/api/providers/r139vid", headers=hdr)
         client.delete("/api/providers/r139vid2", headers=hdr)
+
+
+# ---------------------------------------------------------------- R140 日志筛选 facets：类型/账号选项不为空（v2.0.1）
+def test_r140_log_facets_type_and_account(client, hdr):
+    """生产 bug 回归：日志页「类型」「账号」筛选框一个选项都没有。
+    根因①：stream 列是 INTEGER，facet 只认字符串 "0"/"1" → 类型选项恒空；
+    根因②：单账号视图（管理员默认 self，int user_id）账号映射没有分支 →
+    accounts 全空 email，前端 filter(Boolean) 全滤掉（R140）。"""
+    from app.main import store
+    uid = client.get("/api/settings", headers=hdr).json()["user"]["id"]
+    me_email = next(u["email"] for u in store.list_users() if u["id"] == uid)
+    store.record(platform="r140p", model="r140-a", stream=1, total_tokens=10, user_id=uid)
+    store.record(platform="r140p", model="r140-b", stream=0, total_tokens=10, user_id=uid)
+
+    # 默认不带 tenant = 单账号视图（int user_id）：类型/账号选项不得为空
+    f = client.get("/api/stats/logs/facets", headers=hdr).json()
+    assert 0 in f["stream"] and 1 in f["stream"], f"类型 facet 为空（int/str 错位？）: {f['stream']}"
+    assert [a["email"] for a in f["accounts"]] == [me_email], \
+        f"单账号视图账号 facet 无映射: {f['accounts']}"
+
+    # 类型筛选按 int 生效，总数与列表一致
+    r1 = client.get("/api/stats/records", params={"platform": "r140p", "stream": "1"}, headers=hdr).json()
+    assert r1["total"] == 1 and r1["data"][0]["model"] == "r140-a", r1
+    r0 = client.get("/api/stats/records", params={"platform": "r140p", "stream": "0"}, headers=hdr).json()
+    assert r0["total"] == 1 and r0["data"][0]["model"] == "r140-b", r0
+
+
+# ---------------------------------------------------------------- R141 日志 facets 空平台/模型 → 「（未解析）」选项（v2.0.1）
+def test_r141_log_facets_unresolved_placeholder(client, hdr):
+    """生产 bug 回归：「平台」筛选框出现一个什么都没有的空白筛选项。
+    根因：本地审计行（401/403/生成类本地 4xx）落日志时还没解析到平台，DB 存空串，
+    facet 默认值也是空串 → 渲染出空白 checkbox（R141）。现在统一映射「（未解析）」
+    占位，筛选侧转回空串去匹配，勾选该选项能真正筛出这些审计行。"""
+    from app.main import store
+    uid = client.get("/api/settings", headers=hdr).json()["user"]["id"]
+    store.record(platform="", model="", status="error", http_status=401,
+                 error="API Key 无效（R141 占位）", user_id=uid)
+    store.record(platform="", model="r141-ghost", status="error", http_status=404,
+                 error="没有找到模型（R141 占位）", user_id=uid)
+
+    f = client.get("/api/stats/logs/facets", headers=hdr).json()
+    assert "" not in f["platform"] and "" not in f["model"], \
+        f"platform/model facet 仍有空白选项: {f['platform']!r} / {f['model']!r}"
+    assert "（未解析）" in f["platform"] and "（未解析）" in f["model"], f
+
+    # 勾选「（未解析）」→ 占位转回空串，匹配 platform 为空的审计行
+    r = client.get("/api/stats/records", params={"platform": "（未解析）"}, headers=hdr).json()
+    assert r["total"] >= 2 and all(x["platform"] == "" for x in r["data"]), r
+    # 组合筛选：占位 + 具体 model 精确定位
+    rg = client.get("/api/stats/records",
+                    params={"platform": "（未解析）", "model": "r141-ghost"}, headers=hdr).json()
+    assert rg["total"] == 1 and rg["data"][0]["model"] == "r141-ghost", rg
+
+
+# ---------------------------------------------------------------- R142 日志 facets：「-」选项可匹配 + 已删除账号标签（v2.0.1）
+def test_r142_log_facets_dash_and_deleted_user(client, hdr):
+    """同类两个问题（R142）：
+    ① key/IP facet 把空值映射成「-」占位，但此前勾选后按字面「-」发后端，
+      DB 存的是空串 → 恒零行；现在「-」转回空串匹配；
+    ② 账号被删（历史行保留作审计）后，行里 user_email 渲染成空白格、
+      账号 facet 也没有对应选项；现在行与 facet 选项统一「（用户已删除 #id）」标签。"""
+    from app.main import store
+    uid = client.get("/api/settings", headers=hdr).json()["user"]["id"]
+    store.record(platform="r142p", model="r142-m", total_tokens=5,
+                 user_id=uid, key_hint="", client_ip="")
+    f = client.get("/api/stats/logs/facets", headers=hdr).json()
+    assert "-" in f["key_hint"] and "-" in f["client_ip"], f
+
+    r = client.get("/api/stats/records", params={"key": "-", "ip": "-"}, headers=hdr).json()
+    assert r["total"] >= 1 and all(x["key_hint"] == "" and x["client_ip"] == ""
+                                   for x in r["data"]), r
+
+    # 删除账号：facet 选项与行展示同标签
+    ur = client.post("/api/users", headers=hdr, json={
+        "email": "r142-del@test.local", "password": "agm-password", "role": "user"})
+    assert ur.status_code == 200, ur.text
+    dud = ur.json()["user"]["id"]
+    store.record(platform="r142p", model="r142-d", total_tokens=5, user_id=dud)
+    dr = client.delete(f"/api/users/{dud}", headers=hdr)
+    assert dr.status_code == 200, dr.text
+
+    lab = f"（用户已删除 #{dud}）"
+    f2 = client.get("/api/stats/logs/facets?tenant=all", headers=hdr).json()
+    assert lab in [a["email"] for a in f2["accounts"]], f2["accounts"]
+    r3 = client.get("/api/stats/records?tenant=all&users=%d" % dud, headers=hdr).json()
+    assert r3["total"] == 1 and r3["data"][0]["user_email"] == lab, r3
