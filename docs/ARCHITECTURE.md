@@ -51,7 +51,7 @@ app/
 ├── tenants.py    多租户：一账号一份上游配置（config/tenants/u<id>/upstreams.json），5s 热加载
 ├── auth.py       账号体系：邮箱+密码（PBKDF2 哈希）、Cookie 会话、每账号多 Key、
 │                 第二个账号起 magic link 确认（HMAC + 30 分钟时效 + pending 30 分钟自动清理）
-├── storage.py    SQLite（WAL）：requests 表记账 + 聚合查询（平台/模型/天/协议/下游key/账号）
+├── storage.py    SQLite（WAL）：requests 表记账 + 聚合查询（平台/模型/天/协议/IP 地域/下游key/账号）
 │                 启动自动「加列」迁移，旧库直接升级；ts 列 ISO 8601 本地时区
 ├── admin.py      管理 API（/api/*）：平台 CRUD + 21 预设 + 统计端点（含 /api/stats/logs/facets 日志筛选选项）+ 账号管理 + 邮件设置
 ├── mailer.py     确认邮件：三级优先级「控制台设置 > RELAY_SMTP_* 环境变量 > 日志模式」
@@ -67,7 +67,8 @@ app/
 下游客户端（OpenAI 或 Anthropic 协议）
    │  POST /v1/chat/completions 或 /v1/messages（可带 stream / tools / 思考字段）
    │  生成类透传：/v1/images、/v1/videos（含 GET 状态查询）、/v1/audio/speech、/v1/audio/transcriptions
-   │  （别名 /v1/images/generations、/v1/audio；model_kind 把关，端点与模型类型不符 400）
+   │  （OpenAI 深路径 /v1/images/generations 为别名；/v1/audio 扁平端点按 content-type 分流：JSON=TTS / multipart=转写）
+   │  （model_kind 把关：模型类型与端点不符 400）
    │  Authorization: Bearer ***
    ▼
 main.py ── 鉴权（auth.authenticate）
@@ -102,7 +103,7 @@ storage.py ── 记账一条 requests 行：
              上游原始错误文本 / 思考策略 / 所用 key（打码） /
              下游 key dkey_id（日志页「下游 Key」列） / 生成结果摘要 output_info（截断文本，媒体不落库）
    ▼
-SQLite data/relay.db  →  控制台「概览 / 用量统计 / 请求日志 / 地域地图」全部读它
+SQLite data/relay.db  →  控制台统计类页面（「概览」KPI+地域地图面板 / 用量统计 / 请求日志）全部读它
 ```
 
 ## 关键设计决策（以及为什么）
