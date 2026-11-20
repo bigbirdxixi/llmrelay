@@ -15,7 +15,7 @@ flowchart TB
     direction TB
     auth[鉴权 · 账号 / API Key<br/>Cookie 会话或 Bearer]
     tenant[租户配置 · 一账号一份上游配置<br/>文件 5 秒热加载]
-    route[路由 · 平台/模型 前缀、model_map 别名<br/>X-Upstream-Platform 强制平台]
+    route[路由 · 平台/模型 前缀、model_map 别名<br/>X-Upstream-Platform 强制平台 · 生成端点 model_kind 把关]
     think[思考控制 · 按模型开关<br/>关闭字段按平台自动选]
     trans[协议翻译 · OpenAI ⇄ Anthropic<br/>SSE 逐块（真流式）]
     keys[多 key 轮换 · 401/429/5xx 换 key 重试<br/>出错 key 冷却 60s · 平台级出口代理]
@@ -29,11 +29,12 @@ flowchart TB
     u3[Ollama 本地 / 私有部署]
   end
 
-  store[(SQLite relay.db<br/>每请求一行：用量 / 延迟 / 错误<br/>不存对话内容)]
-  web[Web 控制台<br/>概览 / 用量统计 / 请求日志 / 地域地图 / 账号 / 设置]
+  store[(SQLite relay.db<br/>每请求一行：用量 / 延迟 / 错误<br/>生成产物 output_info（截断文本，媒体不落库）<br/>不存对话内容)]
+  web[Web 控制台<br/>概览（含地域地图）/ 上游平台 / 用量统计 / 请求日志 / 账号 / 设置]
 
   c1 -- OpenAI 协议 /v1/chat/completions --> auth
   c2 -- Anthropic 协议 /v1/messages --> auth
+  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio（绕过翻译/思考管线）" --> auth
   keys -- 转发（流式 / 非流式） --> Up
   Up -- 真实 usage --> store
   store --> web
@@ -52,7 +53,7 @@ app/
 │                 第二个账号起 magic link 确认（HMAC + 30 分钟时效 + pending 30 分钟自动清理）
 ├── storage.py    SQLite（WAL）：requests 表记账 + 聚合查询（平台/模型/天/协议/下游key/账号）
 │                 启动自动「加列」迁移，旧库直接升级；ts 列 ISO 8601 本地时区
-├── admin.py      管理 API（/api/*）：平台 CRUD + 21 家预设 + 统计端点 + 账号管理 + 邮件设置
+├── admin.py      管理 API（/api/*）：平台 CRUD + 21 预设 + 统计端点（含 /api/stats/logs/facets 日志筛选选项）+ 账号管理 + 邮件设置
 ├── mailer.py     确认邮件：三级优先级「控制台设置 > RELAY_SMTP_* 环境变量 > 日志模式」
 ├── geoip.py      双离线 GeoIP 定位：中国段优先 IP2Region xdb，境外/未命中落 GeoLite2 mmdb
 ├── ip2xdb.py     IP2Region xdb 纯 Python 二进制解析（零第三方依赖，中国精确到城市+运营商）
@@ -65,7 +66,8 @@ app/
 ```
 下游客户端（OpenAI 或 Anthropic 协议）
    │  POST /v1/chat/completions 或 /v1/messages（可带 stream / tools / 思考字段）
-   │  生成类透传：/v1/images、/v1/videos、/v1/audio（model_kind 自动识别，类型不符 400）
+   │  生成类透传：/v1/images、/v1/videos（含 GET 状态查询）、/v1/audio/speech、/v1/audio/transcriptions
+   │  （别名 /v1/images/generations、/v1/audio；model_kind 把关，端点与模型类型不符 400）
    │  Authorization: Bearer ***
    ▼
 main.py ── 鉴权（auth.authenticate）
@@ -97,7 +99,8 @@ storage.py ── 记账一条 requests 行：
              usage 优先取上游真实值（流式也主动索取，inject_stream_usage），
              拿不到才估算并 estimated=1；
              latency_ms / ttft_ms / cached_tokens / reasoning_tokens /
-             上游原始错误文本 / 思考策略 / 所用 key（打码）
+             上游原始错误文本 / 思考策略 / 所用 key（打码） /
+             下游 key dkey_id（日志页「下游 Key」列） / 生成结果摘要 output_info（截断文本，媒体不落库）
    ▼
 SQLite data/relay.db  →  控制台「概览 / 用量统计 / 请求日志 / 地域地图」全部读它
 ```
