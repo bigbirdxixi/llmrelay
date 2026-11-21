@@ -2,6 +2,8 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [2.0.2] - 2026-11-21
+
 ## [2.0.1] - 2026-11-20
 
 ### 修复：请求日志筛选框「类型」「账号」选项为空（生产反馈）
