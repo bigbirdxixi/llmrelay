@@ -4556,3 +4556,66 @@ def test_r149_key_binding_dead_models_unbind(client, hdr, upstream_port):
     finally:
         client.delete(f"/api/keys/{kid}", headers=hdr)
         client.delete("/api/providers/r149plat", headers=hdr)
+
+
+# ---------------------------------------------------------------- R150 删模型后同步清理 extra.model_kind 陈旧条目（v2.0.3）
+def test_r150_set_models_prunes_stale_model_kind(client, hdr, upstream_port):
+    """生产反馈：非聊天模型（google gemini-embedding-*）被探测自动删除后，其「类型」回填条目
+    仍留在平台高级 JSON（extra.model_kind）里——探测删除 / refresh 拉取只改写模型清单，
+    model_kind 不同步。现：Registry.set_models（探测删模型与 refresh 拉取的共同收口）
+    同步清掉清单里已不存在模型的 model_kind 条目：
+    1) 清单收窄 → 被删模型条目移除、剩余模型条目保留；
+    2) 加模型 / 无陈旧条目 → 现条目原样不动；
+    3) 探测 e2e（用户现场）：标了 embedding 的非聊天模型，上游 /embeddings 已下线（404）
+       → 探测按 model_kind 改 ping /embeddings（R146 语义：chat ping 必 4xx 会误判）→ 判 removed
+       删除后，其 model_kind 回填条目同步清掉，保留模型不受影响。"""
+    from app.main import store, tenants
+    reg = tenants.get(store.first_admin()["id"])
+    P = "mk150"
+    base = {"platform": P, "name": "R150 mk(fake)", "type": "openai",
+            "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"]}
+
+    def extra():
+        p = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+             if x["platform"] == P]
+        return (p[0].get("extra") or {}) if p else {}
+
+    try:
+        assert client.post("/api/providers", headers=hdr,
+                           json={**base, "models": ["r150a", "r150b", "r150gone"],
+                                 "extra": {"model_kind": {"r150gone": "embedding",
+                                                          "r150a": "image"}}}).status_code == 200
+        assert extra().get("model_kind") == {"r150gone": "embedding", "r150a": "image"}, extra()
+
+        # 1) 清单收窄（模拟探测删模型）：被删模型条目移除，剩余模型条目保留
+        reg.set_models(P, ["r150a", "r150b"])
+        assert extra().get("model_kind") == {"r150a": "image"}, extra()
+
+        # 2) 加模型 / 无陈旧条目 → 现条目原样不动
+        reg.set_models(P, ["r150a", "r150b", "r150c"])
+        assert extra().get("model_kind") == {"r150a": "image"}, extra()
+
+        # 3) 探测 e2e（用户现场）：m-embgone* 在 fake 上游 /embeddings 端点回 404（模型已下线），
+        #    标了 embedding → 探测 ping /embeddings → 判 removed（命名不含 embed → 不走按名重验）
+        P2 = "mk150probe"
+        r1 = client.post("/api/providers", headers=hdr, json={
+            **base, "platform": P2, "name": "R150 probe(fake)",
+            "models": ["r150keep", "m-embgone-r150"],
+            "extra": {"model_kind": {"m-embgone-r150": "embedding"}}})
+        assert r1.status_code == 200, r1.text
+        try:
+            rp = client.post(f"/api/providers/{P2}/probe", headers=hdr, json={})
+            assert rp.status_code == 200, rp.text
+            j = rp.json()
+            assert "m-embgone-r150" in [x["model"] for x in j["removed"]], j
+            assert "r150keep" in j["kept"], j
+            assert j["written"] is True, j
+            p2 = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+                  if x["platform"] == P2][0]
+            assert p2.get("models") == ["r150keep"], p2.get("models")
+            assert (p2.get("extra") or {}).get("model_kind") in (None, {}), \
+                f"删除后 model_kind 陈旧条目要同步清掉: {p2.get('extra')}"
+        finally:
+            client.delete(f"/api/providers/{P2}", headers=hdr)
+    finally:
+        client.delete(f"/api/providers/{P}", headers=hdr)

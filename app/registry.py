@@ -397,8 +397,37 @@ class Registry:
                 self.save(rows)
                 # v2.0.1: 模型清单被改小（探测移除无效模型、UI 手改）→ 清理聚合里的失效条目
                 self.prune_stale_aggregate_entries(platform)
+                # v2.0.3 R150: 模型被删后 extra.model_kind 里的陈旧条目同步清掉（探测自动删除 /
+                # refresh 拉取只改写清单，不会动类型回填——生产反馈：google 平台 gemini-embedding-*
+                # 被探测删除后「类型」条目仍留在高级 JSON 里；UI 手动保存由前端重建 model_kind，不受影响）
+                self._prune_stale_model_kind(platform, models)
                 return
         raise KeyError(platform)
+
+    def _prune_stale_model_kind(self, platform: str, models: list[str]) -> None:
+        """清单收窄后清掉 extra.model_kind 里已不存在的模型的条目（v2.0.3 R150）。
+
+        model_kind 键 = 模型清单里的模型名（UI「类型」列 / 探测回填同源）；清单里的模型
+        条目原样保留，没有失效条目时不落盘（避免无谓写盘）。"""
+        rows = self.raw()
+        for r in rows:
+            if r.get("platform") == platform:
+                extra = r.get("extra") or {}
+                if not isinstance(extra, dict):
+                    return
+                mk = extra.get("model_kind")
+                if not isinstance(mk, dict) or not mk:
+                    return
+                keep_names = set(models or [])
+                stale = [k for k in mk if k not in keep_names]
+                if not stale:
+                    return
+                for k in stale:
+                    mk.pop(k)
+                extra["model_kind"] = mk
+                r["extra"] = extra
+                self.save(rows)
+                return
 
     def set_model_kind(self, platform: str, kind_map: dict[str, str]) -> None:
         """合并写 extra.model_kind（模型名 -> image|video|audio_tts|audio_trans）：
