@@ -10,6 +10,11 @@
 - 探测：已标 embedding 类型的模型改 ping `/v1/embeddings` 端点（chat ping 必 4xx 会误判 removed）；未标类型模型在 chat 端点遇 embedding 特征报错（4xx 提示 `/v1/embeddings`，或 NVIDIA NIM 单数 `/embedding`）→ 判「embed 保留」不删除，`model_kind` 自动回填 `embedding`（不依赖有没有 removed），探测完即可用透传端点直接调用
 - 回归测试 R146（chat 探测识别回填 / embedding 端点探测 404 判 removed / 回填后 `/v1/embeddings` 透传 / 误入 chat 端点 400 指路），全量 133 通过
 
+### 修复：embedding-only 模型探测误删（Google gemini-embedding-* 404，生产反馈）
+- 根因：embedding-only 模型（如 Google 的 gemini-embedding-1/2）不被 OpenAI 兼容层 chat 端点服务（404 "models/... is not found"），报错里没有任何 `/embeddings` 提示 → 既有报错签名全部漏判 → 误判「未授权/已移除」清出模型清单；而该模型在 `/v1/embeddings` 端点（含 Google OpenAI 兼容层 `/v1beta/openai/embeddings`）与 curl 直连 native 端点均可用
+- 现行为：探测 chat 端点 4xx 后，若模型名含 `embed`（openai 型上游）自动去 `/embeddings` 端点重验——通过 → 判「embed 保留」并自动回填 `model_kind=embedding`；重验也遇瞬时故障（429/5xx）→ 同样保留判 embedding（与 transient 保留政策一致，限流期间不误删）；重验不通过（模型确实不存在/未授权）→ 维持原判定不误留；google 预设说明同步该探测行为
+- 回归测试 R147（google 同款 404 签名 → 按模型名重验 → 保留+回填+`/v1/embeddings` 可用，普通模型照旧 ok），全量 134 通过
+
 ### 修复：上游平台新增 key 时旧 key 全部丢失（生产反馈）
 - 根因：编辑平台时已存 key 在输入框里显示为掩码，保存时前端把「掩码行 + 新增明文行」的混合提交原样发回 `POST /api/providers`；旧后端逻辑把「含明文的提交」当整体替换（只留明文行）→ 用户换行加一个新 key，其余旧 key 全没了
 - 现语义：掩码行按指纹（`_mask` 前6+…+末4）还原成已存明文再合并——新增行只影响新增，删某行只移除对应 key，key 框清空则保留现有 key（掩码框里删不掉自己看不到的明文，防误清空）；主动删掉全部掩码行才等于整体替换，重复行去重；匹配不到已存 key 的伪掩码行丢弃、绝不把掩码串存成 key
