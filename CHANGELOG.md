@@ -2,6 +2,8 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [2.0.3] - 2026-11-21
+
 ## [2.0.2] - 2026-11-21
 
 ### 功能：embedding 模型支持（探测识别 + /v1/embeddings 端点强化）
