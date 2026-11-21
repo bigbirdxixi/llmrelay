@@ -684,11 +684,13 @@ async def list_models(request: Request):
             "first_id": items[0]["id"] if items else None,
             "last_id": items[-1]["id"] if items else None,
         })
-    return JSONResponse(content={
-        "object": "list",
-        "data": [{"id": it["id"], "object": "model", "created": now,
-                  "owned_by": it["platform"]} for it in items],
-    })
+    data = []
+    for it in items:
+        obj = {"id": it["id"], "object": "model", "created": now, "owned_by": it["platform"]}
+        if "context_length" in it:
+            obj["context_length"] = it["context_length"]
+        data.append(obj)
+    return JSONResponse(content={"object": "list", "data": data})
 
 
 @app.get("/v1/models/{model_id:path}")
@@ -698,8 +700,11 @@ async def get_model(model_id: str, request: Request):
         return _auth_error("openai", reason, bearer_token(request), str(request.url.path), request)
     for it in tenants.get(user["id"]).model_index():
         if it["id"] == model_id:
-            return JSONResponse(content={"id": it["id"], "object": "model",
-                                         "created": int(time.time()), "owned_by": it["platform"]})
+            obj = {"id": it["id"], "object": "model",
+                   "created": int(time.time()), "owned_by": it["platform"]}
+            if "context_length" in it:
+                obj["context_length"] = it["context_length"]
+            return JSONResponse(content=obj)
     return error_response("openai", 404, f"没有模型 {model_id}", "model_not_found")
 
 

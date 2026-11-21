@@ -4444,3 +4444,54 @@ def test_r147_google_style_embedding_name_probe(client, hdr, upstream_port):
         assert re_.json()["data"][0]["embedding"] == [0.1] * 8, re_.text
     finally:
         client.delete("/api/providers/r147emb", headers=hdr)
+
+
+def test_r148_models_expose_context_length(client, hdr, upstream_port):
+    """v2.0.2: /v1/models 按模型暴露 context_length（extra.model_context_length）。
+
+    relay 此前 /v1/models 只回 id/object/created/owned_by，不带任何上下文窗口元数据
+    （上游 Agnes 等也不返回）→ Hermes 等客户端无从得知真实窗口，只能落本地缓存 /
+    探测兜底值。现操作员把窗口写进平台 extra.model_context_length（模型名 -> 正整数，
+    支持 '*' 通配），/v1/models 与 /v1/models/{id} 透传给客户端（Hermes 自动识别
+    context_length 字段并缓存，无需再探测）。未配置的模型不带该键（向后兼容）。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r148ctx", "name": "R148 ctx(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["ctx-big", "ctx-fallback", "ctx-wild"],
+        "model_map": {"ctx-alias": "ctx-big"},
+        "extra": {"model_context_length": {
+            "ctx-big": 524288, "ctx-fallback": "131072", "*": 128000}}})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        data = {m["id"]: m for m in client.get("/v1/models", headers=bh).json()["data"]}
+        # 精确模型名
+        assert data["r148ctx/ctx-big"]["context_length"] == 524288, data["r148ctx/ctx-big"]
+        # 数字字符串值同样认
+        assert data["r148ctx/ctx-fallback"]["context_length"] == 131072, data["r148ctx/ctx-fallback"]
+        # 无精确值的模型落 '*' 通配
+        assert data["r148ctx/ctx-wild"]["context_length"] == 128000, data["r148ctx/ctx-wild"]
+        # 别名继承其指向的真实模型窗口
+        assert data["r148ctx/ctx-alias"]["context_length"] == 524288, data.get("r148ctx/ctx-alias")
+        # 单模型端点同样带出
+        single = client.get("/v1/models/r148ctx/ctx-big", headers=bh).json()
+        assert single.get("context_length") == 524288, single
+        # 值已持久化进平台配置
+        p = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+             if x["platform"] == "r148ctx"][0]
+        assert (p.get("extra") or {}).get("model_context_length", {}).get("ctx-big") in (524288, "524288"), \
+            p.get("extra")
+    finally:
+        client.delete("/api/providers/r148ctx", headers=hdr)
+
+    # 未配置 model_context_length 的平台 → 不带 context_length 键（向后兼容）
+    r2 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r148plain", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["no-ctx-model"]})
+    assert r2.status_code == 200, r2.text
+    try:
+        data = {m["id"]: m for m in client.get("/v1/models", headers=bh).json()["data"]}
+        assert "context_length" not in data["r148plain/no-ctx-model"], data["r148plain/no-ctx-model"]
+    finally:
+        client.delete("/api/providers/r148plain", headers=hdr)

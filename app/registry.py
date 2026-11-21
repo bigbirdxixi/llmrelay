@@ -511,20 +511,51 @@ class Registry:
         aggs = [n for n in self.aggregates if n not in seen_f and n not in seen_b]
         return {"full": sorted(full), "bare": sorted(bare), "aggs": sorted(aggs)}
 
+    @staticmethod
+    def _context_length(up: Upstream, model: str, target: str = "") -> int:
+        """取 extra.model_context_length 的上下文窗口值（v2.0.2：/v1/models 暴露 context_length）。
+
+        extra.model_context_length = {"上游真实模型名": 524288, "*": 32768}：
+        精确模型名优先，其次别名指向的真实模型名，最后 '*' 通配兜底。
+        值须为正整数（int / 数字字符串均可）；缺失 / 非正 / 非数值一律不返回（0 = 未配置）。
+        """
+        per_model = ((up.extra or {}).get("model_context_length")) or {}
+        if not isinstance(per_model, dict):
+            return 0
+        for key in (model, target, "*"):
+            if not key or key not in per_model:
+                continue
+            raw = per_model[key]
+            try:
+                val = int(raw) if isinstance(raw, (int, float)) else int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+        return 0
+
     def model_index(self) -> list[dict]:
         out: list[dict] = []
         for up in self.upstreams:
             usable = self.usable(up)
             for m in self._names(up):
-                out.append({"id": f"{up.platform}/{m}", "platform": up.platform,
-                            "provider_name": up.label, "model": m,
-                            "type": up.type, "enabled": usable})
+                item = {"id": f"{up.platform}/{m}", "platform": up.platform,
+                        "provider_name": up.label, "model": m,
+                        "type": up.type, "enabled": usable}
+                ctx = self._context_length(up, m)
+                if ctx:
+                    item["context_length"] = ctx
+                out.append(item)
             for alias, target in (up.model_map or {}).items():
                 if alias in self._names(up):
                     continue
-                out.append({"id": f"{up.platform}/{alias}", "platform": up.platform,
-                            "provider_name": up.label, "model": alias, "maps_to": target,
-                            "type": up.type, "enabled": usable})
+                item = {"id": f"{up.platform}/{alias}", "platform": up.platform,
+                        "provider_name": up.label, "model": alias, "maps_to": target,
+                        "type": up.type, "enabled": usable}
+                ctx = self._context_length(up, alias, target)
+                if ctx:
+                    item["context_length"] = ctx
+                out.append(item)
         return out
 
     # ---------- 思考 / 推理策略 ----------
