@@ -209,7 +209,7 @@ PRESETS: list[dict[str, Any]] = [
     {"platform": "google", "name": "Google AI Studio（Gemini）", "type": "openai",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models": [],
      "extra": {}, "thinking_off": "auto",
-     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖。注意 Gemini 思考模型的「关闭思考」走 OpenAI 系 reasoning_effort（Google 兼容端点不再收 google.thinking_config 扩展字段）：2.x/3.0~3.4 用 none 真关死，3.5+ 不认 none（400）自动给最低档 minimal，表没覆盖的新代模型 400 时自动降级 minimal/去掉字段重发一次；工具调用的 thought_signature 由中转自动补齐（历史 assistant 工具调用缺签名时填官方哨兵值，避免 400）；不想自动补可 extra.thought_signature_bypass=false" },
+     "note": "AI Studio / Gemini API 的 OpenAI 兼容端点；key 在 aistudio.google.com 的 API key 页创建，模型名如 gemini-2.0-flash / gemini-2.5-pro；「重新拉取」的列表会自动去掉 models/ 前缀（带前缀的名字上游会 400），已存的前缀名调用时也会被自动剥掉。国内服务器直连 Google 不通时，在平台编辑页「代理」一栏填出口代理，如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808（socks5h 表示 DNS 也走代理），只对这一平台生效。客户端发 reasoning_effort=max（OpenAI 新值）会被中转线边界自动降级为 high（Google 对 max 报 400），可用 extra.reasoning_effort_map 覆盖。注意 Gemini 思考模型的「关闭思考」走 OpenAI 系 reasoning_effort（Google 兼容端点不再收 google.thinking_config 扩展字段）：2.x/3.0~3.4 用 none 真关死，3.5+ 不认 none（400）自动给最低档 minimal，表没覆盖的新代模型 400 时自动降级 minimal/去掉字段重发一次；工具调用的 thought_signature 由中转自动补齐（历史 assistant 工具调用缺签名时填官方哨兵值，避免 400）；不想自动补可 extra.thought_signature_bypass=false。embedding 模型（gemini-embedding-*）chat 端点不服务（404 models/… is not found）：探测会自动按模型名去 /embeddings 端点重验并回填类型，之后 /v1/embeddings 直接透传调用（OpenAI 兼容层支持 /embeddings，input 为单文本）" },
     {"platform": "volcark", "name": "火山方舟（豆包）", "type": "openai",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
      "models": ["deepseek-v3.2", "doubao-seed-1-6", "doubao-1.5-pro"],
@@ -617,6 +617,18 @@ def _looks_embed_model(reason: str) -> bool:
     return any(p.search(reason) for p in EMBED_MODEL_RES)
 
 
+# 兜底签名：上游报错没提端点、但模型名本身像 embedding（google gemini-embedding-* 这类
+# embedding-only 模型：chat 端点 404 "models/... is not found"，报错里没有任何 /embeddings 提示，
+# EMBED_MODEL_RES 签名全部漏判）→ 按模型名含 embed 兜底，由调用方去 /embeddings 端点重验。
+EMBED_NAME_RES = [
+    re.compile(r"embed", re.I),
+]
+
+
+def _looks_embed_name(m: str) -> bool:
+    return any(p.search(m) for p in EMBED_NAME_RES)
+
+
 def _auto_kind_from_reason(reason: str) -> str:
     """生成类/embedding 签名里明确指向了哪个端点 → 模型类型（自动回填 extra.model_kind）；
     模糊签名（如仅「不支持SSE」）返回 ''，类型留给平台页模型行手动选。"""
@@ -707,6 +719,8 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
       （chat relay 转发不了但它没坏，不删清单，UI 单独标注）；
     - embedding 模型（extra.model_kind 标 embedding）直接打 /embeddings 端点探测；chat 端点 4xx
       报错提示 /v1/embeddings（如 NIM 单数 /embedding）→ 判 embed 保留，类型自动回填 embedding；
+      报错没提示但模型名含 embed（google gemini-embedding-* 等 embedding-only 模型，chat 端点
+      404 "models/... is not found"）→ 自动去 /embeddings 端点重验，通过才判 embed 保留+回填；
     - 429/5xx（重试后仍失败，疑似瞬时故障）→ 保留不误删，transient 里列出；
     - key 级 401/403 → 提前停止（剩下的测了也没意义）、一律保留不动，只报 key_error。
     被移除的模型随时可「拉取模型」恢复（拉的是全量目录）。
@@ -762,6 +776,19 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
                         res, reason = "embed", f"{code}: {reason}"
                     else:
                         res, reason = "removed", f"{code}: 无此模型授权（key 可用，该模型未开通）"
+            if res in ("removed", "keyerr") and up.type == "openai" and _looks_embed_name(m):
+                # 模型名含 embed（google gemini-embedding-* 等 embedding-only 模型）：chat 端点 4xx
+                # 的报错里没有 /embeddings 提示、签名漏判 → 去 /embeddings 端点重验：通过才判 embed
+                # 保留（+类型回填），重验不通过维持原判定（模型确实不存在/未授权时不误留）
+                res2, code2, reason2 = await _probe_model(
+                    gw, reg, up, up.url_for("embeddings"), m,
+                    payload={"model": m, "input": "ping"})
+                if res2 == "ok":
+                    res, code, reason = "embed", code2, \
+                        f"chat 端点不服务该模型：/embeddings 已验证，判为 embedding 模型"
+                elif res2 == "transient":
+                    # 重验遇 429/5xx：模型大概率存在只是限流/抖动，保留不误删（与 transient 政策一致）
+                    res, code, reason = "embed", code2, f"/embeddings 重验瞬时 {code}，暂按 embedding 保留"
             if res == "ok":
                 kept.append(m)
                 consec_fail = 0

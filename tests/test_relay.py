@@ -4407,3 +4407,40 @@ def test_r146_embedding_probe_and_endpoint(client, hdr, upstream_port):
         assert "/v1/embeddings" in rc.text, rc.text
     finally:
         client.delete("/api/providers/r146emb", headers=hdr)
+
+
+def test_r147_google_style_embedding_name_probe(client, hdr, upstream_port):
+    """embedding-only 模型 google 同款签名（R147）：chat 端点 404 "models/… is not found"、
+    报错里没有任何 /embeddings 提示 → 签名漏判 → 模型名含 embed 自动去 /embeddings 端点重验，
+    通过则判 embedding 保留 + 类型回填（此前会误判 removed 把模型清出清单——生产反馈：
+    google 平台 gemini-embedding-1/2 探测 404 被移除，但 /v1/embeddings 与 curl 直连均可用）。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r147emb", "name": "R147 embname(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["fake-gemini-embedding-2", "fake-gpt"]})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        rp = client.post("/api/providers/r147emb/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        # 按模型名重验 /embeddings 通过 → embed 保留 + 自动回填类型
+        assert "fake-gemini-embedding-2" in j["kept"], j
+        assert not any(x["model"] == "fake-gemini-embedding-2" for x in j["removed"]), j
+        gen = {x["model"]: x for x in j["gen"]}
+        assert gen.get("fake-gemini-embedding-2", {}).get("kind") == "embedding", j["gen"]
+        assert "fake-gemini-embedding-2" in j["gen_kind_set"], j
+        # 普通模型照旧 ok
+        assert "fake-gpt" in j["kept"], j
+        # 回填已持久化
+        p = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+             if x["platform"] == "r147emb"][0]
+        assert (p.get("extra") or {}).get("model_kind", {}).get("fake-gemini-embedding-2") == "embedding", \
+            p.get("extra")
+        # 回填后 /v1/embeddings 透传端点可用
+        re_ = client.post("/v1/embeddings", headers=bh,
+                          json={"model": "fake-gemini-embedding-2", "input": "ping"})
+        assert re_.status_code == 200, re_.text
+        assert re_.json()["data"][0]["embedding"] == [0.1] * 8, re_.text
+    finally:
+        client.delete("/api/providers/r147emb", headers=hdr)

@@ -117,6 +117,13 @@ async def chat(request: Request):
         return JSONResponse(status_code=400, content={
             "error": {"message": "embedding model 'm-genemb' 需使用 /v1/embeddings 端点调用",
                       "type": "invalid_request_error"}})
+    # google gemini-embedding-* 同款签名：chat 端点 404 "models/… is not found"，
+    # 报错里没有任何 /embeddings 提示（OpenAI 兼容层的 embedding-only 模型特征，
+    # 探测需按模型名兜底去 /v1/embeddings 重验）；/v1/embeddings 端点正常服务该模型
+    if mname.startswith("fake-gemini-embedding"):
+        return JSONResponse(status_code=404, content={
+            "error": {"code": 404, "message": f"models/{mname} is not found",
+                      "status": "NOT_FOUND"}})
     if mname.startswith("m-400sse"):
         return JSONResponse(status_code=400, content={
             "error": {"message": "当前模型不支持SSE调用方式", "type": "invalid_request_error"}})
