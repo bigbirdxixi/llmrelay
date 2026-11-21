@@ -63,7 +63,8 @@ class Upstream(BaseModel):
         return self.name or self.platform
 
     def url_for(self, kind: str) -> str:
-        """kind: chat | messages | models | count_tokens | images。
+        """kind: chat | messages | models | count_tokens | images | videos | videos_status
+        | audio_speech | audio_trans | embeddings。
 
         anthropic 协议默认路径带 /v1 前缀（按官方 base_url 不带 /v1 设计）；
         若 base_url 已以 /v1 结尾（如 Agnes 等 OpenAI 风格 hub 同时提供 Messages），
@@ -83,6 +84,9 @@ class Upstream(BaseModel):
             "videos_status": "/videos",
             "audio_speech": "/audio/speech",
             "audio_trans": "/audio/transcriptions",
+            # embeddings（v2.0.2 透传）：平台可用 extra 的 embeddings_path 覆盖
+            # （如 NVIDIA NIM 走单数 /embedding）
+            "embeddings": "/embeddings",
         }[kind]
         override = self.extra.get(f"{kind}_path")
         if override:

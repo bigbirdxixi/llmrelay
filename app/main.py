@@ -276,9 +276,9 @@ async def completions(request: Request):
 
 @app.post("/v1/embeddings")
 async def embeddings(request: Request):
-    _u, reason = authenticate(request)
-    if reason:
-        return _auth_error("openai", reason, bearer_token(request), str(request.url.path), request)
+    """embeddings 向量端点（OpenAI 兼容透传，v2.0.2）：POST /embeddings → 上游 /embeddings
+    （路径可用平台 extra.embeddings_path 覆盖，如 NVIDIA NIM 的单数 /embedding）。
+    本地校验 4xx / 上游错误也记请求日志，与 chat 等端点一致（x-request-id 可关联）。"""
     user, reason = authenticate(request)
     if reason:
         return _auth_error("openai", reason, bearer_token(request), str(request.url.path), request)
@@ -287,45 +287,87 @@ async def embeddings(request: Request):
     request_id = new_request_id()
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            return error_response("openai", 400, "请求体必须是 JSON 对象", "invalid_json")
     except Exception:
         return error_response("openai", 400, "请求体不是合法 JSON", "invalid_json")
-    model = str(body.get("model") or "")
+    model = str(body.get("model") or "").strip()
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
         return gate
+    ip = request.client.host if request.client else ""
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform="", model=model, in_format="openai", status="error", http_status=404,
+                error=f"没有找到模型 {model!r} 对应的上游平台（embeddings 本地校验未通过）",
+                client_ip=ip, user_id=user.get("id"), client=user.get("email") or "",
+                dkey_id=user.get("_key_id"))
         return error_response("openai", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")
     upstream, up_model = resolved
     if upstream.type != "openai":
-        return error_response("openai", 400, "embeddings 只支持 OpenAI 兼容上游", "unsupported")
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model, in_format="openai", status="error",
+                http_status=400,
+                error="embeddings 端点仅支持 OpenAI 兼容上游（本地校验未通过）",
+                client_ip=ip, user_id=user.get("id"), client=user.get("email") or "",
+                dkey_id=user.get("_key_id"))
+        return error_response("openai", 400, "embeddings 端点仅支持 OpenAI 兼容上游", "unsupported")
+    g = _kind_guard(upstream, up_model, "embedding", "openai")
+    if g is not None:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model, in_format="openai", status="error",
+                http_status=400,
+                error="模型类型与所请求端点不符（model_kind 校验未通过，见响应中的指引）",
+                client_ip=ip, user_id=user.get("id"), client=user.get("email") or "",
+                dkey_id=user.get("_key_id"))
+        return g
+    if "input" not in body:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform=upstream.platform, model=up_model, in_format="openai", status="error",
+                http_status=400,
+                error="embeddings 请求体缺少 input 字段（本地校验未通过）",
+                client_ip=ip, user_id=user.get("id"), client=user.get("email") or "",
+                dkey_id=user.get("_key_id"))
+        return error_response("openai", 400, "input is required", "invalid_request_error")
     try:
         return await gw.passthrough_json(
-            path_suffix="/embeddings", body=body, upstream=upstream,
-            client_model=up_model, request_id=request_id, started_at=started_at,
+            url=upstream.url_for("embeddings"),
+            body=body, upstream=upstream, up_model=up_model, client_model=model or None,
+            request_id=request_id, started_at=started_at,
             user_id=user["id"], client=user.get("email") or "", dkey_id=user.get("_key_id"),
+            client_ip=ip,
         )
-    except Exception as exc:  # noqa: BLE001
-        return error_response("openai", 502, f"上游调用失败: {exc}", "upstream_error")
+    except UpstreamError as exc:
+        status = exc.status if exc.status < 500 else 502
+        return error_response("openai", status,
+                              f"上游调用失败: {exc.message()}", "upstream_error")
 
 
-# ---------------------------------------------------------------- 生成类端点透传（v2.0.0）
-# 图像/视频/语音：客户端 OpenAI 风格路径 → 上游对应端点（平台 extra 可覆盖路径）。
+# ---------------------------------------------------------------- 生成类端点透传（v2.0.0）/ embeddings（v2.0.2）
+# 图像/视频/语音/embedding：客户端 OpenAI 风格路径 → 上游对应端点（平台 extra 可覆盖路径）。
 # - images/videos/audio_speech：JSON body（model 改写为上游名，走多 key 轮换）
 # - audio_transcriptions：multipart 原样透传（model 从 form 提取做路由，别名字节级替换）
+# - embeddings（v2.0.2）：JSON 透传（/embeddings → 上游 /embeddings，extra.embeddings_path 可覆盖）；
+#   同走多 key 轮换，本地校验 4xx / 上游错误记请求日志
 # 产物/字节数抓进请求日志 output_info；上游 4xx/5xx 记 error 行后透传错误给客户端。
 #
-# 模型类型（extra.model_kind：模型名 -> image|video|audio_tts|audio_trans）：
-# - 生成类端点：模型标了别的类型 → 400 提示正确端点（严格模式，配置即事实来源）；
-# - 聊天端点：生成类模型误入 chat → 400 提示改用扁平路径（不再让上游回费解的 4xx）。
+# 模型类型（extra.model_kind：模型名 -> image|video|audio_tts|audio_trans|embedding）：
+# - 生成类/embedding 端点：模型标了别的类型 → 400 提示正确端点（严格模式，配置即事实来源）；
+# - 聊天端点：生成类/embedding 模型误入 chat → 400 提示改用对应端点（不再让上游回费解的 4xx）。
 
 _GEN_KIND_LABEL = {"image": "图像", "video": "视频", "audio_tts": "音频合成(TTS)",
-                   "audio_trans": "音频转写"}
+                   "audio_trans": "音频转写", "embedding": "embedding"}
 _GEN_KIND_ENDPOINT = {"image": "/v1/images", "video": "/v1/videos",
-                      "audio_tts": "/v1/audio（JSON 请求体）", "audio_trans": "/v1/audio（multipart 带 file）"}
+                      "audio_tts": "/v1/audio（JSON 请求体）", "audio_trans": "/v1/audio（multipart 带 file）",
+                      "embedding": "/v1/embeddings"}
 # 请求 kind -> model_kind 值
 _REQ_KIND_MAP = {"images": "image", "videos": "video", "audio_speech": "audio_tts",
-                 "audio_trans": "audio_trans"}
+                 "audio_trans": "audio_trans", "embeddings": "embedding"}
 
 
 def _kind_guard(upstream, up_model: str, req_kind: str, in_fmt: str) -> Any:

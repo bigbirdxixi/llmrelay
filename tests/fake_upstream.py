@@ -111,6 +111,12 @@ async def chat(request: Request):
         return JSONResponse(status_code=400, content={
             "error": {"message": "该模型为视频模型，请使用 /v1/videos 端点生成",
                       "type": "invalid_request_error"}})
+    # embedding 模型：chat 端点 400 + /v1/embeddings 提示（模拟 agnes/OpenAI 行为，
+    # 探测应判「embed 保留」并把 model_kind 自动回填 embedding）
+    if mname.startswith("m-genemb"):
+        return JSONResponse(status_code=400, content={
+            "error": {"message": "embedding model 'm-genemb' 需使用 /v1/embeddings 端点调用",
+                      "type": "invalid_request_error"}})
     if mname.startswith("m-400sse"):
         return JSONResponse(status_code=400, content={
             "error": {"message": "当前模型不支持SSE调用方式", "type": "invalid_request_error"}})
@@ -245,6 +251,27 @@ async def audio_trans(request: Request):
     _record("/v1/audio/transcriptions",
             {"model": model, "file_bytes": nbytes, "language": str(form.get("language") or "")})
     return {"text": "hello from fake transcription", "model": model}
+
+
+# ---------------------------------------------------------------- embeddings（v2.0.2 透传测试）
+@app.post("/v1/embeddings")
+async def embeddings(request: Request):
+    body = await request.json()
+    _record("/v1/embeddings", body)
+    m = str(body.get("model") or "")
+    # 模拟上游「该 embedding 模型已下线/未授权」：chat 端点 4xx 指路也救不回来的 404
+    if m.startswith("m-embgone"):
+        return JSONResponse(status_code=404, content={
+            "error": {"message": "The model 'm-embgone' does not exist",
+                      "type": "invalid_request_error"}})
+    inp = body.get("input")
+    texts = inp if isinstance(inp, list) else [inp]
+    n = max(1, len(texts or [""]))
+    return {"object": "list",
+            "data": [{"object": "embedding", "index": i,
+                      "embedding": [0.1] * 8} for i in range(n)],
+            "model": m,
+            "usage": {"prompt_tokens": 8 * n, "total_tokens": 8 * n}}
 
 
 # ---------------------------------------------------------------- Anthropic

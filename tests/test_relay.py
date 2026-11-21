@@ -4360,3 +4360,50 @@ def test_r145_provider_keys_additive_save(client, hdr):
         assert save([m4, "sk-…ffff"]) == [K4]
     finally:
         client.delete(f"/api/providers/{P}", headers=hdr)
+
+# ---------------------------------------------------------------- R146 embedding 模型：探测识别 + /v1/embeddings 透传（v2.0.2）
+def test_r146_embedding_probe_and_endpoint(client, hdr, upstream_port):
+    """embedding 模型与 image/video/audio 同等支持（R146）：
+    1) 未配类型的模型 chat 探测遇 embedding 特征 4xx（提示 /v1/embeddings）→ 判 embed 保留，
+       自动回填 extra.model_kind=embedding（不依赖有没有 removed）；
+    2) 已标 embedding 类型的模型探测改走 /v1/embeddings 端点，该端点 404（模型下线）→ 正常判 removed；
+    3) 回填后 /v1/embeddings 直接透传可用；embedding 模型误入 chat 端点 → 400 指路。"""
+    r1 = client.post("/api/providers", headers=hdr, json={
+        "platform": "r146emb", "name": "R146 emb(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-genemb", "m-embgone", "fake-gpt"],
+        "extra": {"model_kind": {"m-embgone": "embedding"}}})
+    assert r1.status_code == 200, r1.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        rp = client.post("/api/providers/r146emb/probe", headers=hdr, json={})
+        assert rp.status_code == 200, rp.text
+        j = rp.json()
+        gen = {x["model"]: x for x in j["gen"]}
+        # 1) 未配类型 → chat 探测 → embedding 签名 → embed 保留 + 自动回填
+        assert "m-genemb" in j["kept"], j
+        assert gen.get("m-genemb", {}).get("kind") == "embedding", j["gen"]
+        assert "m-genemb" in j["gen_kind_set"], j
+        # 2) 已标 embedding → /embeddings 探测 → 404 → removed（不误留）
+        assert any(x["model"] == "m-embgone" for x in j["removed"]), j
+        assert "m-embgone" not in j["kept"], j
+        # 普通模型照旧 ok
+        assert "fake-gpt" in j["kept"], j
+        # 回填已持久化
+        p = [x for x in client.get("/api/providers", headers=hdr).json()["data"]
+             if x["platform"] == "r146emb"][0]
+        assert (p.get("extra") or {}).get("model_kind", {}).get("m-genemb") == "embedding", \
+            p.get("extra")
+        # 3) 回填后 /v1/embeddings 直接透传可用
+        re_ = client.post("/v1/embeddings", headers=bh,
+                          json={"model": "m-genemb", "input": "ping"})
+        assert re_.status_code == 200, re_.text
+        d = re_.json()
+        assert d["object"] == "list" and d["data"][0]["embedding"] == [0.1] * 8, d
+        # embedding 模型误入 chat 端点 → 400 指路（model_kind 校验）
+        rc = client.post("/v1/chat/completions", headers=bh, json={
+            "model": "m-genemb", "messages": [{"role": "user", "content": "hi"}]})
+        assert rc.status_code == 400, rc.text
+        assert "/v1/embeddings" in rc.text, rc.text
+    finally:
+        client.delete("/api/providers/r146emb", headers=hdr)

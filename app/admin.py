@@ -539,18 +539,23 @@ async def test_provider(platform: str, request: Request, _: None = Depends(auth)
     else:
         candidates = [model]
 
-    url = up.url_for("chat" if up.type == "openai" else "messages")
+    base_url = up.url_for("chat" if up.type == "openai" else "messages")
+    kind_map = (up.extra or {}).get("model_kind") or {}
     tried: list[str] = []
     last_err = ""
     for cand in candidates:
-        if up.type == "openai":
-            payload: dict[str, Any] = {
+        if up.type == "openai" and kind_map.get(cand) == "embedding":
+            # embedding 模型：chat 端点 ping 必 4xx，直接打 /embeddings 端点
+            url, payload = up.url_for("embeddings"), {"model": cand, "input": "ping"}
+        elif up.type == "openai":
+            url, payload = base_url, {
                 "model": cand, "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 1, "stream": False,
             }
         else:
-            payload = {"model": cand, "max_tokens": 1,
-                       "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
+            url, payload = base_url, {
+                "model": cand, "max_tokens": 1,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
         t0 = time.perf_counter()
         try:
             resp = await gw.send(_reg(request), up, url, payload, stream=False)
@@ -599,10 +604,25 @@ def _looks_gen_model(reason: str) -> bool:
     return any(p.search(reason) for p in GEN_MODEL_RES)
 
 
+# embedding 模型在 chat 端点的错误签名：上游 4xx 提示 /v1/embeddings（或 NVIDIA NIM 单数
+# /embedding）→ 判「embed 保留」（模型没坏、只是 chat relay 转发不了），kind 回填 embedding。
+EMBED_MODEL_RES = [
+    re.compile(r"/embeddings?", re.I),
+    re.compile(r"embedding\s+model|embedding-only", re.I),
+    re.compile(r"embedding 模型|向量模型", re.S),
+]
+
+
+def _looks_embed_model(reason: str) -> bool:
+    return any(p.search(reason) for p in EMBED_MODEL_RES)
+
+
 def _auto_kind_from_reason(reason: str) -> str:
-    """生成类签名里明确指向了哪个端点 → 模型类型（自动回填 extra.model_kind）；
+    """生成类/embedding 签名里明确指向了哪个端点 → 模型类型（自动回填 extra.model_kind）；
     模糊签名（如仅「不支持SSE」）返回 ''，类型留给平台页模型行手动选。"""
     r = (reason or "").lower()
+    if "/embedding" in r or "embeddings" in r:
+        return "embedding"
     if "/v1/images" in r or "images/generations" in r:
         return "image"
     if "/v1/videos" in r:
@@ -624,15 +644,22 @@ async def _client_gone_async(request: Request) -> bool:
         return False
 
 
-async def _probe_model(gw, reg, up, url: str, m: str) -> tuple:
-    """ping 单个模型，返回 (result, code, reason)；result ∈ ok/removed/transient/keyerr/connfail。"""
-    if up.type == "openai":
-        payload: dict[str, Any] = {"model": m,
-                                   "messages": [{"role": "user", "content": "ping"}],
-                                   "max_tokens": 1, "stream": False}
-    else:
-        payload = {"model": m, "max_tokens": 1,
-                  "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
+async def _probe_model(gw, reg, up, url: str, m: str,
+                       payload: dict | None = None) -> tuple:
+    """ping 单个模型，返回 (result, code, reason)；result ∈ ok/removed/transient/keyerr/connfail/gen/embed。
+
+    payload=None 时按协议 ping chat/messages 端点；传专用 payload（如 embedding 的
+    {"model","input"}）时 ping 对应端点。
+    gen = 模型在生成类（图像/视频/音频）专用端点完好、只是 chat 转发不了，调用方保留；
+    embed = 模型是 embedding 类型（chat 端点 4xx 提示 /embeddings），调用方保留并回填 kind。"""
+    if payload is None:
+        if up.type == "openai":
+            payload = {"model": m,
+                      "messages": [{"role": "user", "content": "ping"}],
+                      "max_tokens": 1, "stream": False}
+        else:
+            payload = {"model": m, "max_tokens": 1,
+                      "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}]}
     try:
         resp = await gw.send(reg, up, url, payload, stream=False,
                              timeout=PROBE_PING_TIMEOUT)
@@ -645,9 +672,11 @@ async def _probe_model(gw, reg, up, url: str, m: str) -> tuple:
         if exc.status in (401, 403):
             return "keyerr", exc.status, exc.message()[:160]
         if exc.status in (404, 400):
-            # 生成类模型（图像/视频/音频）在 chat 端点的特征报错 → 判 gen 保留（不是模型坏了）
+            # 生成类（图像/视频/音频）与 embedding 模型在 chat 端点的特征报错 → 判 gen/embed 保留（不是模型坏了）
             if _looks_gen_model(exc.message()):
                 return "gen", exc.status, exc.message()[:160]
+            if _looks_embed_model(exc.message()):
+                return "embed", exc.status, exc.message()[:160]
             return "removed", exc.status, exc.message()[:160]
         return "transient", exc.status, exc.message()[:160]
     except Exception as exc:  # noqa: BLE001
@@ -676,6 +705,8 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
     - 模型级 404/400（NVIDIA NIM「Function not found for account」= 账号未授权这类）→ 移除并写回；
     - 生成类模型（图像/视频/音频，报错带「需使用 /v1/images…」「不支持SSE」这类特征）→ 判 gen 保留
       （chat relay 转发不了但它没坏，不删清单，UI 单独标注）；
+    - embedding 模型（extra.model_kind 标 embedding）直接打 /embeddings 端点探测；chat 端点 4xx
+      报错提示 /v1/embeddings（如 NIM 单数 /embedding）→ 判 embed 保留，类型自动回填 embedding；
     - 429/5xx（重试后仍失败，疑似瞬时故障）→ 保留不误删，transient 里列出；
     - key 级 401/403 → 提前停止（剩下的测了也没意义）、一律保留不动，只报 key_error。
     被移除的模型随时可「拉取模型」恢复（拉的是全量目录）。
@@ -695,7 +726,8 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
     if raw_body:
         with contextlib.suppress(json.JSONDecodeError):
             body = json.loads(raw_body) or {}
-    url = up.url_for("chat" if up.type == "openai" else "messages")
+    base_url = up.url_for("chat" if up.type == "openai" else "messages")
+    kind_map = (up.extra or {}).get("model_kind") or {}
     # 探测任务句柄：显式「停止」（POST /probe/stop）置 cancel 事件；
     # uvicorn 客户端断开不会取消 app task，is_disconnected 只作尽力而为的补充检查
     job = SimpleNamespace(cancel=asyncio.Event())
@@ -712,13 +744,22 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
         try:
           for i, m in enumerate(models):
             yield {"i": i + 1, "total": total, "model": m, "phase": "start"}
-            res, code, reason = await _probe_model(gw, reg, up, url, m)
+            # embedding 类型模型 ping /embeddings 端点（chat ping 必 4xx 会误判 removed）；
+            # 其余按协议 ping chat/messages 端点
+            if up.type == "openai" and kind_map.get(m) == "embedding":
+                res, code, reason = await _probe_model(
+                    gw, reg, up, up.url_for("embeddings"), m,
+                    payload={"model": m, "input": "ping"})
+            else:
+                res, code, reason = await _probe_model(gw, reg, up, base_url, m)
             if res == "keyerr":
                 # 401/403 先分清是 key 坏了还是「这个模型没权限」：
                 # 同一 key 能列出 /models 目录 → key 没问题，单模型未授权 → 按「移除」处理继续探测
                 if await _key_alive(gw, up):
                     if _looks_gen_model(reason):
                         res, reason = "gen", f"{code}: {reason}"
+                    elif _looks_embed_model(reason):
+                        res, reason = "embed", f"{code}: {reason}"
                     else:
                         res, reason = "removed", f"{code}: 无此模型授权（key 可用，该模型未开通）"
             if res == "ok":
@@ -727,10 +768,10 @@ async def probe_provider(platform: str, request: Request, _: None = Depends(auth
             elif res == "removed":
                 removed.append({"model": m, "reason": reason})
                 consec_fail = 0
-            elif res == "gen":
-                # 生成类模型（图像/视频/音频）：chat relay 转发不了，但不是坏了——保留在清单，单独标注；
+            elif res in ("gen", "embed"):
+                # 生成类（图像/视频/音频）或 embedding：chat relay 转发不了，但不是坏了——保留在清单，单独标注；
                 # 签名明确指向端点时自动回填类型（extra.model_kind），探测完即可用扁平路径调用
-                k = _auto_kind_from_reason(reason)
+                k = "embedding" if res == "embed" else _auto_kind_from_reason(reason)
                 item = {"model": m, "reason": reason}
                 if k:
                     item["kind"] = k

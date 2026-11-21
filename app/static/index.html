@@ -1144,7 +1144,7 @@ function editProvider(platform){
   S.editModelMap = Object.assign({}, (p && p.model_map) || {});
   S.editAlias = {};
   for (const [a, t] of Object.entries(S.editModelMap)) if (!S.editAlias[t]) S.editAlias[t] = a;
-  // 模型类型（生成类）：extra.model_kind 模型名 -> image|video|audio_tts|audio_trans（聊天模型无条目）
+  // 模型类型（生成类/embedding）：extra.model_kind 模型名 -> image|video|audio_tts|audio_trans|embedding（聊天模型无条目）
   S.editKind = Object.assign({}, ((p && p.extra) || {}).model_kind || {});
   S.availFetched = false;
   $("#modalBody").innerHTML = `
@@ -1189,7 +1189,7 @@ function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类（图像/视频/音频）后走 /v1/images /v1/videos /v1/audio 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
+    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
@@ -1337,11 +1337,11 @@ function renderModelReasoning(){
     const opts = MR_OPTS.map(([k,l]) => `<option value="${k}" ${pol === k ? "selected" : ""}>${l}</option>`).join("");
     const fopts = OFF_FIELDS.map(([k,l]) => `<option value="${k}" ${fld === k ? "selected" : ""}>${l}</option>`).join("");
     const k = S.editKind[m] || "";
-    const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"]]
+    const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"],["embedding","embedding 模型"]]
       .map(([v,l]) => `<option value="${v}" ${k === v ? "selected" : ""}>${l}</option>`).join("");
     return `<div class="mrow" data-model="${esc(m)}">
       <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
-      <select class="mkd" title="模型类型：选生成类后走 /v1/images /v1/videos /v1/audio 端点转发（聊天端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
+      <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
       <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
       <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
       <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
@@ -1718,7 +1718,7 @@ function renderProbeLine(ev){
   // result 事件：更新对应 pending 行
   const left = ev.total - ev.i;
   stat.textContent = `已测 ${ev.i}/${ev.total} · 剩 ${left} 个待测 · 当前：${ev.model}`;
-  const icons = { ok: "✓ 可用", removed: "✗ 未授权/不可用", transient: "⚠ 瞬时故障(保留)", keyerr: "⛔ key 错误", connfail: "⚠ 连不通上游", gen: "◈ 生成类(保留)" };
+  const icons = { ok: "✓ 可用", removed: "✗ 未授权/不可用", transient: "⚠ 瞬时故障(保留)", keyerr: "⛔ key 错误", connfail: "⚠ 连不通上游", gen: "◈ 生成类(保留)", embed: "◈ embedding(保留)" };
   let row = list.querySelector(`[data-i="${ev.i}"]`);
   if(!row){
     row = document.createElement("div");
@@ -1736,8 +1736,10 @@ function renderProbeLine(ev){
   if(ev.result === "connfail"){
     stat.textContent = `连不通上游（连接超时/代理抖动）——该模型保留不删；连续 3 个连不通会终止整轮`;
   }
-  if(ev.result === "gen"){
-    stat.textContent = `生成类模型（图像/视频/音频）——chat 端点转发不了，保留在清单不删除`;
+  if(ev.result === "gen" || ev.result === "embed"){
+    stat.textContent = ev.result === "embed"
+      ? `embedding 模型——chat 端点转发不了（或探测走 /v1/embeddings 通过），保留在清单不删除`
+      : `生成类模型（图像/视频/音频）——chat 端点转发不了，保留在清单不删除`;
   }
 }
 
@@ -1760,8 +1762,8 @@ function finishProbe(ev){
     parts.push(`<div class="pv-note">⚠ 疑似瞬时故障已保留 ${ev.transient.length} 个：${ev.transient.map(esc).join("、")}</div>`);
   if(ev.gen && ev.gen.length){
     const gk = ev.gen.filter(x=>x.kind);
-    const KLBL = {image:"图像",video:"视频",audio_tts:"音频TTS",audio_trans:"音频转写"};
-    parts.push(`<div class="pv-note">◈ ${ev.gen.length} 个生成类模型（图像/视频/音频，已保留——chat 端点转发不了，需走上游专用端点）：${ev.gen.map(x=>esc(x.model)).join("、")}${gk.length ? `<br>已自动分类 ${gk.length} 个（${gk.map(x=>esc(x.model)+"→"+KLBL[x.kind]).join("、")}），配置后即可用 /v1/images /v1/videos /v1/audio 端点直接调用；其余需到平台编辑页模型行「类型」列手动选。` : "（未识别出端点签名，请到平台编辑页模型行「类型」列手动选）"}</div>`);
+    const KLBL = {image:"图像",video:"视频",audio_tts:"音频TTS",audio_trans:"音频转写",embedding:"embedding"};
+    parts.push(`<div class="pv-note">◈ ${ev.gen.length} 个生成类/embedding 模型（图像/视频/音频/embedding，已保留——chat 端点转发不了，需走上游专用端点）：${ev.gen.map(x=>esc(x.model)).join("、")}${gk.length ? `<br>已自动分类 ${gk.length} 个（${gk.map(x=>esc(x.model)+"→"+KLBL[x.kind]).join("、")}），配置后即可用 /v1/images /v1/videos /v1/audio /v1/embeddings 端点直接调用；其余需到平台编辑页模型行「类型」列手动选。` : "（未识别出端点签名，请到平台编辑页模型行「类型」列手动选）"}</div>`);
   }
   if(!parts.length && !ev.cancelled && !ev.connect_fail && !ev.key_error)
     parts.push(`<div class="pv-note ok">全部 ${ev.kept.length} 个模型可用 ✓</div>`);
@@ -1769,7 +1771,7 @@ function finishProbe(ev){
     parts.unshift(`<div class="pv-note">提前停止，跳过了 ${ev.skipped} 个未测模型。</div>`);
   stat.textContent = ev.cancelled ? "已取消" : (ev.connect_fail ? "连接失败，已停止" :
     `完成：可用 ${ev.kept.length} 个 · 移除 ${(ev.removed||[]).length} 个`
-    + (ev.gen && ev.gen.length ? ` · 生成类 ${ev.gen.length} 个（保留）` : ""));
+    + (ev.gen && ev.gen.length ? ` · 生成类/embedding ${ev.gen.length} 个（保留）` : ""));
   d.innerHTML = parts.join("");
   $("#probeCancel").style.display = "none";
 }

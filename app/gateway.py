@@ -765,15 +765,29 @@ class Gateway:
         })
 
     # ---------------- 其它透传（embeddings 等） ----------------
-    async def passthrough_json(self, *, path_suffix: str, body: dict, upstream: Upstream,
-                               client_model: str, request_id: str, started_at: float,
+    async def passthrough_json(self, *, url: str, body: dict, upstream: Upstream,
+                               up_model: str, client_model: str | None = None,
+                               request_id: str, started_at: float,
                                user_id: int | None = None, client: str = "",
-                               dkey_id: int | None = None) -> Any:
-        url = upstream.base_url + path_suffix
+                               dkey_id: int | None = None, client_ip: str = "") -> Any:
+        """embeddings 透传（v2.0.2）：model 字段改写为上游模型名，走 send 多 key 轮换。
+        成功记 token usage；失败记一条 error（含上游原始错误信息）再抛出，
+        由入口转 上游4xx / 5xx→502（与 generate 类端点一致）。"""
+        reg = self.tenants.get(user_id) if user_id is not None else None
         payload = dict(body)
-        payload["model"] = client_model
-        resp = await self.send(self.tenants.get(user_id) if user_id is not None else None,
-                               upstream, url, payload, stream=False)
+        payload["model"] = up_model
+        alias = client_model or up_model
+        try:
+            resp = await self.send(reg, upstream, url, payload, stream=False)
+        except UpstreamError as exc:
+            self.record(request_id=request_id, platform=upstream.platform,
+                        model=up_model, model_alias=alias, in_format="openai",
+                        stream=False, status="error", http_status=exc.status,
+                        error=exc.message()[:800],
+                        latency_ms=int((time.perf_counter() - started_at) * 1000),
+                        client_ip=client_ip, user_id=user_id, client=client or "master",
+                        dkey_id=dkey_id)
+            raise
         try:
             data = resp.json()
         finally:
@@ -782,14 +796,19 @@ class Gateway:
         usage = T.usage_from_openai((data or {}).get("usage") if isinstance(data, dict) else None)
         self.record(
             resp=resp,
-            request_id=request_id, platform=upstream.platform, model=client_model,
-            model_alias=client_model, in_format="openai", stream=False, status="ok",
-            http_status=200, latency_ms=int((time.perf_counter() - started_at) * 1000),
+            request_id=request_id, platform=upstream.platform, model=up_model,
+            model_alias=alias, in_format="openai", stream=False, status="ok",
+            http_status=resp.status_code,
+            latency_ms=int((time.perf_counter() - started_at) * 1000),
             prompt_tokens=usage.prompt_tokens, completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens, estimated=usage.total_tokens == 0,
-            user_id=user_id, client=client or "master", dkey_id=dkey_id,
+            total_tokens=usage.total_tokens,
+            client_ip=client_ip, user_id=user_id, client=client or "master", dkey_id=dkey_id,
         )
-        return JSONResponse(content=data, headers={"x-request-id": request_id})
+        return JSONResponse(content=data, headers={
+            "x-request-id": request_id,
+            "x-relay-platform": upstream.platform,
+            "x-relay-model": up_model,
+        })
 
     # ---------------- 生成类端点透传（images / videos / audio，v2.0.0） ----------------
     # JSON 类（images/videos/audio_speech）走 send（多 key 轮换 + 健康度）；
