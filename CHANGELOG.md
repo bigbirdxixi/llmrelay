@@ -4,6 +4,10 @@
 
 ## [2.0.3] - 2026-11-21
 
+### 改动：设置页「客户端接入示例」补齐 Images / Videos / Embeddings（生产反馈）
+- 接入示例此前只有聊天（OpenAI SDK curl + Anthropic 协议 + Claude Code）；现新增「Images / Videos / Embeddings（OpenAI 兼容透传）」一节：图片生成（POST /v1/images/generations）、视频异步任务（POST /v1/videos 创建 + GET /v1/videos 查状态，task_id 等参数随上游协议原样透传）、embedding 向量（POST /v1/embeddings）的 curl 示例，Base URL 自动插值；「运行信息」表同步加 Images / Videos / Embeddings 端点行
+- 纯前端内容（单文件 index.html），无接口变化；门禁 = 内联 JS `node --check` + 隔离实例浏览器实测（续行反斜杠 / 换行 / URL 插值 / 既有三节完好），全量 138 通过
+
 ### 修复：命令行 curl 请求体带中文报 400「请求体不是合法 JSON」（生产反馈）
 - 根因：中文 Windows 命令行（cmd/PowerShell/git-bash 转发原生 curl）把非 ASCII 参数按 GBK/GB18030 编码发出，而 JSON 只收 UTF-8 → 含中文的请求体本地解析必败；此前只有生成类端点有 GBK 抢救（v2.0.0 R137），`/v1/chat/completions`、`/v1/embeddings`、`/v1/messages` 三个主端点都缺 → 用户 curl 调 `/v1/embeddings` 带中文直接 400
 - 现语义：抽出共用 helper `_json_object_lenient`——UTF-8 首解失败按 gb18030 抢救一次（ASCII 结构字符不变，只有中文被修回正确字节），四个入口（chat / embeddings / messages / 生成类）统一；救回即正常转发，上游收到原样中文；救不回仍 400 invalid_json 且文案带 GBK 排查提示；embeddings 本地 4xx 按 R146 体例落请求日志 error 行
