@@ -211,7 +211,10 @@ ollama（`ollama.com/v1`）实测接受 `reasoning_effort:"none"`，正常返回
 - **Anthropic 要求 `max_tokens` 必填**、消息必须 user/assistant 交替 —— 转换时补默认值并合并同角色消息。
 - **httpx 流式响应必须 `aclose()`**：在生成器的 `finally` 里收尾，客户端断开也不漏连接。
 - **只有在上游还没开始回内容前才能重试**：一旦有字节发给客户端，换 key 重试会造成重复输出。
-- **生成类端点透传（v2.0.0）**：`/v1/images` / `/v1/videos` / `/v1/audio`（TTS 走 JSON 体、转写走 multipart）
-  按端点原样透传（只换 model 别名路由）；「拉模型」签名可识别时自动回填 `extra.model_kind`，
-  对话端点 ↔ 生成端点双向 kind-guard（400 带换端点指引）；生成产物写 `output_info`（base64 截断 / 视频 URL），
+- **生成类端点透传（v2.0.0；embedding 支持 v2.0.2）**：`/v1/images` / `/v1/videos` / `/v1/audio`（TTS 走 JSON 体、转写走 multipart）/ `/v1/embeddings`
+  按端点原样透传（只换 model 别名路由）；「拉模型」签名可识别时自动回填 `extra.model_kind`
+  （embedding 模型：chat 端点遇 embedding 特征 4xx 判 embed 保留并回填；已标 embedding 的模型探测改 ping `/v1/embeddings`，
+  该端点 404 才判 removed），
+  对话端点 ↔ 生成/embedding 端点双向 kind-guard（400 带换端点指引）；上游路径可用 `embeddings_path` 等 extra 覆盖
+  （如 NVIDIA NIM 单数 `/embedding`）；生成产物写 `output_info`（base64 截断 / 视频 URL），
   本地 4xx（模型不存在 / 类型不符 / 参数缺失）与 GBK 兜底解码同样落日志。

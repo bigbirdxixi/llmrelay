@@ -34,7 +34,7 @@ flowchart TB
 
   c1 -- OpenAI 协议 /v1/chat/completions --> auth
   c2 -- Anthropic 协议 /v1/messages --> auth
-  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio（绕过翻译/思考管线）" --> auth
+  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio · /v1/embeddings（绕过翻译/思考管线）" --> auth
   keys -- 转发（流式 / 非流式） --> Up
   Up -- 真实 usage --> store
   store --> web
@@ -66,7 +66,7 @@ app/
 ```
 下游客户端（OpenAI 或 Anthropic 协议）
    │  POST /v1/chat/completions 或 /v1/messages（可带 stream / tools / 思考字段）
-   │  生成类透传：/v1/images、/v1/videos（含 GET 状态查询）、/v1/audio/speech、/v1/audio/transcriptions
+   │  生成类透传：/v1/images、/v1/videos（含 GET 状态查询）、/v1/audio/speech、/v1/audio/transcriptions、/v1/embeddings
    │  （OpenAI 深路径 /v1/images/generations 为别名；/v1/audio 扁平端点按 content-type 分流：JSON=TTS / multipart=转写）
    │  （model_kind 把关：模型类型与端点不符 400）
    │  Authorization: Bearer ***

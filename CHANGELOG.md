@@ -4,6 +4,12 @@
 
 ## [2.0.2] - 2026-11-21
 
+### 功能：embedding 模型支持（探测识别 + /v1/embeddings 端点强化）
+- `/v1/embeddings` 端点强化（v1.0.0 起已有透传）：本地校验 4xx / 上游错误从此也记请求日志（x-request-id 可关联，与 chat 等端点一致）；上游路径可用平台 `extra.embeddings_path` 覆盖（如 NVIDIA NIM 的单数 `/embedding`）；成功记 token usage
+- 模型类型配置：`extra.model_kind` 新增 `embedding` 值（UI 模型行「类型」下拉框加 embedding 选项，与 image/video/audio 同等可配）；embedding 模型误入 chat 端点 → 400 指路 `/v1/embeddings`，类型与端点不匹配（如 embedding 模型调 `/v1/images`）→ 400 指路正确端点
+- 探测：已标 embedding 类型的模型改 ping `/v1/embeddings` 端点（chat ping 必 4xx 会误判 removed）；未标类型模型在 chat 端点遇 embedding 特征报错（4xx 提示 `/v1/embeddings`，或 NVIDIA NIM 单数 `/embedding`）→ 判「embed 保留」不删除，`model_kind` 自动回填 `embedding`（不依赖有没有 removed），探测完即可用透传端点直接调用
+- 回归测试 R146（chat 探测识别回填 / embedding 端点探测 404 判 removed / 回填后 `/v1/embeddings` 透传 / 误入 chat 端点 400 指路），全量 133 通过
+
 ### 修复：上游平台新增 key 时旧 key 全部丢失（生产反馈）
 - 根因：编辑平台时已存 key 在输入框里显示为掩码，保存时前端把「掩码行 + 新增明文行」的混合提交原样发回 `POST /api/providers`；旧后端逻辑把「含明文的提交」当整体替换（只留明文行）→ 用户换行加一个新 key，其余旧 key 全没了
 - 现语义：掩码行按指纹（`_mask` 前6+…+末4）还原成已存明文再合并——新增行只影响新增，删某行只移除对应 key，key 框清空则保留现有 key（掩码框里删不掉自己看不到的明文，防误清空）；主动删掉全部掩码行才等于整体替换，重复行去重；匹配不到已存 key 的伪掩码行丢弃、绝不把掩码串存成 key

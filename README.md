@@ -41,7 +41,7 @@ LLM Relay 这些事情本地化：
 | 8 | **部署灵活** | 裸跑 / Nginx / Caddy / Cloudflare Tunnel / 子目录部署 / 网关自跑 HTTPS，真实 IP 还原入库 |
 | 9 | **下游 key 名称 + 过期** | 客户端 key 可设名称与过期时间（默认永久；v1.2.1 起原「备注」列改名「名称」）；日志/用量/概览按名称统计，过期 key 访问即 401（报错带实际过期时间）；吊销/禁用 key 同样 401，过期与禁用事件都会写进请求日志（带下游 key 归属） |
 |10 | **只转发对话不截消息**| 只记录请求状态与失败报错，不截留任何租户信息用以模型训练 |
-|11 | **生成类端点透传** | 图像 / 视频 / 音频 TTS / 转写（OpenAI 兼容上游）一次透传：「拉模型」签名可识别时自动回填 `model_kind`；对话端点调生成模型 400 带指引、生成端点调普通模型同样 400，防误用 |
+|11 | **生成类端点透传** | 图像 / 视频 / 音频 TTS / 转写 / embedding（OpenAI 兼容上游）一次透传：「拉模型」签名可识别时自动回填 `model_kind`；对话端点调生成/embedding 模型 400 带指引、生成端点调普通模型同样 400，防误用 |
 
 ## 架构一览
 
@@ -73,7 +73,7 @@ flowchart TB
 
   c1 -- OpenAI 协议 /v1/chat/completions --> auth
   c2 -- Anthropic 协议 /v1/messages --> auth
-  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio（绕过翻译/思考管线）" --> auth
+  c1 -- "生成类透传 /v1/images · /v1/videos · /v1/audio · /v1/embeddings（绕过翻译/思考管线）" --> auth
   keys -- 转发（流式 / 非流式） --> Up
   Up -- 真实 usage --> store
   store --> web
@@ -147,7 +147,7 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
 | --- | --- | --- |
 | POST | `/v1/chat/completions` | OpenAI 协议对话，流式 / 非流式 |
 | POST | `/v1/completions` | 旧版补全（透传） |
-| POST | `/v1/embeddings` | OpenAI 兼容上游透传 |
+| POST | `/v1/embeddings` | OpenAI 兼容上游透传；v2.0.2 起类型不匹配的模型 400 带指引、上游路径可用 `extra.embeddings_path` 覆盖（如 NVIDIA NIM 单数 `/embedding`），本地校验 4xx / 上游错误也记日志 |
 | POST | `/v1/images` | 图像生成透传（OpenAI 兼容上游）；别名 `/v1/images/generations` |
 | POST | `/v1/videos` | 视频生成透传（任务型）；`GET /v1/videos?model=…` 查任务状态（高频轮询，上游成败不落日志、本地校验 4xx 照记；查询 URL 可给 `extra.videos_status_path` 完整地址） |
 | POST | `/v1/audio` | 音频 TTS（JSON 体）/ 转写（multipart 表单）按请求形态自动分流；别名 `/v1/audio/speech` / `/v1/audio/transcriptions` |
@@ -158,8 +158,8 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
 
 鉴权：`Authorization: Bearer *** 或 `x-api-key: ***
 
-> **生成类模型怎么用**（图像 / 视频 / TTS / 转写，目前仅 OpenAI 兼容上游）：「拉模型」时响应签名可识别的
-> 生成类模型会自动把类型回填进平台配置的 `extra.model_kind`——
+> **生成类模型怎么用**（图像 / 视频 / TTS / 转写 / embedding，目前仅 OpenAI 兼容上游）：「拉模型」时响应签名可识别的
+> 生成类/embedding 模型会自动把类型回填进平台配置的 `extra.model_kind`——
 > 对话端点 `/v1/chat/completions` / `/v1/messages` 调生成模型返回 **400**（报错里写明该走哪个端点），
 > 生成端点调普通模型同样 400，双向防误用。上游签名有差异用 `extra` 覆盖
 > （如 Agnes 的视频状态查询走自定义 `videos_status_path`）。
@@ -215,9 +215,9 @@ ANTHROPIC_AUTH_TOKEN=«redacted:sk-…»
   > 方便临时试新模型；但也意味着打错字会变成上游 404，而不是网关的 404。
 
 - `extra` 高级项：`chat_path` / `messages_path` / `models_path` / `count_tokens_path` 覆盖默认路径、
-  `images_path` / `videos_path` / `audio_speech_path` / `audio_trans_path` 覆盖四个生成类端点路径、
+  `images_path` / `videos_path` / `audio_speech_path` / `audio_trans_path` / `embeddings_path` 覆盖五个生成类端点路径、
   `videos_status_path` 指定视频任务状态查询的完整 URL（上游签名不一致时覆盖）、
-  `model_kind` 模型类型表 `{模型名: image|video|audio_tts|audio_trans}`（「拉模型」签名可识别时自动回填，也可手写补）、
+  `model_kind` 模型类型表 `{模型名: image|video|audio_tts|audio_trans|embedding}`（「拉模型」签名可识别时自动回填，也可手写补）、
   `headers` 额外请求头、`anthropic_version` / `anthropic_beta` Anthropic 版本头、
   `default_max_tokens`（OpenAI→Anthropic 转换时补的必填项）、
   `inject_stream_usage`（流式时主动向上游要 usage，默认 true）
