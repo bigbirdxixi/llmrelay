@@ -201,6 +201,33 @@ def _model_binding_gate(user: dict | None, request: Request, in_fmt: str, model:
         "model_not_bound")
 
 
+def _json_object_lenient(raw: bytes) -> dict | None:
+    """请求体字节 → JSON 对象（v2.0.3 R151）：UTF-8 解析失败时按 gb18030 抢救一次。
+
+    中文 Windows 命令行（cmd/PowerShell/git-bash 转发原生 curl）把非 ASCII 参数按
+    GBK/GB18030 编码发出（如 -d 的中文请求体），而 JSON 规范只收 UTF-8 → 含中文的
+    请求体首解必败；gb18030 下 ASCII 结构字符不变，只有中文会被修回正确字节。
+    空 body → {}（与既往 chat 语义一致）；仍解析不了或不是对象 → None（调用方回 400）。
+    生成类端点此前内联了同样逻辑（v2.0.0 R137），R151 起抽成共用 helper，
+    /v1/chat/completions、/v1/embeddings、/v1/messages 与生成类端点统一抢救。"""
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+        if isinstance(body, dict):
+            return body
+        return None
+    except Exception:
+        pass
+    try:
+        cand = json.loads(raw.decode("gb18030").encode("utf-8"))
+        if isinstance(cand, dict):
+            return cand
+    except Exception:
+        pass
+    return None
+
+
 async def _handle(request: Request, in_fmt: str, kind: str):
     """kind: chat -> /v1/chat/completions ；messages -> /v1/messages。"""
     user, reason = authenticate(request)
@@ -211,13 +238,11 @@ async def _handle(request: Request, in_fmt: str, kind: str):
     started_at = time.perf_counter()
     request_id = new_request_id()
     raw = await request.body()
-    try:
-        import json as _json
-        body = _json.loads(raw) if raw else {}
-    except Exception:
-        return error_response(in_fmt, 400, "请求体不是合法 JSON", "invalid_json")
-    if not isinstance(body, dict):
-        return error_response(in_fmt, 400, "请求体必须是 JSON 对象", "invalid_json")
+    body = _json_object_lenient(raw)
+    if body is None:
+        return error_response(in_fmt, 400, "请求体不是合法 JSON（若命令行含中文，"
+                                            "可能是 GBK 编码所致：确认终端 UTF-8，或改用 SDK/文件传参）",
+                             "invalid_json")
 
     model = str(body.get("model") or "").strip()
     force = (request.headers.get("x-upstream-platform") or "").strip() or None
@@ -285,12 +310,19 @@ async def embeddings(request: Request):
     reg = tenants.get(user["id"])
     started_at = time.perf_counter()
     request_id = new_request_id()
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            return error_response("openai", 400, "请求体必须是 JSON 对象", "invalid_json")
-    except Exception:
-        return error_response("openai", 400, "请求体不是合法 JSON", "invalid_json")
+    body = _json_object_lenient(await request.body())
+    if body is None:
+        with contextlib.suppress(Exception):
+            request.app.state.store.record(
+                platform="", model="", in_format="openai", status="error", http_status=400,
+                error="请求体不是合法 JSON（含 GBK 抢救失败）：检查 JSON 格式与 UTF-8 编码"
+                      "（中文 Windows 命令行跑 curl 时中文可能被 GBK 编码，改用 UTF-8 客户端或 SDK）",
+                client_ip=(request.client.host if request.client else ""),
+                user_id=(user or {}).get("id"), client=(user or {}).get("email") or "",
+                dkey_id=(user or {}).get("_key_id"))
+        return error_response("openai", 400, "请求体不是合法 JSON（若命令行含中文，"
+                                            "可能是 GBK 编码所致：确认终端 UTF-8，或改用 SDK/文件传参）",
+                             "invalid_json")
     model = str(body.get("model") or "").strip()
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
@@ -405,23 +437,8 @@ async def _generate_endpoint(request: Request, kind: str):
             return error_response("openai", 400, "multipart 表单缺少 model 字段", "invalid_request")
         body = None
     else:
-        body = None
-        try:
-            body = json.loads(raw or b"{}")
-            if not isinstance(body, dict):
-                body = None
-        except Exception:
-            body = None
-        if body is None and raw:
-            # 中文 Windows 命令行（cmd/PowerShell/MSYS 转发原生 curl）会把非 ASCII 参数
-            # 按 GBK/GB18030 编码发出，而 JSON 规范只收 UTF-8 → 抢救一次：
-            # gb18030 下 ASCII 结构字符不变，只有中文会被修回正确字节
-            try:
-                cand = json.loads(raw.decode("gb18030").encode("utf-8"))
-                if isinstance(cand, dict):
-                    body = cand
-            except Exception:
-                body = None
+        # R151：抢救逻辑收敛到共用 helper（UTF-8 首解失败按 gb18030 救一次，体例同 R137）
+        body = _json_object_lenient(raw)
         if body is None:
             with contextlib.suppress(Exception):
                 request.app.state.store.record(
@@ -608,10 +625,11 @@ async def count_tokens(request: Request):
     if reason:
         return _auth_error("anthropic", reason, bearer_token(request), str(request.url.path), request)
     reg = tenants.get(user["id"])
-    try:
-        body = await request.json()
-    except Exception:
-        return error_response("anthropic", 400, "请求体不是合法 JSON", "invalid_json")
+    body = _json_object_lenient(await request.body())
+    if body is None:
+        return error_response("anthropic", 400, "请求体不是合法 JSON（若命令行含中文，"
+                                                "可能是 GBK 编码所致：确认终端 UTF-8，或改用 SDK/文件传参）",
+                             "invalid_json")
     model = str(body.get("model") or "")
     gate = _model_binding_gate(user, request, "anthropic", model)
     if gate is not None:

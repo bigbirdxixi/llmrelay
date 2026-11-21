@@ -4619,3 +4619,70 @@ def test_r150_set_models_prunes_stale_model_kind(client, hdr, upstream_port):
             client.delete(f"/api/providers/{P2}", headers=hdr)
     finally:
         client.delete(f"/api/providers/{P}", headers=hdr)
+
+
+# ---------------------------------------------------------------- R151 请求体 GBK 编码中文抢救（v2.0.3）
+def test_r151_gbk_chinese_body_rescue(client, hdr, upstream_port):
+    """中文 Windows 命令行（cmd/PowerShell/git-bash 转发原生 curl）把非 ASCII 参数按
+    GBK/GB18030 发出，而 JSON 只收 UTF-8 → 含中文的请求体 400 invalid_json（用户生产实测：
+    curl 调 /v1/embeddings 带中文报「请求体不是合法 JSON」；v2.0.0 R137 起仅生成类端点有
+    抢救，/v1/chat/completions、/v1/embeddings、/v1/messages 均缺）。现由共用 helper
+    _json_object_lenient 统一：UTF-8 首解失败按 gb18030 救一次（ASCII 结构字符不变、
+    中文修回正确字节）→ 正常转发且上游（fake）收到原样中文；救不回仍 400 invalid_json
+    且文案带 GBK 排查提示；embeddings 本地 4xx 按 R146 体例落请求日志 error 行。"""
+    import json as _json
+    from tests import fake_upstream
+    def gbk(payload: dict) -> bytes:
+        return _json.dumps(payload, ensure_ascii=False).encode("gb18030")
+
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}",
+          "content-type": "application/json"}
+    # 1) /v1/chat/completions（_handle 补洞）：GBK 中文 body → 200，上游中文原样
+    fake_upstream.RECEIVED.clear()
+    r1 = client.post("/v1/chat/completions", headers=bh,
+                     content=gbk({"model": "fake/fake-gpt", "messages": [
+                         {"role": "user", "content": "你好啊！"}], "max_tokens": 1}))
+    assert r1.status_code == 200, r1.text
+    sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+    assert sent["messages"][0]["content"] == "你好啊！", sent
+
+    # 2) /v1/embeddings（用户场景）：GBK 中文 input → 200，上游 input 原样
+    rp = client.post("/api/providers", headers=hdr, json={
+        "platform": "r151emb", "name": "R151 emb(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["fake-gemini-embedding-2"],
+        "extra": {"model_kind": {"fake-gemini-embedding-2": "embedding"}}})
+    assert rp.status_code == 200, rp.text
+    try:
+        fake_upstream.RECEIVED.clear()
+        r2 = client.post("/v1/embeddings", headers=bh,
+                         content=gbk({"model": "r151emb/fake-gemini-embedding-2",
+                                      "input": "你好啊！"}))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["data"][0]["embedding"] == [0.1] * 8, r2.text
+        sent2 = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/embeddings"][-1]["body"]
+        assert sent2["input"] == "你好啊！", sent2
+
+        # 3) 救不回（UTF-8/GB18030 皆非合法 JSON）→ 三端点均 400 + 文案带 GBK 提示
+        bad = b"\x00\x01\x02not json"
+        for path in ("/v1/chat/completions", "/v1/embeddings"):
+            rn = client.post(path, headers=bh, content=bad)
+            assert rn.status_code == 400, (path, rn.text)
+            assert "invalid_json" in rn.text and "GBK" in rn.text, (path, rn.text)
+        # anthropic 形 error body 无 code 字段（体例同 R141），只断言文案
+        rn3 = client.post("/v1/messages", headers=bh, content=bad)
+        assert rn3.status_code == 400, rn3.text
+        assert "不是合法 JSON" in rn3.text and "GBK" in rn3.text, rn3.text
+        # embeddings 本地 4xx 落 error 日志行（R146 体例）
+        erow = [x for x in client.app.state.store.recent(5)
+                if x.get("status") == "error" and x.get("http_status") == 400
+                and "不是合法 JSON" in (x.get("error") or "")]
+        assert erow, "embeddings 非法 JSON 应落 error 日志行"
+    finally:
+        client.delete("/api/providers/r151emb", headers=hdr)
+
+    # 4) helper 单元面：空 body → {}；非对象 JSON → None；GBK 字节 → 修回 dict
+    from app.main import _json_object_lenient
+    assert _json_object_lenient(b"") == {}
+    assert _json_object_lenient(b"[1, 2]") is None
+    assert _json_object_lenient(gbk({"a": "中"})) == {"a": "中"}

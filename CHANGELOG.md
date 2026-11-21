@@ -4,6 +4,11 @@
 
 ## [2.0.3] - 2026-11-21
 
+### 修复：命令行 curl 请求体带中文报 400「请求体不是合法 JSON」（生产反馈）
+- 根因：中文 Windows 命令行（cmd/PowerShell/git-bash 转发原生 curl）把非 ASCII 参数按 GBK/GB18030 编码发出，而 JSON 只收 UTF-8 → 含中文的请求体本地解析必败；此前只有生成类端点有 GBK 抢救（v2.0.0 R137），`/v1/chat/completions`、`/v1/embeddings`、`/v1/messages` 三个主端点都缺 → 用户 curl 调 `/v1/embeddings` 带中文直接 400
+- 现语义：抽出共用 helper `_json_object_lenient`——UTF-8 首解失败按 gb18030 抢救一次（ASCII 结构字符不变，只有中文被修回正确字节），四个入口（chat / embeddings / messages / 生成类）统一；救回即正常转发，上游收到原样中文；救不回仍 400 invalid_json 且文案带 GBK 排查提示；embeddings 本地 4xx 按 R146 体例落请求日志 error 行
+- 回归测试 R151（chat / embeddings GBK 中文体端到端转发 + 上游收到原样中文 / 三端点救不回 400 带提示 / embeddings 4xx 落日志 / helper 单元面），全量 138 通过
+
 ### 修复：探测自动删除模型后，extra.model_kind 陈旧条目同步清理（生产反馈）
 - 根因：探测删模型 / 「重新拉取」替换模型清单只走 `Registry.set_models`（改写清单 + 清聚合陈旧条目，v2.0.1），不会碰 `extra.model_kind`——模型被自动删除后其「类型」回填条目（如 google 平台 `"gemini-embedding-1": "embedding"`）仍留在高级 JSON 里
 - 现语义：`set_models` 收窄清单时同步清掉已删模型的 model_kind 条目（剩余模型的条目保留；无陈旧条目不落盘）——探测删模型与 refresh 拉取两条路径同一收口；UI 手动保存本由前端重建 model_kind，行为不变；model_map 别名不受影响（R144 口径）
