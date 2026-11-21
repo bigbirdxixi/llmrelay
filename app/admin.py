@@ -406,12 +406,29 @@ async def upsert_provider(request: Request, _: None = Depends(auth)):
     if isinstance(keys, str):
         keys = [k.strip() for k in keys.replace("\r", "").split("\n")]
     if isinstance(keys, list):
-        keys = [k for k in keys if k and k.strip()]
-        real = [k for k in keys if not _is_mask(k)]
-        if not real and existing is not None:
-            keys = existing.api_keys  # 前端提交的是掩码，沿用旧 key
+        old = list(existing.api_keys) if existing else []
+        submitted = [k.strip() for k in keys if isinstance(k, str) and k.strip()]
+        if not submitted:
+            # 掩码框被清空：删不掉「自己看不到的明文」，保持现有 key，避免误清空
+            keys = old
         else:
-            keys = real
+            # 掩码行是前端把已保存 key 的掩码原样发回：按指纹匹配还原成明文，
+            # 新增/删行/换行都只影响对应那一条——混合提交不再整体替换丢旧 key（v2.0.2 修复）
+            merged, consumed = [], set()
+            for k in submitted:
+                if _is_mask(k):
+                    i = next((j for j, o in enumerate(old)
+                              if j not in consumed and _mask(o) == k), None)
+                    if i is not None:
+                        merged.append(old[i]); consumed.add(i)
+                    # 匹配不到任何已存 key 的掩码（key 已被外部改动）→ 丢弃，绝不把掩码串当 key 存
+                else:
+                    merged.append(k)
+            keys, seen = [], set()
+            for k in merged:
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
     elif existing is not None:
         keys = existing.api_keys
     else:

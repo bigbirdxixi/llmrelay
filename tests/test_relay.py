@@ -4300,3 +4300,63 @@ def test_r144_aggregate_prune_stale_entries(client, hdr, upstream_port):
         client.delete(f"/api/providers/{P}", headers=hdr)
         for n in ("A144", "B144", "C144", "D144"):
             client.delete(f"/api/aggregates/{n}", headers=hdr)
+
+
+# ---------------------------------------------------------------- R145 平台新增 key：掩码+新明文混合提交不得丢旧 key（v2.0.2）
+def test_r145_provider_keys_additive_save(client, hdr):
+    """平台 API Key 增量保存（R145）：编辑平台时已存 key 以掩码显示，用户在掩码行后
+    换行加新 key 保存，旧逻辑把「含明文的提交」当整体替换 → 全部旧 key 丢失。现语义：
+    1) 加新 key（掩码行原样 + 新明文行）→ 旧 key 按掩码指纹保留，新 key 追加；
+    2) 删某条掩码行 → 只移除那一个 key，其余不受影响；
+    3) 不动 key 直接保存 → 不丢 key；
+    4) key 框清空保存 → 保留现有 key（掩码框里删不掉自己看不到的明文，防误清空）；
+    5) 主动删掉全部掩码行、纯明文新 key → 用户意图整体替换，重复行去重；
+    6) 匹配不到已存 key 的伪掩码行 → 丢弃，绝不把掩码串存成 key。"""
+    P = "keyadd145"
+    K1 = "sk-legacykey-one-abcdefgh"
+    K2 = "sk-legacykey-two-xyz99999"
+    K3 = "sk-newkey-third-1234567890"
+    K4 = "sk-extra-dup-check-55555555"
+    from app.main import store, tenants
+    reg = tenants.get(store.first_admin()["id"])
+
+    def save(keys, **kw):
+        body = {"platform": P, "name": "KeyAdd", "type": "openai",
+                "base_url": "https://fake145.example.com/v1",
+                "api_keys": keys, "models": ["m145"]}
+        body.update(kw)
+        r = client.post("/api/providers", headers=hdr, json=body)
+        assert r.status_code == 200, r.text
+        return list(reg.find(P).api_keys)
+
+    def masks():
+        d = client.get("/api/providers", headers=hdr).json()["data"]
+        return [x["api_keys"] for x in d if x["platform"] == P][0]
+
+    try:
+        assert save([K1, K2]) == [K1, K2]
+
+        # 1) 新增：掩码行保持原样 + 新明文追加 → 旧 key 全在
+        m1, m2 = masks()
+        assert m1 != K1 and K1 not in masks(), "列表接口必须只给掩码"
+        assert save([m1, m2, K3]) == [K1, K2, K3]
+
+        # 2) 删掉中间一条掩码行 → 只少那一个
+        m1, _, m3 = masks()
+        assert save([m1, m3]) == [K1, K3]
+
+        # 3) 不动直接保存 → 不丢
+        m1, m3 = masks()
+        assert save([m1, m3]) == [K1, K3]
+
+        # 4) 清空 key 框 → 现有 key 原样保留
+        assert save([]) == [K1, K3]
+
+        # 5) 主动整体替换（掩码行全删、纯明文）→ 只留新 key，重复行去重
+        assert save([K4, K4]) == [K4]
+
+        # 6) 伪掩码行（匹配不到已存 key）→ 丢弃，不存成 key
+        m4 = masks()[0]
+        assert save([m4, "sk-…ffff"]) == [K4]
+    finally:
+        client.delete(f"/api/providers/{P}", headers=hdr)
