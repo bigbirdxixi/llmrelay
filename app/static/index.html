@@ -2481,9 +2481,17 @@ async function editKeyModels(id){
   }
   const k = (S.settings.api_keys || []).find(x => x.id === id);
   const cur = (k && k.models) || [];
+  // v2.0.3 R149：models_missing = 已绑定但上游已删的模型名（后端按账号当前上游配置算出）；
+  // 弹窗顶部列名 + 「移除 N 个不存在模型」一键解绑（不碰多选框，保留其余有效绑定）
+  const dead = ((k && k.models_missing) || []).filter(m => cur.includes(m));
   const body = $("#modalBody");
   body.innerHTML = `
     <h3>改模型绑定 · ${esc((k && k.label) || ("Key #" + id))}</h3>
+    ${dead.length ? `<div style="border:1px solid var(--red,#f87171);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;line-height:1.6">
+      <b style="color:var(--red,#f87171)">上游已删除 ${dead.length} 个已绑定模型</b>：${esc(dead.join("、"))}<br>
+      这些绑定已不再生效（调用会被 400 拦下）。可一键移除失效绑定（保留其余有效绑定；全移除则恢复不限制）：
+      <div style="margin-top:6px"><button class="btn sm" onclick="pruneKeyModels(${id})">移除 ${dead.length} 个不存在模型</button></div>
+    </div>` : ""}
     <div class="field"><label>这把 key 能调用的模型（全不勾 = 不限制）</label>
       ${modelPickHtml(cur)}</div>
     <div class="row" style="justify-content:flex-end;margin-top:18px">
@@ -2501,6 +2509,22 @@ async function saveKeyModels(id){
     toast(models.length ? "模型绑定已保存（" + models.length + " 个模型）" : "模型绑定已清空，不再限制", "ok");
     renderSettings();
   }catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+
+/* v2.0.3 R149：一键移除失效模型绑定 —— keep = 当前绑定 − models_missing（上游已删的模型名）；
+   keep 全是现存有效名，PATCH 入参校验必过；全移除则 models:[] 恢复不限制（后端存 None）。 */
+async function pruneKeyModels(id){
+  const k = (S.settings.api_keys || []).find(x => x.id === id);
+  const cur = (k && k.models) || [];
+  const dead = new Set((k && k.models_missing) || []);
+  const keep = cur.filter(m => !dead.has(m));
+  try{
+    await api(`/api/keys/${id}`, { method: "PATCH", body: { models: keep } });
+    closeModal();
+    toast(`已移除 ${cur.length - keep.length} 个不存在模型`
+      + (keep.length ? `，保留 ${keep.length} 个有效绑定` : "，这把 key 恢复不限制"), "ok");
+    renderSettings();
+  }catch(e){ toast("移除失败：" + e.message, "err"); }
 }
 
 /* 改过期：弹窗日历控件，精确到日；cur = 当前过期日（YYYY-MM-DD，无则空） */
@@ -2701,9 +2725,11 @@ async function renderSettings(){
         const ror = ro || (agg && !k.self);
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
         const mm = k.models_missing || [];
+        // v2.0.3 R149：失效绑定不再只显示「N 个已不存在」（名字藏在 hover title 里看不见），
+        // 内联列出失效模型名，提示点「模型」可一键移除失效绑定
         const modelsCell = (k.models && k.models.length)
           ? `<span class="mono" title="${esc(k.models.join("、"))}">绑定 ${k.models.length}</span>`
-            + (mm.length ? ` <span style="color:var(--red,#f87171)" title="${esc(mm.join("、"))}">⚠ ${mm.length} 个已不存在</span>` : "")
+            + (mm.length ? `<div class="mono" style="color:var(--red,#f87171);font-size:11px;margin-top:2px" title="上游已删除这些模型，调用会被 400 拦下；点「模型」可一键移除失效绑定">⚠ ${mm.length > 1 ? mm.length + " 个" : ""}已不存在：${esc(mm.join("、"))}</div>` : "")
           : '<span class="dim">不限制</span>';
         return `<tr>
         <td class="mono">${esc(k.key)}${!ror ? `

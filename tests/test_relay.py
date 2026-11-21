@@ -4495,3 +4495,64 @@ def test_r148_models_expose_context_length(client, hdr, upstream_port):
         assert "context_length" not in data["r148plain/no-ctx-model"], data["r148plain/no-ctx-model"]
     finally:
         client.delete("/api/providers/r148plain", headers=hdr)
+
+
+# ---------------------------------------------------------------- R149 失效模型绑定：按名列出 + 一键解绑（v2.0.3）
+def test_r149_key_binding_dead_models_unbind(client, hdr, upstream_port):
+    """上游平台删掉某模型后，key 行 models_missing 按名列出失效模型（设置页表格内联列名 +
+    「模型」弹窗警示块 + 「移除 N 个不存在模型」一键解绑，前端 R149）：
+    解绑语义 = PATCH models 提交「当前绑定 − models_missing」（全为现存有效名，入参校验必过），
+    保留其余有效绑定；全移除则 models:[] 恢复不限制（存 None）；直接提交已删模型名仍 400
+    （校验不放松）；汇总视角（?tenant=all）按 key 归属账号自己的上游配置判 missing（R144 口径）。"""
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r149plat", "name": "R149(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["r149m1", "r149m2"]})
+    assert p.status_code == 200, p.text
+    cr = client.post("/api/keys", headers=hdr, json={
+        "label": "r149", "models": ["r149plat/r149m1", "r149plat/r149m2"]})
+    assert cr.status_code == 200, cr.text
+    kid = cr.json()["id"]
+    try:
+        # 上游删掉 r149m1（平台设置保存：models 列表收窄 = 删模型）
+        p2 = client.post("/api/providers", headers=hdr, json={
+            "platform": "r149plat", "name": "R149(fake)", "type": "openai",
+            "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+            "models": ["r149m2"]})
+        assert p2.status_code == 200, p2.text
+
+        st = client.get("/api/settings", headers=hdr).json()
+        row = next(k for k in st["api_keys"] if k["id"] == kid)
+        assert row["models_missing"] == ["r149plat/r149m1"], f"失效模型要按名列出: {row}"
+
+        # 汇总视角同口径（按 key 归属账号自己的上游配置判）
+        st_all = client.get("/api/settings?tenant=all", headers=hdr).json()
+        assert st_all["keys_scope"] == "all"
+        row_all = next(k for k in st_all["api_keys"] if k["id"] == kid)
+        assert row_all["models_missing"] == ["r149plat/r149m1"], row_all
+        assert row_all["self"] is True and row_all["owner_email"], row_all
+
+        # 一键解绑（前端「移除 N 个不存在模型」按钮的 PATCH 语义）：保留有效绑定
+        keep = [m for m in row["models"] if m not in row["models_missing"]]
+        assert keep == ["r149plat/r149m2"], keep
+        r = client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": keep})
+        assert r.status_code == 200, r.text
+        assert r.json()["models"] == ["r149plat/r149m2"], r.json()
+        st2 = client.get("/api/settings", headers=hdr).json()
+        row2 = next(k for k in st2["api_keys"] if k["id"] == kid)
+        assert row2["models_missing"] == [] and row2["models"] == ["r149plat/r149m2"], row2
+
+        # 全移除（keep 为空 = 恢复不限制，后端存 None）
+        r3 = client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": []})
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["models"] is None, r3.json()
+        st3 = client.get("/api/settings", headers=hdr).json()
+        row3 = next(k for k in st3["api_keys"] if k["id"] == kid)
+        assert row3["models_missing"] == [] and not row3["models"], row3
+
+        # 直接提交已删模型名 → 仍 400 并点名（入参校验不放松）
+        r4 = client.patch(f"/api/keys/{kid}", headers=hdr, json={"models": ["r149plat/r149m1"]})
+        assert r4.status_code == 400 and "r149plat/r149m1" in r4.text, r4.text
+    finally:
+        client.delete(f"/api/keys/{kid}", headers=hdr)
+        client.delete("/api/providers/r149plat", headers=hdr)
