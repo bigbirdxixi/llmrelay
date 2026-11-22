@@ -201,7 +201,10 @@ tbody tr:hover td{background:#101a28}
 /* v2.1.0 R156–R160：「编辑平台」弹窗：宽度随内容自适应（fit-content，不再固定 1200）；中部双列：
    左 = API Key（320px，高度拉伸到与右列 出口代理 底部对齐），右 = Base URL/出口代理（竖排）；
    模型列表首排 = sticky 表头（模型名/模型类型/别名/思考模式 + 4 个价格列 + 关闭写法（最右列），不随列表滚动）；
-   每模型行：× | 模型名 | 类型 | 别名 | 思考 | 4 价格输入 | 关闭写法（与表头列 1:1 对齐） */
+   每模型行：× | 模型名 | 类型 | 别名 | 思考 | 4 价格输入 | 关闭写法（与表头列 1:1 对齐）
+   模型名列固定 360px（flex:0 0 360）：fit-content 的固有宽取内容 max-content，若名字列随文字长短伸缩，
+   短名平台弹窗会缩到 ~960px，行内价格 4 输入（312px）+ 关闭写法装不下被 flex-wrap 甩到第二行；
+   固定列宽后弹窗稳定 ≈1154px，任何名字长度都单行不折行 */
 #modal .sheet.wide{width:fit-content;max-width:min(1500px,calc(100vw - 48px))}
 /* fit-content 取内容 max-content；长说明标签（模型级设置等）单行宽会顶满弹窗，限宽 600 让弹窗宽度
    由真正的宽元素（模型行 ≈1110）决定，弹窗随内容收窄 */
@@ -223,7 +226,7 @@ tbody tr:hover td{background:#101a28}
 .mrow{display:grid;grid-template-columns:30px minmax(0,1fr);gap:4px 8px;align-items:center}
 .mbody{min-width:0}
 .mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.mrow .mono.mname{flex:1 1 240px;min-width:140px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
+.mrow .mono.mname{flex:0 0 360px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:104px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
 .mrow select.mkd{width:96px}
 .mrow select.mrf{width:64px}
@@ -238,7 +241,7 @@ tbody tr:hover td{background:#101a28}
 .hdmain{display:flex;align-items:center;gap:8px;min-width:0}
 .mhead .hcell{font-size:11px;color:var(--dim);white-space:nowrap}
 .mhead .hx{width:30px}
-.mhead .hname{flex:1 1 240px;min-width:140px;max-width:360px}
+.mhead .hname{flex:0 0 360px;max-width:360px}
 .mhead .hkind{width:96px;flex:0 0 auto}
 .mhead .halias{width:96px;flex:0 0 auto}
 .mhead .hthink{width:104px;flex:0 0 auto}
