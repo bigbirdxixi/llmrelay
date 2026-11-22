@@ -79,10 +79,11 @@
 - API Key 区「已保存的 key 显示为掩码」说明加 `<br>`：冒号后「掩码行保持原样不会动旧 key…」整体移到第二行
 - 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（f_enabled 不存在 / 说明高 35px=2×17 两行 / toggle 停用后弹窗原样保存仍 enabled=false / 新建平台默认 enabled=true），全量 144 通过
 
-### 改动：弹窗标签-输入框间距收紧（API Key/Base URL/出口代理/高级配置 JSON，R167）
-- 生产反馈：「API Key」「Base URL」「出口代理」标签离输入框太大，参考「显示名」的间距；「高级配置 JSON」同样
-- 实测四组 margin 同为全局 6px，感知差来自带括号说明的标签折 2 行后行高 leading（18px 行高/12px 字号 ≈3px 字下空隙）；二排 3 字段 `.provcols .field > label` 与「高级配置 JSON」`.lblrow`（label margin 归 0 + 行 margin-bottom 2px）收紧到 2px，视觉间距与首排单行标签（显示名等）一致；首排/模型级设置等其余字段不变
-- 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器 1600 断言（keys/base/proxy/extra gap=2、name gap=6 不变、无截断/溢出/重叠，截图目检），全量 144 通过
+### 改动：弹窗标签-输入框间距三轮迭代，最终全档统一（R167→R168→R169）
+- 生产反馈①（R167）：「API Key」「Base URL」「出口代理」标签离输入框太大，参考「显示名」；「高级配置 JSON」同样 → 二排 3 字段 + 高级 JSON 收紧 6→2px（`.provcols .field>label` / `.lblrow`）
+- 生产反馈②（R168）：仍嫌大 → 再压一档：margin 归 0 + label 行高 1.3（12px 字号字下空隙 ≈1.8px），视觉间距 ≈2px 贴边
+- 生产反馈③（R169 定稿）：「难道不应该是统一的吗」→ 弹窗内**所有** label 统一 `#modal label{margin-bottom:0;line-height:1.3}`（首排 平台id/显示名/协议/超时、二排 3 字段、模型级设置、高级 JSON 全档一致 ≈2px 贴边），撤掉 R167/R168 的局部规则；原来全局 label 6px margin + 行高 leading 导致各字段视觉间距不一致
+- 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（8 组标签-输入框视觉间距全部 =2px 统一 / 高级 JSON 贴边 0 / 模型行 rowH=31 不溢出 / sheet=1156 不变 / 窄视口 1000 堆叠无横向溢出），全量 144 通过
 
 ### 功能：下游 key 调用限额（余额预扣，超限额 403 拦截）
 - api_keys 新增 balance 列（NULL/0 = 不限额只统计消费；>0 = 预付余额）；key 管理弹窗（新建/修改）可设限额；`GET /api/keys` 返回 balance / spent（累计消费）/ balance_exhausted
