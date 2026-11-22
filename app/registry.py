@@ -346,20 +346,22 @@ class Registry:
         """平台模型清单变更 / 平台删除后，自动清掉聚合里指向失效目标的条目（v2.0.1）：
         目标平台已删、或模型不再登记在该平台 models/model_map 里的「平台/模型」条目被移除；
         丢掉全部条目的聚合随之删除。platform=None 查全部条目，否则只查该平台前缀的。
-        裸名条目不参与清理（宽松语义不变）。返回移除条数（>0 时持久化聚合行）。"""
+        v2.1.0 R174：裸名条目也做 freshness 校验（此前无条件保留——声明它的平台被删后，
+        死条目一直挂在聚合配置里不自愈，运行期 next_aggregate 才跳过，全死则 404）。
+        返回移除条数（>0 时持久化聚合行）。"""
         removed = 0
         with self._lock:
             for agg_name in list(self.aggregates):
                 entries = self.aggregates[agg_name]
                 kept = []
                 for e in entries:
-                    if "/" not in e:
-                        kept.append(e)
-                        continue
-                    pf = e.split("/", 1)[0]
-                    if platform is not None and pf != platform:
-                        kept.append(e)      # 与本次变更无关的平台，不动
-                        continue
+                    if "/" in e:
+                        pf = e.split("/", 1)[0]
+                        if platform is not None and pf != platform:
+                            kept.append(e)      # 与本次变更无关的平台，不动
+                            continue
+                    # R174：裸名（及平台无关条目）也按「当前是否可解析」清理；
+                    # 平台前缀匹配但本次变更无关的「平台/模型」条目在上面已 continue
                     if self.entry_fresh(e):
                         kept.append(e)
                     else:

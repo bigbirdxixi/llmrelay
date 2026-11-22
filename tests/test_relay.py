@@ -5025,3 +5025,56 @@ def test_r165_provider_status_toggle(client, hdr, upstream_port):
 
     # 清理
     client.delete("/api/providers/r165plat", headers=hdr)
+
+
+# ---------------------------------------------------------------- R174 裸名聚合条目跟随清理（v2.1.0）
+def test_r174_aggregate_prune_bare_entries(client, hdr, upstream_port):
+    """R174：prune_stale_aggregate_entries 此前对裸名条目无条件保留——声明它的平台
+    删模型/删平台后，死条目一直挂在聚合配置里不自愈（运行期 next_aggregate 才跳过，
+    全死则 404「没有可用条目」）。现语义：裸名条目同样按「当前是否可解析」清理。
+
+    判别点：
+    1) 裸名条目（可解析）可正常保存（宽松语义不变）；
+    2) 平台 A 删掉该模型 → scoped 清理，但裸名仍被平台 B 声明 → 不误删；
+    3) 平台 B 也删掉 → 裸名不可解析 → 条目清理，聚合丢空随之删除（修复点）；
+    4) 平台整体删除 → 只由它声明的裸名条目同样被清理。"""
+    base_url = f"http://127.0.0.1:{upstream_port}/v1"
+    P1, P2, P3 = "aggr174a", "aggr174b", "aggr174c"
+
+    def entries(name):
+        for a in client.get("/api/aggregates", headers=hdr).json()["data"]:
+            if a["name"] == name:
+                return [e["entry"] for e in a["entries"]]
+        return None
+
+    try:
+        for p, models in ((P1, ["r174m"]), (P2, ["r174m"]), (P3, ["r174x"])):
+            assert client.post("/api/providers", headers=hdr,
+                               json={"platform": p, "type": "openai",
+                                     "base_url": base_url, "api_keys": ["k174"],
+                                     "models": models}).status_code == 200
+        # 1) 裸名条目（两平台都声明 r174m）可保存
+        assert client.post("/api/aggregates", headers=hdr,
+                           json={"name": "E174", "entries": ["r174m"]}).status_code == 200
+        assert entries("E174") == ["r174m"]
+        # 2) P1 删掉 r174m → scoped 清理（platform=P1）：裸名仍被 P2 声明 → 保留（不误删）
+        assert client.post("/api/providers", headers=hdr,
+                           json={"platform": P1, "type": "openai", "base_url": base_url,
+                                 "api_keys": ["k174"], "models": []}).status_code == 200
+        assert entries("E174") == ["r174m"], entries("E174")
+        # 3) P2 也删掉 r174m → 裸名不可解析 → 条目清理，聚合丢空删除（R174 修复点）
+        assert client.post("/api/providers", headers=hdr,
+                           json={"platform": P2, "type": "openai", "base_url": base_url,
+                                 "api_keys": ["k174"], "models": []}).status_code == 200
+        assert entries("E174") is None, entries("E174")
+        # 4) 平台整体删除：只由 P3 声明的裸名 r174x 随平台删除被清理
+        assert client.post("/api/aggregates", headers=hdr,
+                           json={"name": "F174", "entries": ["r174x"]}).status_code == 200
+        assert entries("F174") == ["r174x"]
+        assert client.delete(f"/api/providers/{P3}", headers=hdr).status_code == 200
+        assert entries("F174") is None, entries("F174")
+    finally:
+        for p in (P1, P2, P3):
+            client.delete(f"/api/providers/{p}", headers=hdr)
+        for n in ("E174", "F174"):
+            client.delete(f"/api/aggregates/{n}", headers=hdr)
