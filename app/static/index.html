@@ -215,13 +215,17 @@ tbody tr:hover td{background:#101a28}
 #modal .sheet.wide .field > label{max-width:1100px}
 /* v2.1.0 R162：「高级配置 JSON」标签行 = 标签 + 右侧「复制」按钮（复制文本框内容到剪贴板）；
    模型级设置说明按用户指定分组用 <br> 折 3 行（一个 label，非三段） */
-#modal .lblrow{display:flex;align-items:flex-start;gap:10px;margin-bottom:0}
-#modal .lblrow > label{flex:1;margin-bottom:0;line-height:1.3}
-#modal .lblrow .btn{margin-top:2px}
-/* v2.1.0 R167→R168→R169：标签-输入框间距三轮迭代（二排嫌大→再压→定稿统一）：
-   弹窗内所有 label 统一 margin 0 + 行高 1.3（12px 字号 → 字下空隙 ≈1.8px），视觉间距全档一致 ≈2px 贴边；
-   原来全局 label 6px margin（+ 行高 leading）各字段不一致，二排带说明的长标签折 2 行后显得尤其空 */
-#modal label{margin-bottom:0;line-height:1.3}
+#modal .lblrow{display:flex;align-items:flex-start;gap:10px}
+#modal .lblrow > label{flex:1}
+/* 复制按钮收小（贴标签行高）：让「高级配置 JSON」行高由标签（18+6 margin）主导，
+   标签底→文本框间距与其他字段一致 ≈9px（R170 统一标准档） */
+#modal .lblrow .btn{padding:2px 8px;font-size:11.5px}
+/* v2.1.0 R167→R170 标签-输入框间距迭代记录：
+   R167/R168/R169 曾把弹窗标签 margin/行高压到贴边（0/1.3）；用户定稿：统一但不贴边——
+   还原为标准档：弹窗内所有 label 走全局 `label{margin:0 0 6px}` + 默认行高（视觉 ≈9px，
+   即最初「显示名」的间距），各字段天然一致。
+   真正根因修复（R169b）保留：删掉 `.provcols .field > label{min-height:34px}`——
+   它把 1 行标签块撑到两行高，字下凭空多 ~18px 空白，才是「二排显空」的元凶 */
 .provcols{display:flex;gap:18px;align-items:stretch}
 /* 左列 API Key 宽（v2.1.0 R163：320→724 左缘对齐；R164：724→424 改右缘对齐——
    「Base URL/出口代理」右缘 = 424+18+400 = 842 = 首排右缘（240+14+220+14+240+14+100），与「超时（秒）」右缘同垂直线） */
@@ -234,12 +238,13 @@ tbody tr:hover td{background:#101a28}
 /* 左列 API Key 字段拉满列高：textarea 弹性伸展，底部（含说明文字）与右列 出口代理 底部对齐 */
 .provcols .col-l .field{flex:1;display:flex;flex-direction:column}
 .provcols .col-l .field textarea{flex:1;min-height:64px}
-/* 两列 label 统一按两行高度：Base URL/出口代理 标签折行时，输入框顶边仍与左列 API Key 顶边水平对齐 */
-.provcols .field > label{min-height:34px}
+/* v2.1.0 R169b：删掉旧「两列 label 统一 min-height:34px（按两行撑高，为跨列输入框顶边对齐）」——
+   标签收紧（margin 0 + 行高 1.3）后该 min-height 会把 1 行标签块撑到 34px，字下凭空多出 ~18px 空白，
+   正是「压缩后 API Key/Base URL/出口代理 仍显空」的根因；现实视口下三标签同折行（同列宽/同字体），
+   顶边天然对齐，无需撑高。窄屏堆叠分支同步去掉对应 min-height:0 重置 */
 @media (max-width:1100px){.provcols{flex-direction:column}
   .provcols .col-l,.provcols .col-r{flex:1 1 0;width:100%}
-  .provcols .col-r .field input{width:100%}
-  .provcols .field > label{min-height:0}}
+  .provcols .col-r .field input{width:100%}}
 .mrow{display:grid;grid-template-columns:30px minmax(0,1fr);gap:4px 8px;align-items:center}
 .mbody{min-width:0}
 .mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

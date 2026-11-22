@@ -85,6 +85,11 @@
 - 生产反馈③（R169 定稿）：「难道不应该是统一的吗」→ 弹窗内**所有** label 统一 `#modal label{margin-bottom:0;line-height:1.3}`（首排 平台id/显示名/协议/超时、二排 3 字段、模型级设置、高级 JSON 全档一致 ≈2px 贴边），撤掉 R167/R168 的局部规则；原来全局 label 6px margin + 行高 leading 导致各字段视觉间距不一致
 - 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（8 组标签-输入框视觉间距全部 =2px 统一 / 高级 JSON 贴边 0 / 模型行 rowH=31 不溢出 / sheet=1156 不变 / 窄视口 1000 堆叠无横向溢出），全量 144 通过
 
+### 改动：标签间距定稿——统一标准档 + 删 min-height 根因修复（R170）
+- 根因查明：「二排 3 字段压缩后仍显空」真凶是旧规则 `.provcols .field > label{min-height:34px}`（早年为跨列输入框顶边对齐把标签块撑到两行高）——标签收紧后 1 行标签块仍被撑到 34px，字下凭空多 ~18px 空白；删掉后（R169b）1 行/2 行标签视觉间距一致、输入框顶边天然对齐（现实视口三标签同折行）
+- 用户定稿：统一但不贴边——撤销 R169 的 margin 0/行高 1.3，弹窗所有 label 还原全局标准档（`margin:0 0 6px` + 默认行高，视觉 ≈9px，即最初「显示名」间距）；「高级配置 JSON」行内复制按钮收小（padding 2px 8px/11.5px）使行高由标签主导，JSON 标签-文本框间距同档 9px
+- 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（name/keys/base/proxy/json 视觉间距全部 =9px 统一 / 复制按钮高 23 不撑行 / sheet=1156 / rowH=31 不变 / 顶边对齐差 0），全量 144 通过
+
 ### 功能：下游 key 调用限额（余额预扣，超限额 403 拦截）
 - api_keys 新增 balance 列（NULL/0 = 不限额只统计消费；>0 = 预付余额）；key 管理弹窗（新建/修改）可设限额；`GET /api/keys` 返回 balance / spent（累计消费）/ balance_exhausted
 - 预扣语义：每笔成功调用原子扣减 `round(balance − cost, 6)`；扣成负数 = 余额耗尽，该 key 之后所有 /v1 入口（chat / embeddings / images / videos 状态 / anthropic messages）直接 403「余额已不足，访问已被限制」（拦截发生在转发前，不产生上游成本），充值（设更大的余额）即可恢复
