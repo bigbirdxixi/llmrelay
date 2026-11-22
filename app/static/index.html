@@ -137,8 +137,8 @@ tbody tr:hover td{background:#101a28}
 #toast .t.err{border-color:#4a2530;color:#ffb4b4}
 #toast .t.ok{border-color:#1f4438;color:#a7f3d0}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-/* v2.1.0 R157/R159/R161/R162：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
-.split.four{grid-template-columns:minmax(160px,240px) minmax(160px,180px) minmax(180px,240px) minmax(80px,100px)}
+/* v2.1.0 R157/R159/R161/R162/R163：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
+.split.four{grid-template-columns:minmax(160px,240px) minmax(200px,220px) minmax(180px,240px) minmax(80px,100px)}
 /* 概览页：星期 × 时段（左，热力图）× 近期活动（右）——v1.2.3 panel 互换后左宽右窄（11:9）：
    热力图 24 个时段列弹性铺满（minmax 列，不出现横向滚动条），留白消失；堆叠图相应收窄仍舒展 */
 .split.ov{grid-template-columns:minmax(0,11fr) minmax(0,9fr);gap:14px}
@@ -216,11 +216,14 @@ tbody tr:hover td{background:#101a28}
 #modal .lblrow > label{flex:1}
 #modal .lblrow .btn{margin-top:2px}
 .provcols{display:flex;gap:18px;align-items:stretch}
-.provcols .col-l{flex:0 0 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
+/* 左列 API Key 宽（v2.1.0 R163：320→724 左缘对齐；R164：724→424 改右缘对齐——
+   「Base URL/出口代理」右缘 = 424+18+400 = 842 = 首排右缘（240+14+220+14+240+14+100），与「超时（秒）」右缘同垂直线） */
+.provcols .col-l{flex:0 0 424px;min-width:0;display:flex;flex-direction:column;gap:14px}
 .provcols .col-r{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
-/* 右列 Base URL/出口代理 输入框定宽（fit-content 下 input  intrinsic 宽太窄）；窄屏回落 100%。
-   v2.1.0 R161：640→520（用户反馈再窄一些）；R162：520→440 */
-.provcols .col-r .field input{width:min(440px,100%)}
+/* 右列 Base URL/出口代理 输入框定宽（fit-content 固有宽取 input intrinsic ≈393px，
+   min(480px,100%) 里的百分比在固有宽计算下解析成 intrinsic，会把弹窗固有宽拖窄、输入框缩水）；
+   宽视口固定 400px（R164 右缘对齐方程 424+18+400=842），窄屏（<1100 堆叠）回落 100%（见 @media） */
+.provcols .col-r .field input{width:400px}
 /* 左列 API Key 字段拉满列高：textarea 弹性伸展，底部（含说明文字）与右列 出口代理 底部对齐 */
 .provcols .col-l .field{flex:1;display:flex;flex-direction:column}
 .provcols .col-l .field textarea{flex:1;min-height:64px}
