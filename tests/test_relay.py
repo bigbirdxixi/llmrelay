@@ -4925,3 +4925,54 @@ def test_r156_provider_inline_pricing_merge(client, hdr):
     finally:
         client.delete("/api/providers/r156plat", headers=hdr)
         _set_pricing(client, hdr, [])
+
+
+def test_r165_provider_status_toggle(client, hdr, upstream_port):
+    """R165：上游平台页状态列点击切换启用/停用（POST /api/providers/{p}/toggle）。
+
+    停用 = 该平台模型立即从下游 /v1/models 清单摘除、网关调用 404；
+    重新启用自动恢复；切换只翻 enabled，其余字段（name/base_url/models）原样保留；
+    不存在的平台 404。"""
+    fake = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+            if p["platform"] == "fake"][0]
+    # 注：新平台不能用别家平台的掩码 key（掩码只能还原「本平台已存 key」，跨平台必丢弃——设计如此），
+    # 测试用明文 key
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "r165plat", "name": "切换测试", "type": fake["type"],
+        "base_url": fake["base_url"], "api_keys": ["sk-r165-up"],
+        "models": ["r165-model"], "enabled": True})
+    assert r.status_code == 200, r.text
+
+    def ids():
+        return [m["id"] for m in
+                client.get("/v1/models", headers=hdr).json()["data"]]
+
+    # 初始启用：模型可见
+    assert "r165plat/r165-model" in ids()
+
+    # 1) 切停用：enabled=false，模型从清单摘除，网关调用 404
+    r = client.post("/api/providers/r165plat/toggle", headers=hdr, json={})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "platform": "r165plat", "enabled": False}
+    assert "r165plat/r165-model" not in ids()
+    r = client.post("/v1/chat/completions", headers=hdr, json={
+        "model": "r165plat/r165-model", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404, "停用平台的模型应 404"
+
+    # 2) 再切回启用：恢复可见
+    r = client.post("/api/providers/r165plat/toggle", headers=hdr, json={})
+    assert r.status_code == 200 and r.json()["enabled"] is True
+    assert "r165plat/r165-model" in ids()
+
+    # 3) 其余字段原样保留（只翻 enabled）
+    p2 = [p for p in client.get("/api/providers", headers=hdr).json()["data"]
+          if p["platform"] == "r165plat"][0]
+    assert p2["name"] == "切换测试" and p2["base_url"] == fake["base_url"]
+    assert p2["models"] == ["r165-model"] and p2["enabled"] is True
+
+    # 4) 不存在的平台 404
+    assert client.post("/api/providers/ghostplat/toggle",
+                       headers=hdr, json={}).status_code == 404
+
+    # 清理
+    client.delete("/api/providers/r165plat", headers=hdr)

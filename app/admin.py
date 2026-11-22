@@ -536,6 +536,33 @@ async def delete_provider(platform: str, request: Request, _: None = Depends(aut
     return {"ok": True}
 
 
+@router.post("/providers/{platform}/toggle")
+async def toggle_provider(platform: str, request: Request, _: None = Depends(auth)):
+    """v2.1.0 R165：上游平台页状态列点击切换启用/停用（只翻 enabled，其余字段原样回写）。
+
+    停用 = 该平台所有模型立即从下游可用清单里摘掉（enabled() 过滤），请求指向它们会 404；
+    重新启用即恢复。价格/聚合里引用该平台模型的条目保留不删（重新启用后自动恢复生效）。"""
+    reg = _reg_scoped(request)
+    up = reg.find(platform)
+    if up is None:
+        raise HTTPException(404, f"平台 {platform} 不存在")
+    row = {
+        "platform": up.platform,
+        "name": up.name,
+        "type": up.type,
+        "base_url": up.base_url,
+        "api_keys": list(up.api_keys or []),
+        "models": list(up.models or []),
+        "model_map": dict(up.model_map or {}),
+        "extra": dict(up.extra or {}),
+        "proxy": up.proxy or "",
+        "enabled": not up.enabled,
+        "timeout_s": float(up.timeout_s or 300),
+    }
+    reg.upsert(row)
+    return {"ok": True, "platform": platform, "enabled": bool(row["enabled"])}
+
+
 @router.post("/providers/{platform}/refresh-models")
 async def refresh_models(platform: str, request: Request, _: None = Depends(auth)):
     reg = _reg_scoped(request)

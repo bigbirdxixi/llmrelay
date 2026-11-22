@@ -66,6 +66,13 @@
 - 纯前端（单文件 index.html），无接口/数据变化；门禁 = 隔离实例浏览器宽视口（1600）断言（三右缘 1080=1080=1080 / baseW=400 / colL=424 / sheet=1156 / rowH=31 单行 / API Key 块底部=出口代理底部=360）+ 全量 142 通过
 - 纯前端排版（单文件 index.html），无接口/数据变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器宽视口（1600）几何断言（sheetW fit-content 1156–1171 / 表头 9 列与行控件 x 坐标逐列一致 / API Key 块底部 = 出口代理底部 / sticky 表头滚动置顶 / 价格 + 关闭写法 round-trip 回填 0.01/0.02/0.005/0.04 / enable_thinking），全量 142 通过
 
+### 功能：上游平台「状态」点击切换启用/停用（R165）
+- 生产需求：上游平台页状态列做成可点击切换——悬停「启用」显示「切换为停用」、悬停「已停用」显示「切换为启用」，点击即翻转
+- 新增 `POST /api/providers/{platform}/toggle`：只翻 `enabled`，其余字段（name/type/base_url/api_keys/models/model_map/extra/proxy/timeout_s）原样回写（走 reg.upsert 热加载）；不存在的平台 404；「缺 key」状态（启用但无 key）同样可点
+- 停用效果即时生效：该平台模型从 `/v1/models` 清单摘除（usable 过滤）、网关调用 404；重新启用自动恢复——价格/聚合条目保留不删，启用即重新生效
+- 前端：状态 pill 加 `pill-toggle` 样式（cursor:pointer + 悬停虚线描边 + 原生 title 提示下一状态），点击调 `toggleProvider()` → toast 结果 → 重渲平台列表；多租户汇总只读视图不可点
+- 回归测试 R165（切换翻转/停用摘除+404/恢复/其余字段原样/不存在 404）；全量 144 通过
+
 ### 功能：下游 key 调用限额（余额预扣，超限额 403 拦截）
 - api_keys 新增 balance 列（NULL/0 = 不限额只统计消费；>0 = 预付余额）；key 管理弹窗（新建/修改）可设限额；`GET /api/keys` 返回 balance / spent（累计消费）/ balance_exhausted
 - 预扣语义：每笔成功调用原子扣减 `round(balance − cost, 6)`；扣成负数 = 余额耗尽，该 key 之后所有 /v1 入口（chat / embeddings / images / videos 状态 / anthropic messages）直接 403「余额已不足，访问已被限制」（拦截发生在转发前，不产生上游成本），充值（设更大的余额）即可恢复
