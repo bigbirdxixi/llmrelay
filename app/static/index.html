@@ -198,22 +198,26 @@ tbody tr:hover td{background:#101a28}
   font-family:ui-monospace,Consolas,monospace;font-size:12.3px;color:#b9cfe6;
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
-/* v2.1.0 R156/R157：「编辑平台」弹窗加宽（R157 提到 1200）+ 每模型行内联 4 个价格输入（元）；
-   行结构：左侧 × 删除钮（模型名左边）| 右侧 mbody（第一行 模型名/类型/别名/思考/关闭写法，
-   第二行 4 个价格输入与模型名对齐） */
+/* v2.1.0 R156/R157/R158：「编辑平台」弹窗加宽 1200 + 双列（左模型区 / 右 Base URL·代理·API Key）
+   + 每模型行：× 删除钮在最左，模型名/类型/别名/思考/关闭写法 与 4 个价格输入（元）同一排 */
 #modal .sheet.wide{max-width:1200px}
+.provcols{display:flex;gap:18px;align-items:flex-start}
+.provcols .col-l{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
+.provcols .col-r{flex:0 0 340px;display:flex;flex-direction:column;gap:14px}
+@media (max-width:1100px){.provcols{flex-direction:column}
+  .provcols .col-r{flex:1 1 0;width:100%}}
 .mrow{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 8px;align-items:start}
 .mbody{min-width:0}
 .mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.mrow .mono.mname{flex:0 0 auto;max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
+.mrow .mono.mname{flex:0 1 200px;min-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:128px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
 .mrow select.mkd{width:112px}
 .mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
 .mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px;margin-top:5px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
-.mprice{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:2px}
+.mprs{display:flex;gap:8px;flex:0 1 auto;flex-wrap:wrap;align-items:flex-end;margin-left:4px}
 .mpr{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--dim)}
-.mpr input.mpv{width:112px;padding:4px 6px;font-size:12px}
+.mpr input.mpv{width:96px;padding:4px 6px;font-size:12px}
 </style>
 </head>
 <body>
@@ -1228,13 +1232,19 @@ async function editProvider(platform){
       <div class="field"><label>超时（秒）</label>
         <input id="f_timeout" type="number" value="${p ? p.timeout_s : 300}"></div>
     </div>
-    <div class="field"><label>Base URL（网页类型填聊天页地址，例如 https://chat.deepseek.com/）</label>
-      <input id="f_base" class="mono" value="${esc(p ? p.base_url : "")}" placeholder="https://api.deepseek.com/v1"></div>
-    <div class="field"><label>出口代理（可选，仅该平台走代理；服务器直连 Google 不通时在这里填）</label>
-      <input id="f_proxy" class="mono" value="${esc(p ? p.proxy || "" : "")}" placeholder="留空=直连；如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808"></div>
-    <div class="field"><label>API Key（一行一个，支持多 key 轮换）</label>
-      <textarea id="f_keys" rows="3" placeholder="sk-...">${esc((p && p.api_keys || []).join("\n"))}</textarea>
-      ${p && p.key_count ? '<div class="dim" style="font-size:11.5px;margin-top:6px">已保存的 key 显示为掩码：掩码行保持原样不会动旧 key，删某行才移除该 key，换行输入新 key 直接追加。</div>' : ""}
+    <div class="provcols">
+      <div class="col-l">
+        <div class="field"><label>API Key（一行一个，支持多 key 轮换）</label>
+          <textarea id="f_keys" rows="3" placeholder="sk-...">${esc((p && p.api_keys || []).join("\n"))}</textarea>
+          ${p && p.key_count ? '<div class="dim" style="font-size:11.5px;margin-top:6px">已保存的 key 显示为掩码：掩码行保持原样不会动旧 key，删某行才移除该 key，换行输入新 key 直接追加。</div>' : ""}
+        </div>
+      </div>
+      <div class="col-r">
+        <div class="field"><label>Base URL（网页类型填聊天页地址，例如 https://chat.deepseek.com/）</label>
+          <input id="f_base" class="mono" value="${esc(p ? p.base_url : "")}" placeholder="https://api.deepseek.com/v1"></div>
+        <div class="field"><label>出口代理（可选，仅该平台走代理；服务器直连 Google 不通时在这里填）</label>
+          <input id="f_proxy" class="mono" value="${esc(p ? p.proxy || "" : "")}" placeholder="留空=直连；如 http://127.0.0.1:10808 或 socks5h://127.0.0.1:10808"></div>
+      </div>
     </div>
     <div class="field"><label>模型（下拉框选择添加，聚焦自动拉取上游模型列表；也可手动输入）</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1246,7 +1256,7 @@ async function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；「费用」行设置该模型的调用价格（元，成功调用才计费，留空/0 = 免费只统计消费）；点 × 删除该模型（其价格条目一并清掉）</label>
+    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；「费用」4 个输入（元，成功调用才计费，留空/0 = 免费只统计消费）；点 × 删除该模型（其价格条目一并清掉）</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
@@ -1404,7 +1414,7 @@ function renderModelReasoning(){
     const k = S.editKind[m] || "";
     const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"],["embedding","embedding 模型"]]
       .map(([v,l]) => `<option value="${v}" ${k === v ? "selected" : ""}>${l}</option>`).join("");
-    // v2.1.0 R156：行内价格输入（元）；值存 S.editPricing[裸模型名]，保存平台时随表提交
+    // v2.1.0 R156/R158：行内价格输入（元，4 项与模型名同一排）；值存 S.editPricing[裸模型名]，保存平台时随表提交
     const pr = S.editPricing[m] || {};
     const priceRow = [["request_fee","请求费 ¥/次"],["input_per_1k","输入费 ¥/1K"],
                       ["cache_hit_per_1k","缓存命中 ¥/1K"],["output_per_1k","输出费 ¥/1K"]]
@@ -1420,8 +1430,8 @@ function renderModelReasoning(){
           <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
           <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
           <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
+          <div class="mprs">${priceRow}</div>
         </div>
-        <div class="mprice">${priceRow}</div>
       </div>
     </div>`;
   }).join("");

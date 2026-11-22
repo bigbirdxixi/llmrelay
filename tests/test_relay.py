@@ -4787,8 +4787,10 @@ def test_r154_key_balance_limit(client, hdr, upstream_port):
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "balance_exhausted"
     assert "余额" in r.json()["error"]["message"]
-    rec = store.recent(1)[0]
-    assert rec["status"] == "error" and rec["http_status"] == 403 and rec["dkey_id"] == kid
+    # 审计日志有 403 记录（按 dkey_id+status 过滤取最新，不依赖「全表最新行」时序——
+    # 会话级共享 DB 上前面测试的延迟后台写入可能插队）
+    recs = store.recent(50, dkey_ids=[kid], status="error")
+    assert recs and recs[-1]["http_status"] == 403 and recs[-1]["dkey_id"] == kid
     # embeddings 入口同样被拦（限额对全部 /v1 计费入口生效）
     r = client.post(f"http://127.0.0.1:{upstream_port}/v1/embeddings",
                     json={"model": "fake/fake-gpt", "input": "x"}, headers=h2)
@@ -4807,10 +4809,10 @@ def test_r154_key_balance_limit(client, hdr, upstream_port):
                         headers=hdr).status_code == 400
     # 无余额 key（测试基建 key）照常访问，balance 为 null 不受限
     assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
-    main_kid = store.recent(1)[0]["dkey_id"]
-    main_row = [k for k in client.get("/api/keys", headers=hdr).json()["data"]
-                if k["id"] == main_kid]
-    assert main_row and main_row[0]["balance"] is None
+    # 主 key id 用 conftest 的固定 label 精确锁定（不靠「全表最新行」时序）
+    main_rows = [k for k in client.get("/api/keys", headers=hdr).json()["data"]
+                 if k["label"] == "测试"]
+    assert main_rows and all(k["balance"] is None for k in main_rows)
     # 清理
     client.delete(f"/api/keys/{kid}", headers=hdr)
     _set_pricing(client, hdr, [])
