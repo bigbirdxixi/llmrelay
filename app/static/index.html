@@ -1278,7 +1278,7 @@ async function editProvider(platform){
       <div class="col-l">
         <div class="field"><label>API Key（一行一个，支持多 key 轮换）</label>
           <textarea id="f_keys" rows="3" placeholder="sk-...">${esc((p && p.api_keys || []).join("\n"))}</textarea>
-          ${p && p.key_count ? '<div class="dim" style="font-size:11.5px;margin-top:6px">已保存的 key 显示为掩码：掩码行保持原样不会动旧 key，删某行才移除该 key，换行输入新 key 直接追加。</div>' : ""}
+          ${p && p.key_count ? '<div class="dim" style="font-size:11.5px;margin-top:6px">已保存的 key 显示为掩码：<br>掩码行保持原样不会动旧 key，删某行才移除该 key，换行输入新 key 直接追加。</div>' : ""}
         </div>
       </div>
       <div class="col-r">
@@ -1303,7 +1303,6 @@ async function editProvider(platform){
     </div>
     <div class="field"><div class="lblrow"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label><button class="btn sm" onclick="copyExtraJson()" title="复制文本框中的 JSON 到剪贴板">复制</button></div>
       <textarea id="f_extra" rows="8" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
-    <div class="field"><label><input type="checkbox" id="f_enabled" ${(!p || p.enabled) ? "checked":""} style="width:auto;margin-right:6px">启用该平台</label></div>
     <div class="row" style="justify-content:flex-end">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="saveProvider(${p ? "'" + esc(p.platform) + "'" : "null"})">保存</button>
@@ -1660,7 +1659,6 @@ async function saveProvider(platform){
     api_keys: keys,
     models: models,
     model_map: Object.assign({}, S.editModelMap),
-    enabled: $("#f_enabled").checked,
     timeout_s: Number($("#f_timeout").value || 300),
     extra: extra
   };

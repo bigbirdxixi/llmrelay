@@ -73,6 +73,12 @@
 - 前端：状态 pill 加 `pill-toggle` 样式（cursor:pointer + 悬停虚线描边 + 原生 title 提示下一状态），点击调 `toggleProvider()` → toast 结果 → 重渲平台列表；多租户汇总只读视图不可点
 - 回归测试 R165（切换翻转/停用摘除+404/恢复/其余字段原样/不存在 404）；全量 144 通过
 
+### 改动：「编辑平台」弹窗去掉「启用该平台」复选框 + 掩码说明 label 冒号后换行（R166）
+- 生产反馈：① 平台启停已可在上游平台页状态列点击切换（R165），弹窗里的「启用该平台」复选框功能冗余，去掉；②「已保存的 key 显示为掩码：…」说明冒号后内容换行
+- 弹窗删除 f_enabled 复选框，saveProvider 载荷不再带 `enabled`——后端 upsert 语义接管：已有平台保留当前启停状态（弹窗保存不再意外翻状态），新平台默认启用；启停统一走平台页状态列点击
+- API Key 区「已保存的 key 显示为掩码」说明加 `<br>`：冒号后「掩码行保持原样不会动旧 key…」整体移到第二行
+- 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（f_enabled 不存在 / 说明高 35px=2×17 两行 / toggle 停用后弹窗原样保存仍 enabled=false / 新建平台默认 enabled=true），全量 144 通过
+
 ### 功能：下游 key 调用限额（余额预扣，超限额 403 拦截）
 - api_keys 新增 balance 列（NULL/0 = 不限额只统计消费；>0 = 预付余额）；key 管理弹窗（新建/修改）可设限额；`GET /api/keys` 返回 balance / spent（累计消费）/ balance_exhausted
 - 预扣语义：每笔成功调用原子扣减 `round(balance − cost, 6)`；扣成负数 = 余额耗尽，该 key 之后所有 /v1 入口（chat / embeddings / images / videos 状态 / anthropic messages）直接 403「余额已不足，访问已被限制」（拦截发生在转发前，不产生上游成本），充值（设更大的余额）即可恢复
