@@ -203,6 +203,11 @@ tbody tr:hover td{background:#101a28}
 .mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
 .mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
+/* v2.1.0 R156：「编辑平台」弹窗加宽 + 每模型行内联 4 个价格输入（元） */
+#modal .sheet.wide{max-width:980px}
+.mprice{flex:1 1 100%;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;padding:2px 0 0 2px}
+.mpr{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--dim)}
+.mpr input.mpv{width:112px;padding:4px 6px;font-size:12px}
 </style>
 </head>
 <body>
@@ -1172,7 +1177,7 @@ function reasoningPill(p){
   return `<span class="pill warn" title="${esc(detail)}">${esc(label)}</span>`;
 }
 
-function editProvider(platform){
+async function editProvider(platform){
   const p = platform ? S.providers.find(x => x.platform === platform) : null;
   const ex = (p && p.extra) || {};
   S.editingPlatform = platform;
@@ -1182,7 +1187,19 @@ function editProvider(platform){
   for (const [a, t] of Object.entries(S.editModelMap)) if (!S.editAlias[t]) S.editAlias[t] = a;
   // 模型类型（生成类/embedding）：extra.model_kind 模型名 -> image|video|audio_tts|audio_trans|embedding（聊天模型无条目）
   S.editKind = Object.assign({}, ((p && p.extra) || {}).model_kind || {});
+  // v2.1.0 R156：行内价格设置——加载该平台已有价格条目（键 = 平台/模型全名，裸模型名 → 条目）进 S.editPricing
+  S.editPricing = {};
+  if(platform){
+    try{
+      const pj = await api("/api/pricing");
+      const pre = platform + "/";
+      (pj.entries || []).forEach(e => {
+        if(e.model && e.model.indexOf(pre) === 0) S.editPricing[e.model.slice(pre.length)] = e;
+      });
+    }catch(e){}
+  }
   S.availFetched = false;
+  $("#modalBody").classList.add("wide");   // v2.1.0 R156：平台弹窗加宽（容纳行内价格输入）
   $("#modalBody").innerHTML = `
     <h3>${p ? "编辑平台 · " + esc(p.platform) : "新增上游平台"}</h3>
     ${p ? "" : `<div class="field"><label>选择平台模板（下拉框）</label>
@@ -1225,7 +1242,7 @@ function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；点 × 删除该模型</label>
+    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；「费用」行设置该模型的调用价格（元，成功调用才计费，留空/0 = 免费只统计消费）；点 × 删除该模型（其价格条目一并清掉）</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
@@ -1357,6 +1374,14 @@ function kindChanged(sel){
   row.querySelectorAll(".mrs,.mrf").forEach(el => { el.disabled = gen; el.style.opacity = gen ? ".45" : ""; });
 }
 
+/* v2.1.0 R156：行内价格输入——只记进 S.editPricing（裸模型名 → 4 价格字段），点「保存」时随平台一并提交 */
+function pricingChanged(inp){
+  const row = inp.closest(".mrow"); if(!row) return;
+  const e = S.editPricing[row.dataset.model] = S.editPricing[row.dataset.model] || {};
+  const v = inp.value.trim();
+  if(v === "" || Number(v) <= 0) delete e[inp.dataset.pf]; else e[inp.dataset.pf] = Number(v);
+}
+
 function renderModelReasoning(){
   const box = $("#f_modelrows");
   if(!box) return;
@@ -1375,13 +1400,21 @@ function renderModelReasoning(){
     const k = S.editKind[m] || "";
     const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"],["embedding","embedding 模型"]]
       .map(([v,l]) => `<option value="${v}" ${k === v ? "selected" : ""}>${l}</option>`).join("");
+    // v2.1.0 R156：行内价格输入（元）；值存 S.editPricing[裸模型名]，保存平台时随表提交
+    const pr = S.editPricing[m] || {};
+    const priceRow = [["request_fee","请求费 ¥/次"],["input_per_1k","输入费 ¥/1K"],
+                      ["cache_hit_per_1k","缓存命中 ¥/1K"],["output_per_1k","输出费 ¥/1K"]]
+      .map(([f,l]) => `<label class="mpr">${l}
+        <input class="mpv" type="number" min="0" step="0.000001" placeholder="0"
+          data-pf="${f}" value="${(pr[f] || 0) > 0 ? pr[f] : ""}" onchange="pricingChanged(this)"></label>`).join("");
     return `<div class="mrow" data-model="${esc(m)}">
       <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
       <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
       <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
       <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
       <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
-      <button class="mdel" title="删除这个模型" onclick="delModel('${esc(m)}')">×</button>
+      <button class="mdel" title="删除这个模型（连同其价格条目）" onclick="delModel('${esc(m)}')">×</button>
+      <div class="mprice">${priceRow}</div>
     </div>`;
   }).join("");
   buildAddOptions();
@@ -1510,7 +1543,7 @@ function applyPreset(platform){
   }
 }
 
-function closeModal(){ $("#modal").classList.remove("on"); }
+function closeModal(){ const s = $("#modalBody"); if(s) s.classList.remove("wide"); $("#modal").classList.remove("on"); }
 
 async function saveProvider(platform){
   let extra = {};
@@ -1541,10 +1574,29 @@ async function saveProvider(platform){
   if(!body.base_url) return toast("Base URL 不能为空", "err");
   try{
     await api("/api/providers", { method:"POST", body: body });
-    toast("已保存 " + body.platform, "ok");
-    closeModal();
+  }catch(e){ return toast("保存失败：" + e.message, "err"); }
+  // v2.1.0 R156：行内价格随平台保存——合并提交：保留其他平台/聚合的条目，本平台命名空间
+  // （平台id/）按当前行内输入重写；删掉的模型价格条目自动清掉（模型不在上游配置后
+  // 后端校验会 400，必须随删随清）。价格保存失败不撤平台，保留弹窗让用户修正。
+  let priceNote = "";
+  try{
+    const pre = body.platform + "/";
+    const pj = await api("/api/pricing");
+    const merged = (pj.entries || []).filter(e => !String(e.model || "").startsWith(pre));
+    S.editModels.forEach(m => {
+      const e = S.editPricing[m];
+      if(e && Object.keys(e).length) merged.push(Object.assign({model: pre + m}, e));
+    });
+    await api("/api/pricing", { method:"POST", body: {entries: merged} });
+    priceNote = "（含模型价格）";
+  }catch(e){
+    toast("平台已保存，但价格保存失败：" + e.message, "err");
     await refreshAll();
-  }catch(e){ toast("保存失败：" + e.message, "err"); }
+    return;
+  }
+  toast("已保存 " + body.platform + priceNote, "ok");
+  closeModal();
+  await refreshAll();
 }
 
 /* ---------------- 聚合模型：一个名字 -> 多个 平台/模型，轮询 + 失败冷却自动切换 ---------------- */

@@ -4865,3 +4865,61 @@ def test_r155_cost_stats(client, hdr, upstream_port):
     _set_pricing(client, hdr, [])
     assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
     assert client.app.state.store.recent(1)[0]["cost"] == 0
+
+
+def test_r156_provider_inline_pricing_merge(client, hdr):
+    """R156：「编辑平台」弹窗加宽 + 每模型行内联价格输入（随平台保存一并提交）。
+
+    前端合并契约的后端钉扎（前端逻辑见 index.html saveProvider 的 R156 注释）：
+    价格条目按 平台/模型 命名空间归属，① 平台模型清单收窄后，已删模型的陈旧条目
+    必须随删随清（后端严格校验会对它 400）；② 合并提交保留其他平台条目；
+    ③ 全零条目自动剥离（行内输入留空 = 不计费）。"""
+    r = client.post("/api/providers", json={
+        "platform": "r156plat", "name": "R156", "type": "openai",
+        "base_url": "https://example-r156.invalid/v1",
+        "api_keys": ["sk-r156"], "models": ["r156a", "r156b"]}, headers=hdr)
+    assert r.status_code == 200, r.text
+    try:
+        # ① 给平台两个模型配价格（= 弹窗行内输入后的保存结果）
+        assert _set_pricing(client, hdr, [
+            {"model": "r156plat/r156a", "request_fee": 0.01, "input_per_1k": 1.0,
+             "cache_hit_per_1k": 0.5, "output_per_1k": 1.0},
+            {"model": "r156plat/r156b", "input_per_1k": 2.0}]).status_code == 200
+        got = client.get("/api/pricing", headers=hdr).json()["entries"]
+        assert {e["model"] for e in got} == {"r156plat/r156a", "r156plat/r156b"}
+
+        # ② 弹窗里删掉 r156b → 平台模型清单收窄（价格条目仍留在配置里，热加载不清）
+        r2 = client.post("/api/providers", json={
+            "platform": "r156plat", "name": "R156", "type": "openai",
+            "base_url": "https://example-r156.invalid/v1",
+            "api_keys": ["sk-r156"], "models": ["r156a"],
+            "enabled": True}, headers=hdr)
+        assert r2.status_code == 200, r2.text
+        # 前端若忘记合并、直接回传旧表 → 陈旧条目被严格校验拦下（400 点名）
+        stale = client.post("/api/pricing", json={"entries": got}, headers=hdr)
+        assert stale.status_code == 400 and "r156plat/r156b" in stale.json()["detail"]
+        # 前端合并语义：过滤本平台命名空间 + 按当前模型清单重写
+        merged = [e for e in got if not str(e.get("model", "")).startswith("r156plat/")]
+        merged.append({"model": "r156plat/r156a", "request_fee": 0.01, "input_per_1k": 1.0,
+                       "cache_hit_per_1k": 0.5, "output_per_1k": 1.0})
+        assert _set_pricing(client, hdr, merged).status_code == 200
+        assert {e["model"] for e in
+                client.get("/api/pricing", headers=hdr).json()["entries"]} == {"r156plat/r156a"}
+
+        # ③ 合并提交保留其他平台条目（fixture 的 fake 平台不受影响）
+        assert _set_pricing(client, hdr, [
+            {"model": "fake/fake-gpt", "request_fee": 0.01},
+            {"model": "r156plat/r156a", "request_fee": 0.02, "input_per_1k": 1.0}]).status_code == 200
+        assert {e["model"] for e in
+                client.get("/api/pricing", headers=hdr).json()["entries"]} == \
+            {"fake/fake-gpt", "r156plat/r156a"}
+        # ④ 全零条目自动剥离（行内输入留空 = 不计费，不落条目）
+        assert _set_pricing(client, hdr, [
+            {"model": "fake/fake-gpt", "request_fee": 0.01},
+            {"model": "r156plat/r156a", "request_fee": 0, "input_per_1k": 0,
+             "cache_hit_per_1k": 0, "output_per_1k": 0}]).status_code == 200
+        assert {e["model"] for e in
+                client.get("/api/pricing", headers=hdr).json()["entries"]} == {"fake/fake-gpt"}
+    finally:
+        client.delete("/api/providers/r156plat", headers=hdr)
+        _set_pricing(client, hdr, [])
