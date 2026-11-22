@@ -265,7 +265,9 @@ const S = { tab: "overview",
             providers: [], presets: [], overview: null, models: [],
             modelGroups: {full: [], bare: [], aggs: []},
             modelTenants: [],
-            users: [] };
+            users: [],
+            costGroup: "model",      // v2.1.0：用量页「每日费用」曲线分组维度
+            pricingRows: null };     // v2.1.0：未保存的价格编辑行（null = 尚未开始编辑，按服务端值渲染）
 const PALETTE = ["#4f8cff","#38bdf8","#34d399","#fbbf24","#f472b6","#a78bfa","#fb923c","#22d3ee","#f87171","#a3e635"];
 
 /* 中国省级地图路径（DataV 边界数据投影 + Douglas-Peucker 2px 简化，离线内嵌，无外部依赖） */
@@ -330,6 +332,9 @@ function fmtTok(n){ n = Number(n||0);
   return nf(n);
 }
 function fmtMs(n){ n = Number(n||0); return n >= 1000 ? (n/1000).toFixed(2)+"s" : n+"ms"; }
+/* 金额（元）：¥ 前缀 + 千分位，最多 6 位小数（价格 6 位小数够用；0 显示 ¥0） */
+function fmtMoney(v){ v = Number(v||0); if(!isFinite(v)) return "¥0";
+  return "¥" + (v === 0 ? "0" : v.toLocaleString("en-US", {maximumFractionDigits: 6})); }
 function shortTs(ts){ return (ts||"").replace("T"," ").slice(5,19); }
 function fullTs(ts){ return (ts||"").replace("T"," ").slice(0,16); }   // 带年：2026-11-03 14:32
 
@@ -344,7 +349,7 @@ const BASE = (function(){
 /* 管理员看别的账号时，给数据类接口自动带上 tenant */
 function withTenant(path){
   if(!S.tenant) return path;
-  if(!/^\/api\/(overview|stats|models|providers|aggregates|health|settings)/.test(path)) return path;
+  if(!/^\/api\/(overview|stats|models|providers|aggregates|health|settings|pricing)/.test(path)) return path;
   return path + (path.indexOf("?") >= 0 ? "&" : "?") + "tenant=" + encodeURIComponent(S.tenant);
 }
 
@@ -627,20 +632,41 @@ function togglePick(el){
   usagePickSync();
 }
 /* 曲线图例 chip 可点选（v1.2.3：去掉「显示全部」按钮，图例直接承担 选中/取消/恢复）：
-   #usageChart 每次重渲染，故委托绑在 document 上 */
+   #usageChart 每次重渲染，故委托绑在 document 上；v2.1.0 起同时支持 cost 维度（#costChart） */
 document.addEventListener("click", e => {
-  const b = e.target.closest('.legbtn[data-dim="usage"]');
+  const b = e.target.closest(".legbtn[data-dim]");
   if(!b) return;
-  const k = b.dataset.k, cur = _pick("usage");
+  const dim = b.dataset.dim, k = b.dataset.k, cur = _pick(dim);
   const i = cur.indexOf(k);
   if(i >= 0) cur.splice(i, 1); else cur.push(k);
-  usagePickSync();
+  if(dim === "usage") usagePickSync();
+  else if(dim === "cost"){
+    const c = $("#costChart");
+    if(c) c.innerHTML = costChartHtml((S.ds && S.ds.cost) || {days: [], rows: [], keys: []});
+  }
 });
 
 function usageChartHtml(){
   const ds = (S.ds && S.ds.usage) || {days: [], rows: [], keys: []};
   const sel = _pick("usage");
   return lineChart(ds, {selected: sel, clickLegend: true, dim: "usage"});
+}
+
+/* v2.1.0 每日费用曲线（/api/stats/cost，单位元）：
+   - 无分组 / 全 0 → 空态提示（还没配置价格或没有成功计费请求）；
+   - 合计虚线取每行 cost（合成 r.total 喂给 lineChart）；
+   - 图例可点选（S.pick.cost，#costChart 局部重渲染，不重取数据）。 */
+function costChartHtml(series){
+  const ds = series || {days: [], rows: [], keys: []};
+  const keys = ds.keys || [];
+  const total = (ds.rows || []).reduce((a, r) => a + Number(r.cost || 0), 0);
+  if(!keys.length || total === 0)
+    return '<div class="empty">该区间还没有费用记录（未配置模型价格，或该区间没有成功计费请求）→ 去「设置 → 模型费用」配置价格</div>';
+  const mapped = {days: ds.days, keys: keys,
+                   rows: (ds.rows || []).map(r => Object.assign({}, r, {total: r.cost}))};
+  const sel = _pick("cost");
+  return lineChart(mapped, {yFmt: fmtMoney, noTotal: keys.length <= 1,
+                            selected: sel, clickLegend: true, dim: "cost"});
 }
 
 /* 延迟曲线：每日 平均 / P95 / TTFT 三线（y 轴 ms，无合计线） */
@@ -650,11 +676,18 @@ function latencyChartHtml(data){
     labels: {avg: "平均", p95: "P95", ttft: "TTFT 平均"}});
 }
 
-/* 每日 tokens 堆叠柱（按平台）；图例可点选：S.pick.platStack 非空时只显示选中平台的堆叠 */
-function stackedBarHtml(series){
+/* 每日堆叠柱（默认按上游平台 tokens；v2.1.0 起可参数化：dim/yFmt/labels/单位/空态，
+   费用「构成堆叠」复用本函数（dim=costStack、yFmt=fmtMoney））。图例可点选：S.pick.<dim> 非空时只显示选中项 */
+function stackedBarHtml(series, opts){
+  opts = opts || {};
+  const dim = opts.dim || "platStack";
+  const yFmt = opts.yFmt || fmtTok;
+  const labels = opts.labels || {};
+  const unit = opts.unit || " tokens";
+  const emptyMsg = opts.empty || "这个区间还没有请求记录";
   const rows = series.rows || [], keys = series.keys || [];
-  if(!rows.length || !keys.length) return '<div class="empty">这个区间还没有请求记录</div>';
-  const sel = _pick("platStack");
+  if(!rows.length || !keys.length) return `<div class="empty">${emptyMsg}</div>`;
+  const sel = _pick(dim);
   const totals = keys.map(k => rows.reduce((a, r) => a + Number(r[k] || 0), 0));
   const order = keys.map((k, i) => [k, totals[i]])
     .filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).map(x => x[0]);
@@ -669,7 +702,7 @@ function stackedBarHtml(series){
   for(let i = 0; i <= 3; i++){
     const yy = P.t + ih * i / 3, val = maxV * (1 - i / 3);
     g += `<line x1="${P.l}" y1="${yy}" x2="${W-P.r}" y2="${yy}" stroke="#1c2836" stroke-width="1"/>`;
-    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${fmtTok(val)}</text>`;
+    g += `<text x="${P.l-8}" y="${yy+4}" fill="#5c7387" font-size="10" text-anchor="end">${yFmt(val)}</text>`;
   }
   const step = Math.max(1, Math.ceil(n / 8));
   rows.forEach((r, i) => {
@@ -686,25 +719,28 @@ function stackedBarHtml(series){
       const y1 = y(cum + v), h = y(cum) - y1;
       bars += `<rect x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${w}" height="${h.toFixed(1)}"
         fill="${color(k)}" opacity="0.85">
-        <title>${r.day} · ${esc(k)} · ${fmtTok(v)} tokens</title></rect>`;
+        <title>${r.day} · ${esc(labels[k] || k)} · ${yFmt(v)}${unit}</title></rect>`;
       cum += v;
     });
   });
   const legend = order.map(k => {
     const on = !sel.length || sel.indexOf(k) >= 0;
-    return `<span style="cursor:pointer;opacity:${on ? 1 : 0.4}" title="点一下只看该平台"
-      onclick="togglePlatStack('${esc(k)}')"><i style="background:${color(k)}"></i>${esc(k)}</span>`;
+    return `<span style="cursor:pointer;opacity:${on ? 1 : 0.4}" title="点一下只看这一项"
+      onclick="toggleStackPick('${esc(k)}', '${dim}')"><i style="background:${color(k)}"></i>${esc(labels[k] || k)}</span>`;
   }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${g}${bars}</svg>
     <div class="legend">${legend}</div>
-    ${sel.length ? `<div class="dim" style="font-size:11.5px;margin-top:4px">已按选中平台过滤 · 再点图例可增减</div>` : ""}`;
+    ${sel.length ? `<div class="dim" style="font-size:11.5px;margin-top:4px">已按选中项过滤 · 再点图例可增减</div>` : ""}`;
 }
-function togglePlatStack(k){
-  const sel = _pick("platStack");
+function toggleStackPick(k, dim){
+  dim = dim || "platStack";
+  const sel = _pick(dim);
   const i = sel.indexOf(k);
   if(i >= 0) sel.splice(i, 1); else sel.push(k);
   renderUsage();
 }
+/* 兼容旧调用名 */
+function togglePlatStack(k){ toggleStackPick(k, "platStack"); }
 
 /* 环形图：Top N + 其他，中心显合计 */
 function donutHtml(items, centerLabel){
@@ -1116,7 +1152,7 @@ async function renderOverview(){
 }
 
 function clearPicks(){
-  S.pick = {platform: [], model: [], usage: [], platStack: [], ovStack: []};
+  S.pick = {platform: [], model: [], usage: [], platStack: [], ovStack: [], cost: [], costStack: []};
   const us = $("#usageChart");
   if(us) us.innerHTML = usageChartHtml();
 }
@@ -1797,10 +1833,12 @@ async function renderUsage(){
   const box = $("#tab-usage");
   const days = S.usageDays || 30, group = S.usageGroup || "platform";
   const seriesGroup = ["platform","model","key","dkey","account"].indexOf(group) >= 0 ? group : "total";
+  const costGroup = ["model","dkey","platform","total","key","account"].indexOf(S.costGroup || "") >= 0
+    ? S.costGroup : "model";   // v2.1.0：费用曲线分组（默认按模型）
   // v1.2.3：「星期 × 时段」挪去概览页，这里放「活跃情况」（年份选择与概览共享 S.ovYear）
   const curYear = String(new Date().getFullYear());
   const yrU = S.ovYear || curYear;
-  const [sum, series, period, latency, act, mix, errors, byModel, seriesPlat] = await Promise.all([
+  const [sum, series, period, latency, act, mix, errors, byModel, seriesPlat, cost] = await Promise.all([
     api(`/api/stats/summary?days=${days}&group_by=${group}`),
     api(`/api/stats/series?days=${days}&group_by=${seriesGroup}`),
     api(`/api/stats/period?days=${days}`),
@@ -1810,9 +1848,11 @@ async function renderUsage(){
     api(`/api/stats/errors?days=${days}&limit=8`),
     api(`/api/stats/summary?days=${days}&group_by=model_only`),
     api(`/api/stats/series?days=${days}&group_by=platform`),
+    api(`/api/stats/cost?days=${days}&group_by=${costGroup}`),
   ]);
   S.ds = S.ds || {};
   S.ds.usage = series;
+  S.ds.cost = cost;   // v2.1.0：费用曲线（#costChart 图例点选时复用这份数据）
   const pickBox = _pick("usage");
   if(S.usagePickGroup !== group){ pickBox.length = 0; S.usagePickGroup = group; }
   const sel = pickBox;
@@ -1865,6 +1905,8 @@ async function renderUsage(){
           <div class="s">错误 ${nf(p.errors)} 次</div></div>
         <div class="kpi"><div class="k">流式占比</div><div class="v">${pct(p.stream_rate)}<span class="dim" style="font-size:14px">%</span></div>
           <div class="s">流式 ${nf(p.stream_requests)} 次</div></div>
+        <div class="kpi"><div class="k">区间费用</div><div class="v">${fmtMoney(p.cost)}</div>
+          <div class="s">单次均价 ${fmtMoney(p.cost_per_request)} · 请求 ${fmtMoney(p.cost_req)}</div></div>
       </div>
     </div>
     <div class="panel">
@@ -1885,6 +1927,31 @@ async function renderUsage(){
         <small>${sel.length ? "已选 " + sel.length + " 条 · 点下方图例可取消" : "点下方图例或上面聚合明细的行来筛选"}</small>
       </h2>
       <div id="usageChart">${usageChartHtml()}</div></div>
+    <div class="split">
+      <div class="panel">
+        <h2>每日费用 <small>成功调用按配置价格计费（元）· 点图例只看某项</small>
+          ${(S.pick && S.pick.cost || []).length ? '<button class="btn sm" onclick="S.pick.cost=[];renderUsage()">重置</button>' : ""}
+          <span style="flex:1"></span>
+          <select id="uCostGroup" style="width:150px" onchange="S.costGroup=this.value;renderUsage()">
+            <option value="model" ${costGroup==="model"?"selected":""}>按模型</option>
+            <option value="dkey" ${costGroup==="dkey"?"selected":""}>按下游 key</option>
+            <option value="platform" ${costGroup==="platform"?"selected":""}>按平台</option>
+            <option value="total" ${costGroup==="total"?"selected":""}>合计</option>
+          </select>
+        </h2>
+        <div id="costChart">${costChartHtml(cost)}</div>
+      </div>
+      <div class="panel">
+        <h2>费用构成 <small>每日 请求费 / 输入 / 缓存命中 / 输出 堆叠（元）</small>
+          ${(S.pick && S.pick.costStack || []).length ? '<button class="btn sm" onclick="S.pick.costStack=[];renderUsage()">重置</button>' : ""}
+        </h2>
+        ${stackedBarHtml({days: cost.days || [], keys: ["cost_req","cost_input","cost_cache","cost_output"],
+                          rows: cost.rows || []},
+          {dim: "costStack", yFmt: fmtMoney, unit: "",
+           labels: {cost_req: "请求费", cost_input: "输入", cost_cache: "缓存命中", cost_output: "输出"},
+           empty: "该区间还没有费用记录"})}
+      </div>
+    </div>
     <div class="split">
       <div class="panel">
         <h2>每日 tokens <small>按上游平台堆叠 · 点图例只看该平台</small>
@@ -2446,6 +2513,8 @@ async function newKey(){
       <input id="nkLabel" maxlength="60" placeholder="例如：Hermes 桌面端 / 定时任务" style="max-width:340px"></div>
     <div class="field"><label>过期时间（日历选择，精确到日；留空 = 永不过期。选中的当天仍可用，次日失效）</label>
       <input id="nkExpire" type="date" style="max-width:220px"></div>
+    <div class="field"><label>调用限额（可选，元：留空 = 不限额只统计消费；设了之后每笔成功调用按模型价格扣减余额，扣完自动限制访问）</label>
+      <input id="nkBalance" type="number" min="0" step="0.01" style="max-width:220px" placeholder="留空 = 不限额"></div>
     <div class="field"><label>模型绑定（可选：不勾 = 不限制；勾了之后这把 key 只能调用勾到的模型/聚合）</label>
       ${modelPickHtml([])}</div>
     <div class="row" style="justify-content:flex-end;margin-top:18px">
@@ -2459,15 +2528,19 @@ async function newKey(){
 async function createKey(){
   const label = $("#nkLabel").value.trim();
   const exp = $("#nkExpire").value;   // "YYYY-MM-DD" 或 ""（永不过期）
+  const bal = $("#nkBalance").value.trim();   // v2.1.0：调用限额（留空 = 不限额）
   const models = [...document.querySelectorAll("#modalBody input[data-mk]:checked")].map(x => x.dataset.mk);
   try{
     const body = { label, expires_at: exp };
     if(models.length) body.models = models;   // 不勾 = 不传 = 不限制
+    if(bal !== "") body.balance = Number(bal);   // 留空 = 不传 = 不限额只统计消费
     const r = await api("/api/keys", { method: "POST", body });
     closeModal();
     copyText(r.key);
     alert("新 Key 已创建（并尝试复制到剪贴板）：\n\n" + r.key
       + (r.expires_at ? "\n\n过期时间：" + r.expires_at.slice(0,10) + "（当天仍可用）" : "\n\n永不过期")
+      + (body.balance ? "\n\n调用限额：" + fmtMoney(r.balance != null ? r.balance : body.balance)
+          + "（每笔成功调用按模型价格扣减，余额扣成负数后访问被限制）" : "\n\n调用限额：不限额（只统计消费）")
       + (models.length ? "\n\n模型绑定：" + models.length + " 个（" + models.join("、") + "）" : "\n\n模型绑定：不限制"));
     renderSettings();
   }catch(e){ toast("创建失败：" + e.message, "err"); }
@@ -2549,6 +2622,40 @@ async function saveKeyExpire(id){
     toast(r.expires_at ? "已设置过期时间 " + r.expires_at.slice(0,10) + "（当天仍可用）" : "已设为永不过期", "ok");
     renderSettings();
   }catch(e){ toast("修改失败：" + e.message, "err"); }
+}
+
+/* v2.1.0 R154：改调用限额（余额）。cur = 当前余额（元；null = 不限额）。
+   留空 / 0 保存 = 取消限额（恢复不限额只统计）；>0 = 设成该金额（覆盖写，不是增量充值）。 */
+function editKeyBalance(id, cur){
+  const k = (S.settings && S.settings.api_keys || []).find(x => x.id === id);
+  const spent = k ? Number(k.spent || 0) : 0;
+  const body = $("#modalBody");
+  body.innerHTML = `
+    <h3>设置调用限额（余额）</h3>
+    <div class="field"><label>余额（元；留空或 0 = 不限额，只统计消费）</label>
+      <input id="kbBalance" type="number" min="0" step="0.01" value="${cur == null ? "" : cur}"
+        placeholder="留空 = 不限额" style="max-width:220px"></div>
+    <div class="dim" style="font-size:12px;line-height:1.8">
+      设了余额后：每笔<b>成功</b>调用按「模型费用」配置的价格扣减余额；余额扣成负数后，
+      这把 key 的后续请求会被直接 403 拦截（提示「余额已不足，访问已被限制」），充值后即可恢复。<br>
+      保存是<b>覆盖写</b>：填更大的数 = 充值；填 0 / 留空 = 取消限额。当前累计消费 ${fmtMoney(spent)}。
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveKeyBalance(${id})">保存</button>
+    </div>`;
+  $("#modal").classList.add("on");
+}
+async function saveKeyBalance(id){
+  const v = $("#kbBalance").value.trim();
+  try{
+    const r = await api(`/api/keys/${id}`, { method: "PATCH",
+      body: { balance: (v === "" ? "" : Number(v)) } });
+    closeModal();
+    toast(r.balance == null ? "已取消限额（不限额，只统计消费）"
+        : "余额已设为 " + fmtMoney(r.balance) + "（成功调用扣费，扣成负数后限制访问）", "ok");
+    renderSettings();
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
 }
 
 /* 改名称（原「备注」列）：小弹窗输入，PATCH /api/keys/{id} 保存；留空 = 清空名称 */
@@ -2667,6 +2774,66 @@ async function renderSettings(){
   let mail = { mode: "log", host: "", port: 587, user: "", from: "", starttls: true,
                has_pass: false, pass_masked: "" };
   if(s.is_admin){ try{ mail = await api("/api/settings/mail"); }catch(e){} }
+  /* v2.1.0：模型费用配置（计费功能配置面；管理员单租户视角可改该租户的价格） */
+  let pr = {entries: []};
+  try{ pr = await api("/api/pricing"); }catch(e){}
+  // 工作副本按「视角」隔离：切租户视角（或首次进入）时从服务端重新初始化，
+  // 避免 A 租户的未保存编辑被保存到 B 租户头上
+  const prViewKey = S.tenant || "self";
+  if(S.pricingViewKey !== prViewKey){
+    S.pricingRows = (pr.entries || []).map(e => ({
+      model: e.model, request_fee: e.request_fee, input_per_1k: e.input_per_1k,
+      cache_hit_per_1k: e.cache_hit_per_1k, output_per_1k: e.output_per_1k }));
+    S.pricingViewKey = prViewKey;
+  }
+  const prRows = S.pricingRows;
+  const prModelOpts = [...(s.model_name_options || []), ...(s.bare_model_names || []),
+                       ...(s.aggregate_names || [])];
+  const prEdit = !agg;   // 汇总视角（all/多选）只读：保存是整表覆盖，必须锁定单账号
+  const prAddBtns = '<button class="btn sm" onclick="addPricingRow()">+ 添加模型</button>'
+                   + ' <button class="btn sm primary" onclick="savePricing()">保存价格</button>';
+  const prReadOnlyNote = '<span class="dim" style="font-size:12px">汇总视角只读（切到单账号可编辑该账号价格）</span>';
+  const prAgg = (pr.all && (pr.data || []).map(t =>
+    `<div style="margin-top:6px;font-size:12px"><b class="mono">${esc(t.tenant_label || ("u" + t.tenant))}</b>`
+    + ((t.entries || []).length
+       ? " · " + (t.entries || []).map(e =>
+         `${esc(e.model)}：请求 ${e.request_fee} / 输入 ${e.input_per_1k} / 缓存 ${e.cache_hit_per_1k} / 输出 ${e.output_per_1k} 元`).join(" · ")
+       : " · 未配置") + "</div>").join("")
+    || "");
+  const pricingPanel = `
+    <div class="panel">
+      <h2>模型费用 <small>配置价格后，成功调用按「请求费 + 输入 + 缓存命中 + 输出」计费（元）；未配置的模型免费只统计</small>
+        <span style="flex:1"></span>
+        ${prEdit ? prAddBtns : prReadOnlyNote}
+      </h2>
+      ${pr.all
+        ? (prAgg ? prAgg : '<div class="empty">所有账号都还没配置模型价格</div>')
+        : (prRows.length ? `<table style="max-width:100%"><thead><tr>
+            <th style="width:24%">模型（平台/模型）</th>
+            <th class="num">请求费<br><span class="dim" style="font-size:10.5px">元/次</span></th>
+            <th class="num">输入费<br><span class="dim" style="font-size:10.5px">元/1K token</span></th>
+            <th class="num">缓存命中费<br><span class="dim" style="font-size:10.5px">元/1K</span></th>
+            <th class="num">输出费<br><span class="dim" style="font-size:10.5px">元/1K</span></th>
+            <th class="num"></th>
+          </tr></thead><tbody>
+          ${prRows.map((r, i) => `<tr>
+            <td><input class="mono" list="pricingModels" value="${esc(r.model || "")}"
+              oninput="S.pricingRows[${i}].model=this.value" style="width:100%;max-width:230px"
+              placeholder="平台/模型"></td>
+            ${["request_fee","input_per_1k","cache_hit_per_1k","output_per_1k"].map(f =>
+              `<td class="num"><input type="number" min="0" step="0.000001" class="mono"
+                value="${(r[f] == null || r[f] === "" ? "" : r[f])}"
+                oninput="S.pricingRows[${i}]['${f}']=this.value" style="width:110px"></td>`).join("")}
+            <td class="num">${prEdit ? `<button class="btn sm" onclick="delPricingRow(${i})">删</button>` : ""}</td>
+          </tr>`).join("")}
+          </tbody></table>
+          <datalist id="pricingModels">${prModelOpts.map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>`
+          : '<div class="empty">还没有配置任何模型价格。点「添加模型」开始配置；不配置价格的模型调用免费（平台只统计用量）。</div>')}
+      <div class="dim" style="font-size:12px;margin-top:8px;line-height:1.8">
+        计费口径：只对<b>成功</b>调用计费（失败请求 0 费用）；输入费只算「未缓存输入」（prompt − 缓存命中），缓存命中部分按缓存命中费单独计。<br>
+        保存后立即生效（热加载）；改价格只影响之后的请求（记账时冻结当时价格）。保存是整表覆盖——删掉某行再保存 = 清空该模型价格。
+      </div>
+    </div>`;
   const mailPanel = !s.is_admin ? "" : `
     <div class="panel">
       <h2>邮箱发信设置（SMTP）<small>邮箱确认链接从这里发出</small></h2>
@@ -2720,7 +2887,8 @@ async function renderSettings(){
               (s.is_admin ? "<br>你是管理员，但其他账号的 key 只能由账号本人复制——管理员也看不到明文。" : ""))}
       </div>
       ${(s.api_keys||[]).length ? `<table><thead><tr>
-        <th>Key</th>${agg ? "<th>用户</th>" : ""}<th>名称</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th><th>最近使用</th><th class="num">操作</th>
+        <th>Key</th>${agg ? "<th>用户</th>" : ""}<th>名称</th><th>创建时间</th><th>过期时间</th><th>模型绑定</th>
+        <th class="num">余额</th><th class="num">累计消费</th><th>最近使用</th><th class="num">操作</th>
       </tr></thead><tbody>${(s.api_keys||[]).map(k => {
         const ror = ro || (agg && !k.self);
         const expired = k.expires_at && new Date(k.expires_at) < new Date();
@@ -2731,6 +2899,22 @@ async function renderSettings(){
           ? `<span class="mono" title="${esc(k.models.join("、"))}">绑定 ${k.models.length}</span>`
             + (mm.length ? `<div class="mono" style="color:var(--red,#f87171);font-size:11px;margin-top:2px" title="上游已删除这些模型，调用会被 400 拦下；点「模型」可一键移除失效绑定">⚠ ${mm.length > 1 ? mm.length + " 个" : ""}已不存在：${esc(mm.join("、"))}</div>` : "")
           : '<span class="dim">不限制</span>';
+        // v2.1.0 R154：余额（元；null = 不限额只统计消费）+ 累计消费 + 限额进度
+        const balCell = (k.balance == null)
+          ? '<span class="dim">不限额</span>'
+          : (Number(k.balance) < 0
+            ? `<span class="pill err" title="余额已扣成负数：这把 key 的后续请求会被 403 拦截，充值（设更大的余额）后恢复">已超限 ${fmtMoney(Math.abs(Number(k.balance)))}</span>`
+            : fmtMoney(k.balance));
+        const spentCell = (() => {
+          const sp = Number(k.spent || 0);
+          if(k.balance == null) return `<span class="mono">${fmtMoney(sp)}</span>`;
+          const bal = Number(k.balance);
+          const pool = sp + Math.max(bal, 0);
+          const pcv = bal < 0 ? 100 : (pool > 0 ? Math.min(100, Math.round(sp / pool * 100)) : 0);
+          return `<span class="mono">${fmtMoney(sp)}</span>
+            <div class="bar" style="width:90px;margin-top:4px"><i style="width:${pcv}%;${bal < 0 ? "background:var(--red,#f87171);" : ""}"></i></div>
+            <div class="dim" style="font-size:10.5px">消费占比 ${pcv}%${bal < 0 ? " · 访问已限制" : ""}</div>`;
+        })();
         return `<tr>
         <td class="mono">${esc(k.key)}${!ror ? `
           <button class="btn sm" style="margin-left:8px" onclick="copyKey(${k.id})" title="复制完整 key">复制</button>` : ""}</td>
@@ -2741,14 +2925,19 @@ async function renderSettings(){
           ? `<span style="color:${expired ? "var(--red,#f87171)" : "inherit"}">${esc(k.expires_at.replace("T"," ").slice(0,16))}${expired ? " · 已过期" : ""}</span>`
           : "永不过期"}</td>
         <td>${modelsCell}</td>
+        <td class="num">${balCell}</td>
+        <td class="num">${spentCell}</td>
         <td class="mono dim">${esc((k.last_used||"-").replace("T"," ").slice(0,19))}</td>
         <td class="num">${ror ? '<span class="dim">只读</span>' : `<button class="btn sm" onclick='editKeyLabel(${k.id}, ${esc(JSON.stringify(k.label || ""))})'>改名称</button>
           <button class="btn sm" onclick="editKeyModels(${k.id})">模型</button>
+          <button class="btn sm" onclick="editKeyBalance(${k.id}, ${k.balance == null ? "null" : JSON.stringify(k.balance)})" title="设置调用限额（余额）；留空保存 = 取消限额">余额</button>
           <button class="btn sm" onclick='editKeyExpire(${k.id}, ${k.expires_at ? JSON.stringify(k.expires_at.slice(0,10)) : "null"})'>改过期</button>
           <button class="btn sm danger" onclick="delKey(${k.id})">删除</button>`}</td>
       </tr>`;
       }).join("")}</tbody></table>` : `<div class="empty">${ro ? "该账号还没有 key" : (agg ? "还没有任何账号创建 key" : "还没有 key，点右上角新建")}</div>`}
     </div>
+
+    ${pricingPanel}
 
     <div class="panel">
       <h2>修改密码</h2>
@@ -2823,6 +3012,40 @@ async function testMail(){
     r.ok ? toast(r.message || "测试已发送（" + r.mode + "）", "ok")
          : toast("发送失败：" + r.error, "err");
   }catch(e){ toast("发送失败：" + e.message, "err"); }
+}
+
+/* ---------------- 模型费用（v2.1.0 R153） ----------------
+   工作副本 S.pricingRows（随租户视角隔离初始化，见 renderSettings）；保存 = 整表覆盖
+   POST /api/pricing {entries:[{model, 4 价格字段}]}，后端校验模型名必须在当前上游配置里。 */
+function addPricingRow(){
+  S.pricingRows = S.pricingRows || [];
+  S.pricingRows.push({model: "", request_fee: "", input_per_1k: "",
+                      cache_hit_per_1k: "", output_per_1k: ""});
+  renderSettings();
+}
+function delPricingRow(i){
+  S.pricingRows.splice(i, 1);
+  renderSettings();
+}
+async function savePricing(){
+  const rows = (S.pricingRows || []).map(r => ({
+    model: String(r.model || "").trim(),
+    request_fee: Number(r.request_fee) || 0,
+    input_per_1k: Number(r.input_per_1k) || 0,
+    cache_hit_per_1k: Number(r.cache_hit_per_1k) || 0,
+    output_per_1k: Number(r.output_per_1k) || 0,
+  })).filter(r => r.model);   // 空模型名的行丢弃
+  if(rows.some(r => r.request_fee < 0 || r.input_per_1k < 0 ||
+                    r.cache_hit_per_1k < 0 || r.output_per_1k < 0))
+    return toast("价格不能为负数", "err");
+  try{
+    const res = await api("/api/pricing", { method: "POST", body: { entries: rows } });
+    S.pricingRows = (res.entries || []).map(e => ({
+      model: e.model, request_fee: e.request_fee, input_per_1k: e.input_per_1k,
+      cache_hit_per_1k: e.cache_hit_per_1k, output_per_1k: e.output_per_1k }));
+    toast("模型价格已保存（" + (res.entries || []).length + " 个模型），立即生效", "ok");
+    renderSettings();
+  }catch(e){ toast("保存失败：" + e.message, "err"); }
 }
 
 function copyText(t){

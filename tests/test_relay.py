@@ -4686,3 +4686,182 @@ def test_r151_gbk_chinese_body_rescue(client, hdr, upstream_port):
     assert _json_object_lenient(b"") == {}
     assert _json_object_lenient(b"[1, 2]") is None
     assert _json_object_lenient(gbk({"a": "中"})) == {"a": "中"}
+
+
+# ---------------------------------------------------------------- v2.1.0 费用配置与限额（R153-R155）
+#: 测试用价格（元）：请求费 0.01/次、输入/输出 1 元/1K token、缓存命中 0.5 元/1K token。
+#: fake-gpt 固定 usage（prompt 11 / completion 7 / cached 0）→ 单次 0.028；
+#: fake-claude 流式（prompt 16 / cached 4 / completion 5）→ 单次 0.029。
+T153 = {"fake/fake-gpt": {"request_fee": 0.01, "input_per_1k": 1.0,
+                          "cache_hit_per_1k": 0.5, "output_per_1k": 1.0},
+        "fakeclaude/fake-claude": {"request_fee": 0.01, "input_per_1k": 1.0,
+                                   "cache_hit_per_1k": 0.5, "output_per_1k": 1.0}}
+
+
+def _set_pricing(client, hdr, entries):
+    return client.post("/api/pricing", json={"entries": entries}, headers=hdr)
+
+
+def test_r153_pricing_config_and_cost(client, hdr, upstream_port):
+    """R153：模型价格配置（/api/pricing 校验+落盘+热加载）+ 逐请求计费
+    （成功才计费、缓存命中独立计价、失败请求 0 费用、未配价格 0 费用）。"""
+    store = client.app.state.store
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+    r = _set_pricing(client, hdr, [{"model": m, **f} for m, f in T153.items()])
+    assert r.status_code == 200
+    got = client.get("/api/pricing", headers=hdr).json()
+    assert ({e["model"]: {k: v for k, v in e.items() if k != "model"}
+             for e in got["entries"]} == T153)
+    # Bearer 形态同样可读可写
+    bearer = {"Authorization": f"Bearer {hdr['authorization'][7:]}"}
+    assert client.get("/api/pricing", headers=bearer).status_code == 200
+    r = _set_pricing(client, bearer, [])
+    assert r.status_code == 200 and r.json()["entries"] == []
+    assert client.get("/api/pricing", headers=bearer).json()["entries"] == []
+    assert _set_pricing(client, bearer, [{"model": m, **f} for m, f in T153.items()]).status_code == 200
+    # 校验：模型名不在上游配置 / 负价格 → 400
+    bad1 = _set_pricing(client, hdr, [{"model": "fake/nope", "request_fee": 0.01}])
+    assert bad1.status_code == 400 and "不在当前上游配置里" in bad1.json()["detail"]
+    assert _set_pricing(client, hdr,
+                       [{"model": "fake/fake-gpt", "input_per_1k": -1}]).status_code == 400
+    # OpenAI 非流式（fake usage：prompt 11 / completion 7）→ 单次 0.028
+    r = client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr)
+    assert r.status_code == 200
+    rec = store.recent(1)[0]
+    assert rec["status"] == "ok"
+    assert rec["cost"] == 0.028
+    assert rec["cost_req"] == 0.01 and rec["cost_input"] == 0.011
+    assert rec["cost_cache"] == 0.0 and rec["cost_output"] == 0.007
+    # Anthropic 流式（prompt 16 / cached 4 / completion 5）→ 单次 0.029，
+    # 缓存命中 4K token 按 0.5 元/1K 单算，未缓存输入 12 按 1 元/1K
+    r = client.post(f"http://127.0.0.1:{upstream_port}/v1/messages",
+                   json={"model": "fakeclaude/fake-claude", "max_tokens": 64, "stream": True,
+                         "messages": [{"role": "user", "content": "hi"}]}, headers=hdr)
+    assert r.status_code == 200
+    rec = store.recent(1)[0]
+    assert rec["status"] == "ok" and rec["prompt_tokens"] == 16 and rec["cached_tokens"] == 4
+    assert rec["cost"] == 0.029
+    assert rec["cost_input"] == 0.012 and rec["cost_cache"] == 0.002 and rec["cost_output"] == 0.005
+    # 失败请求 0 费用
+    r = client.post(URL, json={"model": "fake/fake-gpt", "fail": "boom"}, headers=hdr)
+    assert r.status_code == 400
+    rec = store.recent(1)[0]
+    assert rec["status"] == "error" and rec["cost"] == 0
+    # 未配价格的模型 0 费用
+    r = client.post(URL, json={"model": "fake/fake-gpt-2"}, headers=hdr)
+    assert r.status_code == 200 and store.recent(1)[0]["cost"] == 0
+    # 清理：清空价格配置（GET 同步为空）
+    r = _set_pricing(client, hdr, [])
+    assert r.json()["entries"] == []
+    assert client.get("/api/pricing", headers=hdr).json()["entries"] == []
+
+
+def test_r154_key_balance_limit(client, hdr, upstream_port):
+    """R154：下游 key 余额限额（余额预扣：成功调用扣费，扣成负数后 403 拦截；
+    不设余额 = 不限额；充值/取消可恢复；非法值拒绝；403 写审计日志；全入口生效）。"""
+    store = client.app.state.store
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+    assert _set_pricing(client, hdr, [
+        {"model": "fake/fake-gpt", "request_fee": 0.01, "input_per_1k": 1.0,
+         "output_per_1k": 1.0}]).status_code == 200
+    # 建 key 带余额 0.05（单次调用费用 0.028）
+    r = client.post("/api/keys", json={"label": "余额key", "balance": 0.05}, headers=hdr)
+    assert r.status_code == 200
+    key, kid = r.json()["key"], r.json()["id"]
+    assert r.json()["balance"] == 0.05
+    h2 = {"Authorization": f"Bearer {key}"}
+
+    def row():
+        return [k for k in client.get("/api/keys", headers=hdr).json()["data"]
+                if k["id"] == kid][0]
+
+    # 第 1 次：余额非负 → 放行，成功后扣费 0.05-0.028=0.022
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=h2).status_code == 200
+    assert row()["balance"] == 0.022 and row()["spent"] == 0.028
+    assert row()["balance_exhausted"] is False
+    # 第 2 次：0.022 仍 >= 0 放行，扣后 0.022-0.028=-0.006 < 0 → 进入限额态
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=h2).status_code == 200
+    assert row()["balance"] == -0.006 and row()["balance_exhausted"] is True
+    # 第 3 次：403 限额拦截（提示文案 + 错误码），审计日志有 403 记录
+    r = client.post(URL, json={"model": "fake/fake-gpt"}, headers=h2)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "balance_exhausted"
+    assert "余额" in r.json()["error"]["message"]
+    rec = store.recent(1)[0]
+    assert rec["status"] == "error" and rec["http_status"] == 403 and rec["dkey_id"] == kid
+    # embeddings 入口同样被拦（限额对全部 /v1 计费入口生效）
+    r = client.post(f"http://127.0.0.1:{upstream_port}/v1/embeddings",
+                    json={"model": "fake/fake-gpt", "input": "x"}, headers=h2)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "balance_exhausted"
+    # 充值恢复：PATCH balance=10 → 再次放行
+    r = client.patch(f"/api/keys/{kid}", json={"balance": 10}, headers=hdr)
+    assert r.status_code == 200 and r.json()["balance"] == 10
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=h2).status_code == 200
+    # 取消限额（清空余额 → None = 不限额）
+    r = client.patch(f"/api/keys/{kid}", json={"balance": ""}, headers=hdr)
+    assert r.status_code == 200 and row()["balance"] is None
+    # 非法值拒绝：负数 / 非数字
+    assert client.post("/api/keys", json={"label": "负余额", "balance": -1},
+                       headers=hdr).status_code == 400
+    assert client.patch(f"/api/keys/{kid}", json={"balance": "abc"},
+                        headers=hdr).status_code == 400
+    # 无余额 key（测试基建 key）照常访问，balance 为 null 不受限
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    main_kid = store.recent(1)[0]["dkey_id"]
+    main_row = [k for k in client.get("/api/keys", headers=hdr).json()["data"]
+                if k["id"] == main_kid]
+    assert main_row and main_row[0]["balance"] is None
+    # 清理
+    client.delete(f"/api/keys/{kid}", headers=hdr)
+    _set_pricing(client, hdr, [])
+
+
+def test_r155_cost_stats(client, hdr, upstream_port):
+    """R155：费用统计（KPI cost 字段 + /api/stats/cost 曲线：按模型/下游key 分组，
+    分项合计与逐请求计费口径一致；未配价格 = 0）。
+
+    注：conftest 的 client/DB 是 session 级共享（前面测试的计费行留在库里），
+    金额断言一律用「前后差值」口径，不做绝对值假设。"""
+    store = client.app.state.store
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+    assert _set_pricing(client, hdr, [
+        {"model": "fake/fake-gpt", "request_fee": 0.01, "input_per_1k": 1.0,
+         "output_per_1k": 1.0}]).status_code == 200
+    # 主测试 key（conftest 建号那把）：API 回显的 key 是打码值，用一笔一次性调用落库后
+    # 从最新日志行取 dkey_id 定位（串行测试，最新行必是本次调用）
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    kid = store.recent(1)[0]["dkey_id"]
+    assert kid, "主 key 调用未落 dkey_id"
+    spent_before = store.key_spends().get(kid, 0.0)
+    series_m_before = client.get("/api/stats/cost", params={"group_by": "model"},
+                                 headers=hdr).json()
+    series_d_before = client.get("/api/stats/cost", params={"group_by": "dkey"},
+                                 headers=hdr).json()
+
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+
+    # KPI：差值 = 0.028*2 = 0.056；字段结构含 5 项费用 + 单请求均值
+    p = client.get("/api/stats/period", headers=hdr).json()
+    for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output",
+              "cost_per_request"):
+        assert f in p, f
+    assert store.key_spends().get(kid, 0.0) - spent_before == pytest.approx(0.056, abs=1e-9)
+    assert p["cost"] >= 0.056 - 1e-9      # 绝对值还含前面测试的计费行，只断下界
+    # 曲线（按模型分组，差值）：今日行 fake/fake-gpt 与总 cost 均 +0.056
+    data = client.get("/api/stats/cost", params={"group_by": "model"}, headers=hdr).json()
+    assert data["group_by"] == "model" and "fake/fake-gpt" in data["keys"]
+    lb, la = series_m_before["rows"][-1], data["rows"][-1]
+    assert round(la["cost"] - lb.get("cost", 0.0), 6) == 0.056
+    assert round(la["fake/fake-gpt"] - lb.get("fake/fake-gpt", 0.0), 6) == 0.056
+    # 分项合计 == 总费用（图表堆叠口径逐行一致）
+    assert la["cost"] == pytest.approx(
+        la["cost_req"] + la["cost_input"] + la["cost_cache"] + la["cost_output"], abs=1e-5)
+    # 按下游 key 分组（JOIN 标签）：今日 cost 合计差值一致
+    data = client.get("/api/stats/cost", params={"group_by": "dkey"}, headers=hdr).json()
+    lb_d, la_d = series_d_before["rows"][-1], data["rows"][-1]
+    assert round(la_d["cost"] - lb_d.get("cost", 0.0), 6) == 0.056
+    # 清空价格后新调用 0 费用（历史 cost 保留在库里，不影响新行）
+    _set_pricing(client, hdr, [])
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    assert client.app.state.store.recent(1)[0]["cost"] == 0

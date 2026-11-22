@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import config
 from . import translate as T
+from . import pricing as P
 from .config import ANTHROPIC_VERSION, CONNECT_TIMEOUT_S, VERSION
 from . import reasoning as R
 from .registry import Registry, Upstream
@@ -401,6 +402,26 @@ class Gateway:
             with contextlib.suppress(Exception):
                 kw.setdefault("key_hint", resp.extensions.get("relay_key_hint") or "")
                 kw.setdefault("key_index", resp.extensions.get("relay_key_index") or 0)
+        # v2.1.0 R153/R154：记账时按租户当时价格配置冻结费用（成功请求才计费：
+        # ok + aborted——流被客户端掐断时已消耗的 token 照计；error 一律 0），
+        # 并原子扣减下游 key 余额（扣成负数 → 下一次请求入口预检拦截）。
+        if kw.get("status") in ("ok", "aborted"):
+            uid = kw.get("user_id")
+            reg = self.tenants.get(int(uid)) if (self.tenants is not None and uid) else None
+            total, creq, cin, ccache, cout = P.compute_cost(
+                getattr(reg, "pricing", None) or {},
+                kw.get("model_alias") or "",
+                prompt_tokens=kw.get("prompt_tokens") or 0,
+                completion_tokens=kw.get("completion_tokens") or 0,
+                cached_tokens=kw.get("cached_tokens") or 0,
+            )
+            if total > 0:
+                kw["cost"], kw["cost_req"], kw["cost_input"] = total, creq, cin
+                kw["cost_cache"], kw["cost_output"] = ccache, cout
+                dkey = kw.get("dkey_id")
+                if dkey:
+                    with contextlib.suppress(Exception):
+                        self.store.charge_key(int(dkey), total)
         try:
             self.store.record(**kw)
         except Exception:  # 记账失败不能影响转发

@@ -201,6 +201,29 @@ def _model_binding_gate(user: dict | None, request: Request, in_fmt: str, model:
         "model_not_bound")
 
 
+def _balance_gate(user: dict | None, request: Request, in_fmt: str, model: str):
+    """v2.1.0 R154 余额限额预检：key 设了余额且已扣成负数 → 403 拦截（写一条 403
+    请求日志，审计「谁被限额拦了」）。
+
+    语义：余额模式（balance > 0 设置）下每次成功调用扣费；扣成负数后本函数拦截。
+    不限额（balance 为 None/0 = 未设置）与余额非负（本笔放行、成功后再扣）→ 返回 None 放行。"""
+    bal = (user or {}).get("_key_balance")
+    if bal is None or bal >= 0:
+        return None
+    msg = (f"该 key 余额已不足（余额 ¥{float(bal):.6f}，扣成负数）：访问已被限制。"
+           f"请让账号所有者在控制台「设置 → 我的 API Key」给这把 key 充值余额。")
+    try:
+        ip = request.client.host if request.client else ""
+        request.app.state.store.record(
+            platform="", model=model, in_format=in_fmt,
+            status="error", http_status=403,
+            error=f"余额限额拦截：{msg}"[:800],
+            client_ip=ip, user_id=user.get("id"), dkey_id=user.get("_key_id"))
+    except Exception:
+        log.exception("余额限额拦截审计日志写入失败")
+    return error_response(in_fmt, 403, msg, "balance_exhausted")
+
+
 def _json_object_lenient(raw: bytes) -> dict | None:
     """请求体字节 → JSON 对象（v2.0.3 R151）：UTF-8 解析失败时按 gb18030 抢救一次。
 
@@ -250,6 +273,10 @@ async def _handle(request: Request, in_fmt: str, kind: str):
     gate = _model_binding_gate(user, request, in_fmt, model)
     if gate is not None:
         return gate
+    # v2.1.0 R154 余额限额预检：扣成负数的 key 直接 403
+    bg = _balance_gate(user, request, in_fmt, model)
+    if bg is not None:
+        return bg
     # 聚合模型：裸名命中聚合配置 → 在多个「平台/模型」条目间自动轮换/切换
     if model and model in reg.aggregates and not force:
         est_prompt = T.estimate_tokens(T.flatten_messages_text(body))
@@ -327,6 +354,9 @@ async def embeddings(request: Request):
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
         return gate
+    bg = _balance_gate(user, request, "openai", model)
+    if bg is not None:
+        return bg
     ip = request.client.host if request.client else ""
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
@@ -455,6 +485,9 @@ async def _generate_endpoint(request: Request, kind: str):
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
         return gate
+    bg = _balance_gate(user, request, "openai", model)
+    if bg is not None:
+        return bg
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
         with contextlib.suppress(Exception):
@@ -529,6 +562,9 @@ async def videos_status(request: Request):
     gate = _model_binding_gate(user, request, "openai", model)
     if gate is not None:
         return gate
+    bg = _balance_gate(user, request, "openai", model)
+    if bg is not None:
+        return bg
     ip = request.client.host if request.client else ""
     if not model:
         with contextlib.suppress(Exception):
@@ -634,6 +670,9 @@ async def count_tokens(request: Request):
     gate = _model_binding_gate(user, request, "anthropic", model)
     if gate is not None:
         return gate
+    bg = _balance_gate(user, request, "anthropic", model)
+    if bg is not None:
+        return bg
     resolved = reg.resolve(model, (request.headers.get("x-upstream-platform") or "").strip() or None)
     if not resolved:
         return error_response("anthropic", 404, f"没有找到模型 {model!r} 对应的上游平台", "model_not_found")

@@ -13,6 +13,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from .crypto import KeyCipher
+from . import pricing as P
 
 log = logging.getLogger("relay")
 
@@ -120,6 +121,9 @@ class Registry:
         self.aggregates: dict[str, list[str]] = {}
         self._agg_rr: dict[str, int] = {}
         self._agg_cd: dict[tuple[str, str], float] = {}
+        # 模型费用配置（v2.1.0 R153）：{客户端模型名: {4 价格字段}}，
+        # 文件里以 {"_kind":"pricing"} 标记项存放（与聚合标记项同构，热加载/原子保存复用同一套）
+        self.pricing: dict[str, dict] = {}
         self.reload()
 
     # ---------- 加载 / 热重载 ----------
@@ -132,10 +136,11 @@ class Registry:
                     raw = json.loads(text)
             self._raw = raw
             marker = [x for x in raw if isinstance(x, dict) and x.get("_kind") == "aggregates"]
+            pricemark = [x for x in raw if isinstance(x, dict) and x.get("_kind") == "pricing"]
             ups: list[Upstream] = []
             for x in raw:
-                if isinstance(x, dict) and x.get("_kind") == "aggregates":
-                    continue
+                if isinstance(x, dict) and x.get("_kind"):
+                    continue    # 标记项（_kind：aggregates / pricing）不参与平台解析
                 enc = x.get("enc_keys") if isinstance(x, dict) else None
                 if enc:
                     # v1.1.1：密文行——用本租户 K_t 解密进内存（磁盘不留明文）
@@ -158,6 +163,16 @@ class Registry:
                     aggs.update({str(k): [str(e) for e in v]
                                  for k, v in mk["aggregates"].items() if isinstance(v, list)})
             self.aggregates = aggs
+            # 费用配置标记项（v2.1.0 R153）：坏条目不整体炸掉热加载，按无费用处理并告警
+            pricing: dict[str, dict] = {}
+            for mk in pricemark:
+                if isinstance(mk.get("pricing"), dict):
+                    try:
+                        pricing.update(P.parse_pricing(mk["pricing"]))
+                    except ValueError as e:
+                        log.warning("租户文件 %s 的费用配置解析失败，按未配置处理: %s",
+                                    self.upstreams_file.name, e)
+            self.pricing = pricing
             cmap: dict[str, str] = {}
             if self.clients_file.exists():
                 text = self.clients_file.read_text(encoding="utf-8").strip()
@@ -282,6 +297,33 @@ class Registry:
                 self._agg_cd.pop(k, None)
         self._persist_aggregates()
         return True
+
+    # ---------- 模型费用配置（v2.1.0 R153：_kind=pricing 标记项，与聚合标记项同构） ----------
+    def _persist_pricing(self) -> None:
+        with self._lock:
+            base = [x for x in self._raw
+                    if not (isinstance(x, dict) and x.get("_kind") == "pricing")]
+            if self.pricing:
+                base.append({"_kind": "pricing", "pricing": self.pricing})
+            self._write(base)
+
+    def save_pricing(self, entries: dict) -> None:
+        """全量覆盖保存费用配置（入参 = parse_pricing 归一后的 {模型名: 4 价格字段}；
+        空 dict = 清空全部条目，标记行随之移除）。"""
+        with self._lock:
+            self.pricing = {n: dict(v) for n, v in (entries or {}).items()}
+        self._persist_pricing()
+
+    def pricing_info(self) -> list[dict]:
+        """GET /api/pricing 用：按模型名排序的条目列表（4 字段全量回显，零值也带）。"""
+        out = []
+        for name in sorted(self.pricing):
+            p = dict(self.pricing[name])
+            row = {"model": name}
+            for f in P.PRICE_FIELDS:
+                row[f] = p.get(f, 0.0)
+            out.append(row)
+        return out
 
     def entry_fresh(self, e: str) -> bool:
         """单条聚合条目在配置层是否有效（v2.0.1，比 resolve 的透传更严）：

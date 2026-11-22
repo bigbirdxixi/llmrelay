@@ -19,6 +19,7 @@ from . import auth as A
 from . import config
 from . import geoip as G
 from . import mailer as M
+from . import pricing as P
 from .gateway import UpstreamError
 from .registry import Registry, Upstream, fetch_models
 
@@ -349,6 +350,59 @@ async def delete_aggregate(name: str, request: Request, _: None = Depends(auth))
     if not reg.remove_aggregate(name):
         raise HTTPException(404, f"聚合模型 {name!r} 不存在")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- 模型费用（v2.1.0 R153）
+@router.get("/pricing")
+async def list_pricing(request: Request, _: None = Depends(auth)):
+    """当前账号（或管理员汇总）的模型费用配置。
+
+    单账号：{"entries": [{model, request_fee, input_per_1k, cache_hit_per_1k, output_per_1k}]}
+    汇总视图：按账号分组的条目（带 tenant / tenant_label）。"""
+    if _multi_mode(request):
+        data = []
+        for uid, label, reg in _sel_tenant_regs(request):
+            data.append({"tenant": uid, "tenant_label": label,
+                         "entries": reg.pricing_info()})
+        return {"data": data, "all": True}
+    reg = _reg(request)
+    return {"entries": reg.pricing_info()}
+
+
+@router.post("/pricing")
+async def save_pricing(request: Request, _: None = Depends(auth)):
+    """全量覆盖保存费用配置。body: {"entries": [{model, 4 价格字段}]}。
+
+    校验（对齐 v2.0.1 聚合保存严格校验）：模型名必须在当前上游配置里可调用
+    （all_model_ids：平台/模型全名、裸模型名、别名、聚合名），否则 400 并列出坏名字。
+    空 entries = 清空全部费用配置。"""
+    reg = _reg_scoped(request)
+    data = await request.json()
+    raw = data.get("entries") if isinstance(data, dict) else data
+    if raw is None:
+        raw = []
+    # 前端表格行 [{model, 4 字段}] → {model: {4 字段}}；也兼容直接传对象
+    if isinstance(raw, list):
+        entries: dict = {}
+        for row in raw:
+            if not isinstance(row, dict):
+                raise HTTPException(400, "费用条目必须是对象（含 model 与 4 个价格字段）")
+            m = str(row.get("model") or "").strip()
+            if not m:
+                continue
+            entries[m] = {f: row.get(f, 0) for f in P.PRICE_FIELDS}
+    else:
+        entries = raw
+    try:
+        entries = P.parse_pricing(entries)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    valid = set(reg.all_model_ids())
+    bad = [n for n in entries if n not in valid]
+    if bad:
+        raise HTTPException(400, f"这些模型名不在当前上游配置里：{', '.join(bad)}")
+    reg.save_pricing(entries)
+    return {"ok": True, "entries": reg.pricing_info()}
 
 
 @router.get("/providers/reasoning-preview")
@@ -937,6 +991,27 @@ async def stats_series(request: Request, days: int = 30, group_by: str = "platfo
     return data
 
 
+@router.get("/stats/cost")
+async def stats_cost(request: Request, days: int = 30, group_by: str = "model",
+                     _: None = Depends(auth)):
+    """费用曲线数据（v2.1.0 R155）：按天 × 分组（model/下游key/平台/账号/合计），
+    值 = SUM(cost)（元）+ 请求费/输入/缓存命中/输出 4 分项。
+    未配置价格或无成功计费 = 全 0（前端可据此显示「尚未产生费用」）。"""
+    store = request.app.state.store
+    data = store.cost_series(days, group_by, _data_user(request))
+    if group_by == "account":
+        emap = _email_map(store)
+        reserved = {"day", "cost", "cost_req", "cost_input", "cost_cache",
+                    "cost_output", "requests"}
+        data["rows"] = [
+            {(k if k in reserved else emap.get(k, k)): v for k, v in row.items()}
+            for row in data["rows"]
+        ]
+        data["keys"] = [emap.get(k, k) for k in data["keys"]]
+        data["platforms"] = data["keys"]
+    return data
+
+
 @router.get("/stats/hourly")
 async def stats_hourly(request: Request, days: int = 1, group: str = "hour",
                        split: str = "none", _: None = Depends(auth)):
@@ -1192,6 +1267,8 @@ async def settings(request: Request, _: None = Depends(auth)):
     reg = request.app.state.registry.get(viewing["id"])
     opts = reg.binding_options() if reg is not None else {"full": [], "bare": [], "aggs": []}
     valid = set(reg.all_model_ids()) if reg is not None else set()
+    # v2.1.0 R154：key 余额 / 累计消费（限额功能展示面）
+    spends_all = store.key_spends() if keys_scope == "all" else store.key_spends(viewing["id"])
     if keys_scope == "all":
         emap = _email_map(store)
         tenants = request.app.state.tenants
@@ -1206,6 +1283,9 @@ async def settings(request: Request, _: None = Depends(auth)):
             k["owner_email"] = emap.get(str(owner), "") if owner is not None else ""
             k["self"] = owner == user["id"]
             k["models_missing"] = [m for m in (k.get("models") or []) if m not in ovalid] if ovalid else []
+            k["balance"] = k.get("balance")      # 元；None = 不限额
+            k["spent"] = spends_all.get(k["id"], 0.0)
+            k["balance_exhausted"] = bool(k.get("balance") is not None and k["balance"] < 0)
             keys.append(k)
     else:
         for k in store.list_api_keys(viewing["id"]):
@@ -1214,7 +1294,10 @@ async def settings(request: Request, _: None = Depends(auth)):
                          "created_at": k["created_at"], "last_used": k["last_used"],
                          "revoked": bool(k["revoked"]), "expires_at": k.get("expires_at"),
                          "models": models,                     # 模型绑定（list）；None = 不限制
-                         "models_missing": [m for m in (models or []) if m not in valid]})
+                         "models_missing": [m for m in (models or []) if m not in valid],
+                         "balance": k.get("balance"),           # v2.1.0：余额（元）；None = 不限额
+                         "spent": spends_all.get(k["id"], 0.0),
+                         "balance_exhausted": bool(k.get("balance") is not None and k["balance"] < 0)})
     return {
         "version": config.VERSION,
         "user": A.public_user(user),
@@ -1455,10 +1538,15 @@ async def my_keys(request: Request, _: None = Depends(auth)):
     keys = store.list_api_keys(user["id"])
     reg = request.app.state.registry.get(user["id"])
     valid = set(reg.all_model_ids()) if reg is not None else set()
+    spends = store.key_spends(user["id"])      # v2.1.0 R154：各 key 累计消费（一次 GROUP BY）
     data = []
     for k in keys:
         row = {**k, "key": A.mask_key(k["key"]), "revoked": bool(k["revoked"])}
         row["models_missing"] = [m for m in (k.get("models") or []) if m not in valid]
+        row["spent"] = spends.get(k["id"], 0.0)          # 累计消费（元，全时段）
+        row["balance"] = k.get("balance")                 # 余额（元）；None = 不限额
+        row["balance_exhausted"] = bool(
+            row["balance"] is not None and row["balance"] < 0)   # 扣成负数 → 访问已被限制
         data.append(row)
     return {"data": data}
 
@@ -1507,13 +1595,19 @@ def _parse_expires(v) -> str | None:
 async def create_key(request: Request, _: None = Depends(auth)):
     body = await request.json() if await request.body() else {}
     user = _user(request)
+    store = request.app.state.store
     models = _validate_model_bindings(request, user["id"], body.get("models"))
-    key = request.app.state.store.create_api_key(
+    try:
+        bal = store._normalize_balance(body.get("balance"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    key = store.create_api_key(
         user["id"], A.new_api_key(), str(body.get("label") or "")[:60],
-        _parse_expires(body.get("expires_at")), models)
+        _parse_expires(body.get("expires_at")), models, balance=bal)
     return {"ok": True, "key": key["key"], "id": key["id"],   # 明文只在这里返回一次
             "label": key["label"], "created_at": key["created_at"],
-            "expires_at": key.get("expires_at"), "models": key.get("models")}
+            "expires_at": key.get("expires_at"), "models": key.get("models"),
+            "balance": key.get("balance")}
 
 
 @router.post("/keys/{key_id}/reveal")
@@ -1548,8 +1642,10 @@ async def reveal_key(key_id: int, request: Request, _: None = Depends(auth)):
 
 @router.patch("/keys/{key_id}")
 async def update_key(key_id: int, request: Request, _: None = Depends(auth)):
-    """改 key 的名称（v1.2.1 起原「备注」列改名「名称」）/ 过期时间 / 模型绑定。body: {label?, expires_at?, models?}
-    （expires_at 传 "" 或 null = 永不过期；models 传 null 或 [] = 清空绑定恢复不限制）。"""
+    """改 key 的名称（v1.2.1 起原「备注」列改名「名称」）/ 过期时间 / 模型绑定 / 余额（v2.1.0）。
+    body: {label?, expires_at?, models?, balance?}
+    （expires_at 传 "" 或 null = 永不过期；models 传 null 或 [] = 清空绑定恢复不限制；
+    balance 传 "" 或 null 或 0 = 不限额只统计消费，>0 = 余额模式，扣成负数后限制访问）。"""
     body = await request.json() if await request.body() else {}
     user = _user(request)
     store = request.app.state.store
@@ -1567,9 +1663,14 @@ async def update_key(key_id: int, request: Request, _: None = Depends(auth)):
         models = _validate_model_bindings(request, user["id"], body.get("models"))
         if not store.update_key_models(user["id"], key_id, models):
             raise HTTPException(404, "key 不存在")
+    if "balance" in body:
+        try:
+            store.set_key_balance(user["id"], key_id, body.get("balance"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     k2 = store.get_api_key(key_id)
     return {"ok": True, "label": k2["label"], "expires_at": k2.get("expires_at"),
-            "models": k2.get("models")}
+            "models": k2.get("models"), "balance": k2.get("balance")}
 
 
 @router.delete("/keys/{key_id}")

@@ -36,6 +36,12 @@ COLUMNS: dict[str, str] = {
     "user_id": "INTEGER",     # 属于哪个账号（NULL = 多账号改造前的历史数据）
     "dkey_id": "INTEGER",     # 这次请求用的下游客户端 key（api_keys.id，NULL = 历史数据）
     "output_info": "TEXT",    # 生成类结果（v2.0.0 图像生成透传）：{"images": N, "urls": [...]}，chat 请求为空
+    # ---- 费用（v2.1.0 R153，记账时按当时的价格配置冻结；成功请求计费，失败 0）----
+    "cost": "REAL",           # 本次调用总费用（元）
+    "cost_req": "REAL",       # 其中：请求费（每次调用固定金额）
+    "cost_input": "REAL",     # 其中：输入费（非缓存输入 token）
+    "cost_cache": "REAL",     # 其中：缓存命中费（cached_tokens）
+    "cost_output": "REAL",    # 其中：输出费（completion_tokens）
 }
 
 BASE_DDL = """
@@ -79,6 +85,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked     INTEGER NOT NULL DEFAULT 0,
     expires_at  TEXT,              -- 过期时间（ISO 带时区；NULL/空 = 永不过期）
     model_bindings TEXT,           -- 模型绑定（JSON 数组：该 key 可调的客户端模型名；NULL/空 = 不限制）v1.2.0
+    balance       REAL,           -- 余额（元，v2.1.0 R154）：NULL = 不限额只统计消费；>0 = 余额模式，成功调用原子扣费，扣成负数后拦截后续请求
     key_mac     BLOB,             -- HMAC-SHA256(K_mac, key)：验签专用（确定性、建索引，O(1)）
     key_enc     BLOB             -- AES-GCM(K_enc, key)：可逆，复制按钮取回用（NULL = 尚未迁移）
 );
@@ -144,8 +151,12 @@ class Store:
             self._conn.execute("ALTER TABLE api_keys ADD COLUMN key_enc BLOB")
         if "model_bindings" not in khave:
             self._conn.execute("ALTER TABLE api_keys ADD COLUMN model_bindings TEXT")
+        if "balance" not in khave:
+            self._conn.execute("ALTER TABLE api_keys ADD COLUMN balance REAL")
         # 列齐了才建唯一索引（NULL 可重复：未迁移的老行不受影响；SQLite 里 NULL 互不冲突）
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_key_mac ON api_keys (key_mac)")
+        # dkey_id 是 COLUMNS 迁移出来的列（建表语句没有）→ 索引也必须在列齐后建（v2.1.0：key 消费/余额查询）
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_req_dkey ON requests (dkey_id)")
 
     # ---------- 写入 ----------
     def record(self, **kw) -> None:
@@ -177,6 +188,13 @@ class Store:
             "output_info": (kw.get("output_info") or "")[:4000],
             "user_id": kw.get("user_id"),
             "dkey_id": kw.get("dkey_id"),
+            # 费用（v2.1.0 R153）：gateway.record 在成功路径上按当时价格算好传入；本地 4xx 等直接
+            # store.record 的路径不带 → 0。历史行缺列前为 NULL → 查询侧一律 COALESCE。
+            "cost": round(float(kw.get("cost") or 0.0), 6),
+            "cost_req": round(float(kw.get("cost_req") or 0.0), 6),
+            "cost_input": round(float(kw.get("cost_input") or 0.0), 6),
+            "cost_cache": round(float(kw.get("cost_cache") or 0.0), 6),
+            "cost_output": round(float(kw.get("cost_output") or 0.0), 6),
         }
         if not payload["total_tokens"]:
             payload["total_tokens"] = payload["prompt_tokens"] + payload["completion_tokens"]
@@ -562,6 +580,58 @@ class Store:
         return {"days": day_list, "group_by": group_by, "keys": keys,
                 "platforms": keys, "rows": out_rows}
 
+    def cost_series(self, days: int = 30, group_by: str = "model",
+                   user_id: int | list | None = None) -> dict:
+        """费用时间序列（v2.1.0 R155）：按天 × 分组，值 = SUM(cost)（元）+ 4 个费用分项
+        （请求费/输入/缓存命中/输出，供「费用构成」堆叠展示）。结构同 series()
+        （rows 每行：day + 每 key 的 cost + cost/分项合计 + requests），group_by 复用
+        SERIES_GROUPS（platform/model/key/dkey/account/total）。无计费（未配价格）= 全 0。"""
+        since = self._since(days)
+        dkey = group_by == "dkey"
+        expr = self.SERIES_GROUPS.get(group_by, self.SERIES_GROUPS["platform"])
+        if dkey:
+            from_clause = "FROM requests r LEFT JOIN api_keys ak ON ak.id = r.dkey_id"
+            where, uargs = self._user_cond(user_id, "r.", "AND")
+            tscol = "r.ts"
+        else:
+            from_clause = "FROM requests"
+            where, uargs = self._user_cond(user_id)
+            tscol = "ts"
+        args = (since,) + uargs
+        with self._lock:
+            rows = [dict(r) for r in self._conn.execute(
+                f"SELECT substr({tscol},1,10) AS day, {expr} AS k,"
+                " COALESCE(SUM(cost),0) AS cost,"
+                " COALESCE(SUM(cost_req),0) AS cost_req,"
+                " COALESCE(SUM(cost_input),0) AS cost_input,"
+                " COALESCE(SUM(cost_cache),0) AS cost_cache,"
+                " COALESCE(SUM(cost_output),0) AS cost_output,"
+                " COUNT(*) AS requests"
+                f" {from_clause} WHERE {tscol} >= ?{where} GROUP BY day, k ORDER BY day",
+                args)]
+        start = (datetime.now() - timedelta(days=max(1, int(days)) - 1)).date()
+        day_list = [(start + timedelta(days=i)).isoformat() for i in range(max(1, int(days)))]
+        keys = sorted({r["k"] or "" for r in rows})
+        index = {(r["day"], r["k"] or ""): r for r in rows}
+        out_rows = []
+        for d in day_list:
+            item = {"day": d, "cost": 0.0, "cost_req": 0.0, "cost_input": 0.0,
+                   "cost_cache": 0.0, "cost_output": 0.0, "requests": 0}
+            for k in keys:
+                r = index.get((d, k))
+                item[k] = round(float(r["cost"] or 0), 6) if r else 0.0
+                item["cost"] += float(r["cost"] or 0) if r else 0
+                item["cost_req"] += float(r["cost_req"] or 0) if r else 0
+                item["cost_input"] += float(r["cost_input"] or 0) if r else 0
+                item["cost_cache"] += float(r["cost_cache"] or 0) if r else 0
+                item["cost_output"] += float(r["cost_output"] or 0) if r else 0
+                item["requests"] += int(r["requests"] or 0) if r else 0
+            for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output"):
+                item[f] = round(item[f], 6)
+            out_rows.append(item)
+        return {"days": day_list, "group_by": group_by, "keys": keys,
+                "platforms": keys, "rows": out_rows}
+
     @staticmethod
     def _p95(vals: list[float]) -> int:
         if not vals:
@@ -571,7 +641,7 @@ class Store:
         return int(round(vs[idx]))
 
     def period(self, days: int = 30, user_id: int | list | None = None) -> dict:
-        """区间 KPI：请求/tokens/平均&P95 耗时/TTFT/缓存命中/错误/流式/推理。"""
+        """区间 KPI：请求/tokens/平均&P95 耗时/TTFT/缓存命中/错误/流式/推理 + 费用（v2.1.0）。"""
         since = self._since(days)
         where, args = self._user_clause(user_id)
         cond = (f"{where} AND ts >= ?" if where else " WHERE ts >= ?")
@@ -584,7 +654,10 @@ class Store:
                 " COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS er,"
                 " COALESCE(SUM(CASE WHEN stream=1 THEN 1 ELSE 0 END),0) AS st,"
                 " COALESCE(AVG(CASE WHEN status='ok' THEN latency_ms END),0) AS lat,"
-                " COALESCE(AVG(CASE WHEN status='ok' THEN ttft_ms END),0) AS ttft"
+                " COALESCE(AVG(CASE WHEN status='ok' THEN ttft_ms END),0) AS ttft,"
+                " COALESCE(SUM(cost),0) AS cost,"
+                " COALESCE(SUM(cost_req),0) AS creq, COALESCE(SUM(cost_input),0) AS cin,"
+                " COALESCE(SUM(cost_cache),0) AS ccache, COALESCE(SUM(cost_output),0) AS cout"
                 f" FROM requests{cond}", params).fetchone()
             # P95 只算成功请求（失败请求的耗时没有统计意义）
             ok_cond = (f"{where} AND status='ok' AND ts >= ?" if where
@@ -594,6 +667,7 @@ class Store:
                 if row[0] is not None]
         total, cached = t["tk"] or 0, t["cache"] or 0
         requests_n = t["r"] or 0
+        cost = round(float(t["cost"] or 0), 6)
         return {"requests": requests_n, "tokens": total,
                 "cached_tokens": cached,
                 "cache_rate": round(cached / total, 4) if total else 0,
@@ -604,7 +678,14 @@ class Store:
                 "stream_rate": round((t["st"] or 0) / requests_n, 4) if requests_n else 0,
                 "avg_latency_ms": round(t["lat"] or 0),
                 "p95_latency_ms": self._p95(lats),
-                "avg_ttft_ms": round(t["ttft"] or 0)}
+                "avg_ttft_ms": round(t["ttft"] or 0),
+                # v2.1.0 R155：区间费用（成功请求计费合计；未配置价格 = 0）
+                "cost": cost,
+                "cost_req": round(float(t["creq"] or 0), 6),
+                "cost_input": round(float(t["cin"] or 0), 6),
+                "cost_cache": round(float(t["ccache"] or 0), 6),
+                "cost_output": round(float(t["cout"] or 0), 6),
+                "cost_per_request": round(cost / requests_n, 6) if requests_n else 0.0}
 
     def latency_series(self, days: int = 30, user_id: int | list | None = None) -> dict:
         """每日耗时序列（仅成功请求）：avg / p95 / TTFT 平均。"""
@@ -1191,23 +1272,44 @@ class Store:
 
     def create_api_key(self, user_id: int, key: str, label: str = "",
                        expires_at: str | None = None,
-                       model_bindings: list | None = None) -> dict:
+                       model_bindings: list | None = None,
+                       balance: float | None = None) -> dict:
         """expires_at：ISO 带时区字符串；None/空 = 永不过期。
         model_bindings：该 key 可调的客户端模型/聚合名（原始请求串形式）；None/空 = 不限制。
-        加密双列（key_mac/key_enc）随主键一起写（cipher 未注入时留 NULL，验签走明文兜底）。"""
+        balance（v2.1.0 R154）：余额（元）；None/0 = 不限额只统计消费；>0 = 余额模式（成功调用扣费，
+        扣成负数后拦截）。加密双列（key_mac/key_enc）随主键一起写（cipher 未注入时留 NULL，验签走明文兜底）。"""
         c = self._key_cipher
         mac = c.mac(key) if c else None
         enc = c.seal(key) if c else None
         bindings = self._models_to_json(model_bindings)
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at, key_mac, key_enc, model_bindings)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO api_keys (user_id, key, label, created_at, expires_at, key_mac, key_enc, model_bindings, balance)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (int(user_id), key, (label or "")[:60], self._now(),
-                 (expires_at or "").strip() or None, mac, enc, bindings))
+                 (expires_at or "").strip() or None, mac, enc, bindings,
+                 self._normalize_balance(balance)))
             self._conn.commit()
             kid = cur.lastrowid
         return self.get_api_key(kid)
+
+    @staticmethod
+    def _normalize_balance(balance) -> float | None:
+        """余额入参归一：None/空/0 → NULL（不限额，只统计消费）；>0 → float（元，6 位小数）。
+        负数拒绝：负余额是扣减产生的内部状态（限额标志），不允许手工设置——
+        误传负数若归一成 NULL 会静默取消限额，必须 400。"""
+        if balance is None:
+            return None
+        s = str(balance).strip()
+        if not s:
+            return None
+        try:
+            v = float(s)
+        except ValueError:
+            raise ValueError("余额必须是数字（元）")
+        if v < 0:
+            raise ValueError("余额不能为负数（负余额是扣减产生的内部状态，不能手工设置）")
+        return None if v == 0 else round(v, 6)
 
     def update_key_expires(self, user_id: int, key_id: int,
                            expires_at: str | None) -> bool:
@@ -1226,6 +1328,52 @@ class Store:
                 ((label or "").strip()[:60], int(key_id), int(user_id)))
             self._conn.commit()
             return cur.rowcount > 0
+
+    def set_key_balance(self, user_id: int, key_id: int, balance) -> bool:
+        """改 key 余额（v2.1.0 R154）：None/空/0 = 不限额（NULL）；>0 = 余额模式。
+        管理操作是覆盖写（直接设值），不是增量充值。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE api_keys SET balance = ? WHERE id = ? AND user_id = ?",
+                (self._normalize_balance(balance), int(key_id), int(user_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def charge_key(self, key_id: int, cost: float) -> None:
+        """成功调用后的余额扣减（v2.1.0 R154）：单条原子 UPDATE（无读改写竞态），
+        可扣成负数——负数 = 限额标志，下一次请求入口预检拦截。balance 为 NULL（不限额）不动。
+        SQL 内 round(·,6) 防多次扣减的浮点噪声累积（SQLite 内置 round 函数）。"""
+        if cost is None or cost <= 0:
+            return
+        with self._lock:
+            self._conn.execute(
+                "UPDATE api_keys SET balance = round(balance - ?, 6)"
+                " WHERE id = ? AND balance IS NOT NULL",
+                (round(float(cost), 6), int(key_id)))
+            self._conn.commit()
+
+    def key_spends(self, user_id: int | None = None) -> dict[int, float]:
+        """各下游 key 的累计消费（元，全时段；v2.1.0）：{api_keys.id: spent}。
+        一次 GROUP BY 查完（避免逐 key N+1）；key 列表页与管理员汇总视图共用。"""
+        with self._lock:
+            if user_id is None:
+                rows = self._conn.execute(
+                    "SELECT dkey_id, COALESCE(SUM(cost), 0) AS s FROM requests"
+                    " WHERE dkey_id IS NOT NULL GROUP BY dkey_id").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT r.dkey_id, COALESCE(SUM(r.cost), 0) AS s FROM requests r"
+                    " JOIN users u ON u.id = r.user_id WHERE r.dkey_id IS NOT NULL AND u.id = ?"
+                    " GROUP BY r.dkey_id", (int(user_id),)).fetchall()
+        return {int(r["dkey_id"]): round(float(r["s"] or 0), 6) for r in rows}
+
+    def key_spend(self, key_id: int) -> float:
+        """单把 key 的累计消费（元）——key 行展示用（列表页走 key_spends 批量）。"""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT COALESCE(SUM(cost), 0) AS s FROM requests WHERE dkey_id = ?",
+                (int(key_id),)).fetchone()
+        return round(float(r["s"] or 0), 6)
 
     def update_key_models(self, user_id: int, key_id: int,
                           model_bindings: list | None) -> bool:
@@ -1291,7 +1439,8 @@ class Store:
         _key_revoked（该 key 已被禁用/吊销 → 调用方拦 401「已禁用」）、
         _key_expired（过期时间已到 → 调用方拦 401「已过期」）、
         _key_expires_at（原始过期时间 ISO 串，报错信息里回显用；无过期 = ""）、
-        _key_models（模型绑定白名单，list；None = 不限制 → 调用方做路由门禁）。
+        _key_models（模型绑定白名单，list；None = 不限制 → 调用方做路由门禁）、
+        _key_balance（余额（元），None = 不限额只统计；< 0 = 扣成负数 → 调用方入口拦 403）。
         """
         key = (key or "").strip()
         if not key:
@@ -1302,7 +1451,7 @@ class Store:
             if self._key_cipher is not None:
                 r = self._conn.execute(
                     "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked,"
-                    " k.model_bindings AS key_models"
+                    " k.model_bindings AS key_models, k.balance AS key_balance"
                     " FROM api_keys k JOIN users u ON u.id = k.user_id"
                     " WHERE k.key_mac = ? AND u.status = 'active'",
                     (self._key_cipher.mac(key),)).fetchone()
@@ -1310,7 +1459,7 @@ class Store:
             if r is None:
                 r = self._conn.execute(
                     "SELECT u.*, k.id AS key_id, k.expires_at AS key_expires, k.revoked AS key_revoked,"
-                    " k.model_bindings AS key_models"
+                    " k.model_bindings AS key_models, k.balance AS key_balance"
                     " FROM api_keys k JOIN users u ON u.id = k.user_id"
                     " WHERE k.key = ? AND u.status = 'active'", (key,)).fetchone()
             if r:
@@ -1326,6 +1475,8 @@ class Store:
         user["_key_revoked"] = bool(user.pop("key_revoked"))
         user["_key_expired"] = (not user["_key_revoked"]) and bool(exp) and self._now() >= exp
         user["_key_models"] = self._models_from_json(user.pop("key_models", None))
+        # v2.1.0 R154：key 余额（None = 不限额只统计消费；扣成负数后调用方入口预检拦截 403）
+        user["_key_balance"] = user.pop("key_balance", None)
         return user
 
     def close(self) -> None:
