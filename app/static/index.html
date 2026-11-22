@@ -137,8 +137,8 @@ tbody tr:hover td{background:#101a28}
 #toast .t.err{border-color:#4a2530;color:#ffb4b4}
 #toast .t.ok{border-color:#1f4438;color:#a7f3d0}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-/* v2.1.0 R157/R159：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
-.split.four{grid-template-columns:minmax(160px,240px) minmax(180px,260px) minmax(180px,240px) minmax(80px,100px)}
+/* v2.1.0 R157/R159/R161：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
+.split.four{grid-template-columns:minmax(160px,240px) minmax(180px,210px) minmax(180px,240px) minmax(80px,100px)}
 /* 概览页：星期 × 时段（左，热力图）× 近期活动（右）——v1.2.3 panel 互换后左宽右窄（11:9）：
    热力图 24 个时段列弹性铺满（minmax 列，不出现横向滚动条），留白消失；堆叠图相应收窄仍舒展 */
 .split.ov{grid-template-columns:minmax(0,11fr) minmax(0,9fr);gap:14px}
@@ -206,14 +206,16 @@ tbody tr:hover td{background:#101a28}
    短名平台弹窗会缩到 ~960px，行内价格 4 输入（312px）+ 关闭写法装不下被 flex-wrap 甩到第二行；
    固定列宽后弹窗稳定 ≈1154px，任何名字长度都单行不折行 */
 #modal .sheet.wide{width:fit-content;max-width:min(1500px,calc(100vw - 48px))}
-/* fit-content 取内容 max-content；长说明标签（模型级设置等）单行宽会顶满弹窗，限宽 600 让弹窗宽度
-   由真正的宽元素（模型行 ≈1110）决定，弹窗随内容收窄 */
-#modal .sheet.wide .field > label{max-width:600px}
+/* fit-content 取内容 max-content；长说明标签（模型级设置等）单行宽会顶满弹窗，限宽让弹窗宽度
+   由真正的宽元素（模型行 ≈1110）决定。v2.1.0 R161：上限 600→1100（用户反馈说明文字太窄、换行过多；
+   1100 < 模型行 1110，弹窗固有宽仍由模型行决定，不变） */
+#modal .sheet.wide .field > label{max-width:1100px}
 .provcols{display:flex;gap:18px;align-items:stretch}
 .provcols .col-l{flex:0 0 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
 .provcols .col-r{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
-/* 右列 Base URL/出口代理 输入框定宽（fit-content 下 input  intrinsic 宽太窄）；窄屏回落 100% */
-.provcols .col-r .field input{width:min(640px,100%)}
+/* 右列 Base URL/出口代理 输入框定宽（fit-content 下 input  intrinsic 宽太窄）；窄屏回落 100%。
+   v2.1.0 R161：640→520（用户反馈再窄一些） */
+.provcols .col-r .field input{width:min(520px,100%)}
 /* 左列 API Key 字段拉满列高：textarea 弹性伸展，底部（含说明文字）与右列 出口代理 底部对齐 */
 .provcols .col-l .field{flex:1;display:flex;flex-direction:column}
 .provcols .col-l .field textarea{flex:1;min-height:64px}
