@@ -2,6 +2,8 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [2.1.0] - 2026-11-22
+
 ## [2.0.3] - 2026-11-21
 
 ### 改动：设置页「客户端接入示例」补齐 Images / Videos / Embeddings（生产反馈）
