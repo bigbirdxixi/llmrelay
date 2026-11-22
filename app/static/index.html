@@ -2344,7 +2344,7 @@ function logPageBar(page, maxPage){
 
 function thfToggle(ev, field){
   ev.stopPropagation();
-  if (S.thfPop === field){ thfPopClose(); return; }
+  if (S.thfPop === field){ thfPopClose(true); return; }
   document.getElementById("thfpop")?.remove();   // 换一个列时先收起旧面板
   const sel = (S.logFilters || {})[field] || [];
   const pop = document.createElement("div");
@@ -2354,7 +2354,10 @@ function thfToggle(ev, field){
     logFilterValues(field).map(v =>
       `<label class="thfopt"><input type="checkbox" value="${esc(v)}" ${sel.includes(v) ? "checked" : ""}
         onchange="thfPopChange('${field}', this)"><span>${esc(v)}</span></label>`).join("") +
-    (sel.length ? `<button class="btn sm" style="width:100%;margin-top:6px" onclick="thfPopClear('${field}')">清空此项</button>` : "");
+    `<div style="display:flex;gap:6px;margin-top:6px">` +
+      `<button class="btn sm thfclear" style="flex:1;width:auto;${sel.length ? "" : "display:none;"}" onclick="thfPopClear('${field}')">清空此项</button>` +
+      `<button class="btn sm thfapply" style="flex:1;width:auto" onclick="thfPopApply('${field}')">应用</button>` +
+    `</div>`;
   document.body.appendChild(pop);
   const r = ev.currentTarget.getBoundingClientRect();
   pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)) + "px";
@@ -2370,39 +2373,46 @@ function thfPopChange(field, input){
   if (input.checked){ if (!sel.includes(input.value)) sel = [...sel, input.value]; }
   else sel = sel.filter(v => v !== input.value);
   if (sel.length) S.logFilters[field] = sel; else delete S.logFilters[field];
-  S.thfPop = null;                        // 重绘会重建弹出面板
-  document.getElementById("thfpop")?.remove();
-  S.logPage = 1;
-  renderLogs(1);                          // 筛选发后端，作用于全量记录
+  // v2.1.0 R173：勾选只更新状态、面板保持打开（多项复选场景）；
+  // 点「应用」/ 面板外 / 滚动收起时才生效（收起路径统一 thfPopClose(true) 应用当前选择）
+  S.thfPop = field;
+  const c = document.getElementById("thfpop")?.querySelector(".thfclear");
+  if (c) c.style.display = sel.length ? "" : "none";
+}
+
+function thfPopApply(field){
+  thfPopClose(true);
 }
 
 function thfPopClear(field){
   if (S.logFilters) delete S.logFilters[field];
-  thfPopClose();
-  S.logPage = 1;
-  renderLogs(1);
+  thfPopClose(true);
 }
 
-function thfPopClose(){
+function thfPopClose(apply){
   document.getElementById("thfpop")?.remove();
   S.thfPop = null;
+  // R173：勾选后面板保持打开，选择态在 S.logFilters 里；收起路径（点面板外/滚动/列头再点/「应用」）
+  // 带 apply 时把当前选择应用到列表；换列收起（不带 apply）只收面板，选择保留在 S.logFilters
+  if (apply){ S.logPage = 1; renderLogs(1); }
 }
 
-// 点面板外 / 滚动 → 收起筛选面板
+// 点面板外 / 滚动 → 收起筛选面板（R173：收起即应用当前勾选）
 document.addEventListener("click", ev => {
   if (S.thfPop == null) return;
   if (document.getElementById("thfpop")?.contains(ev.target)) return;
   if (ev.target.closest && ev.target.closest(".thfb")) return;   // 列头按钮交给它自己的 onclick 切换
-  thfPopClose();
+  thfPopClose(true);
 });
 document.addEventListener("scroll", ev => {
   if (S.thfPop == null) return;
   const pop = document.getElementById("thfpop");
   if (pop && (ev.target === pop || pop.contains(ev.target))) return;   // 面板自身列表滚动（滚轮/拖滚条/点下箭头）不收起；页面或表格容器滚动时 fixed 面板会脱离列头，仍需收起
-  thfPopClose();
+  thfPopClose(true);
 }, true);
 
 function clearLogFilters(){
+  thfPopClose();   // R173：面板若开着先收起（其勾选选择随下方 S.logFilters 重置一起失效）
   S.logFilters = {};
   S.logRange = "15m"; S.logDateFrom = S.logDateTo = "";   // 恢复默认：近 15 分钟（v1.2.1）
   renderLogs(1);
