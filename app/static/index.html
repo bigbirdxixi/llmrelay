@@ -198,25 +198,28 @@ tbody tr:hover td{background:#101a28}
   font-family:ui-monospace,Consolas,monospace;font-size:12.3px;color:#b9cfe6;
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
-/* v2.1.0 R156/R157/R158：「编辑平台」弹窗加宽 1200 + 双列（左模型区 / 右 Base URL·代理·API Key）
-   + 每模型行：× 删除钮在最左，模型名/类型/别名/思考/关闭写法 与 4 个价格输入（元）同一排 */
+/* v2.1.0 R156–R158：「编辑平台」弹窗加宽 1200；中部双列：左 = API Key，右 = Base URL/出口代理（竖排）；
+   模型区在双列块下方整宽；模型行单排：× | 模型名 | 类型 | 别名 | 思考 | 4 价格输入（元，标签居中于输入上方） */
 #modal .sheet.wide{max-width:1200px}
 .provcols{display:flex;gap:18px;align-items:flex-start}
 .provcols .col-l{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
-.provcols .col-r{flex:0 0 340px;display:flex;flex-direction:column;gap:14px}
+.provcols .col-r{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
+/* 两列 label 统一按两行高度：Base URL/出口代理 标签折行时，输入框顶边仍与左列 API Key 顶边水平对齐 */
+.provcols .field > label{min-height:34px}
 @media (max-width:1100px){.provcols{flex-direction:column}
-  .provcols .col-r{flex:1 1 0;width:100%}}
+  .provcols .col-l,.provcols .col-r{flex:1 1 0;width:100%}
+  .provcols .field > label{min-height:0}}
 .mrow{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 8px;align-items:start}
 .mbody{min-width:0}
 .mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .mrow .mono.mname{flex:0 1 200px;min-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:128px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
 .mrow select.mkd{width:112px}
-.mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
+.mrow input.mal{flex:0 1 160px;min-width:90px;padding:5px 8px;font-size:12.5px}
 .mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px;margin-top:5px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
-.mprs{display:flex;gap:8px;flex:0 1 auto;flex-wrap:wrap;align-items:flex-end;margin-left:4px}
-.mpr{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--dim)}
+.mprs{display:flex;gap:8px;flex:0 1 auto;flex-wrap:wrap;align-items:flex-end;margin-left:auto}
+.mpr{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--dim);align-items:center}
 .mpr input.mpv{width:96px;padding:4px 6px;font-size:12px}
 </style>
 </head>
