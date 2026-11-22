@@ -4869,6 +4869,55 @@ def test_r155_cost_stats(client, hdr, upstream_port):
     assert client.app.state.store.recent(1)[0]["cost"] == 0
 
 
+def test_r172_stats_period_today_calendar_day(client, hdr, upstream_port):
+    """R172：GET /api/stats/period?today=1 → 日历日口径（今日 00:00 起，概览页「当天费用」等式用）。
+
+    判别样本：ts=「今日 0 点前 1 小时」的计费行——落在滚动 24h 内但落在今日 0 点前，
+    是两种口径唯一的差别带。today=1 必须排除它，默认滚动口径必须包含它；
+    今天的正常调用（ts=now）则两种口径都包含。"""
+    from datetime import datetime, timedelta
+    store = client.app.state.store
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+    # 主 key 落一笔（无价格 cost=0），拿它的 user_id 作为补造行的归属（admin 聚合视图按 user IN(...) 过滤，NULL 用户行不可见）
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    uid = store.recent(1)[0]["user_id"]
+    assert uid, "主 key 调用未落 user_id"
+    pd0 = client.get("/api/stats/period", params={"days": 1, "today": 1}, headers=hdr).json()
+    pr0 = client.get("/api/stats/period", params={"days": 1}, headers=hdr).json()
+    ts_before_today = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                       - timedelta(hours=1)).astimezone().isoformat(timespec="seconds")
+    store.record(request_id="r172-backdated", platform="fake", model="fake/r172",
+                 prompt_tokens=1000, completion_tokens=500, status="ok",
+                 cost=9.9, cost_req=1.0, cost_input=2.0, cost_cache=3.0, cost_output=3.9,
+                 user_id=uid, ts=ts_before_today)
+    pd1 = client.get("/api/stats/period", params={"days": 1, "today": 1}, headers=hdr).json()
+    pr1 = client.get("/api/stats/period", params={"days": 1}, headers=hdr).json()
+    # 跨日补造行：今日日历日口径不含（requests 与 cost 不变）
+    assert pd1["requests"] == pd0["requests"]
+    assert pd1["cost"] == pytest.approx(pd0["cost"], abs=1e-9)
+    # 滚动 24h 口径包含（+1 请求 / +9.9 元）
+    assert pr1["requests"] == pr0["requests"] + 1
+    assert pr1["cost"] == pytest.approx(pr0["cost"] + 9.9, abs=1e-6)
+    # 今天的正常调用：两种口径都计入（R155 同价 1 笔 = 0.014 元）
+    assert _set_pricing(client, hdr, [
+        {"model": "fake/fake-gpt", "request_fee": 0.01, "input_per_1k": 1.0,
+         "output_per_1k": 1.0}]).status_code == 200
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    pd2 = client.get("/api/stats/period", params={"days": 1, "today": 1}, headers=hdr).json()
+    pr2 = client.get("/api/stats/period", params={"days": 1}, headers=hdr).json()
+    # 今天的正常调用：两种口径都计入且金额一致（差值口径，不硬编码 fake 响应的 token 组合）
+    delta_today = pd2["cost"] - pd0["cost"]
+    assert delta_today > 0, "今日计费调用未计入 today 口径"
+    assert pr2["cost"] - pr1["cost"] == pytest.approx(delta_today, abs=1e-6)
+    assert pr2["requests"] == pr0["requests"] + 2
+    # today=1 响应仍带完整分项字段（前端等式行消费）
+    for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output", "cost_per_request"):
+        assert f in pd2, f
+    assert pd2["cost"] == pytest.approx(
+        pd2["cost_req"] + pd2["cost_input"] + pd2["cost_cache"] + pd2["cost_output"], abs=1e-6)
+    _set_pricing(client, hdr, [])
+
+
 def test_r156_provider_inline_pricing_merge(client, hdr):
     """R156：「编辑平台」弹窗加宽 + 每模型行内联价格输入（随平台保存一并提交）。
 

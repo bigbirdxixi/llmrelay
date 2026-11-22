@@ -1125,10 +1125,15 @@ async def stats_year(request: Request, year: int,
 
 
 @router.get("/stats/period")
-async def stats_period(request: Request, days: int = 30, _: None = Depends(auth)):
-    """区间 KPI（请求/tokens/P95/缓存命中/成功率/流式占比）。"""
+async def stats_period(request: Request, days: int = 30, today: bool = False,
+                       _: None = Depends(auth)):
+    """区间 KPI（请求/tokens/P95/缓存命中/成功率/流式占比/费用分项）。
+
+    v2.1.0 R172：today=1 → 日历日口径（今日 00:00 起，概览页「当天费用」等式用）；
+    默认滚动 N×24h（用量统计页「区间费用」原口径）。
+    """
     store = request.app.state.store
-    return store.period(days, _data_user(request))
+    return store.period(days, _data_user(request), today)
 
 
 @router.get("/stats/latency")

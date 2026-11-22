@@ -75,6 +75,14 @@ main{padding:18px 22px 60px;max-width:1280px}
 .kpi .k{color:var(--dim);font-size:12px}
 .kpi .v{font-size:24px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
 .kpi .s{font-size:11.5px;color:var(--dim);margin-top:2px}
+/* v2.1.0 R171：用量统计「费用分项等式」行——4 分项 + = 区间费用（分项在左）；
+   窄屏自然换行，「=」与合计卡换到下一行仍可读 */
+.costeq{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;margin-top:14px}
+.costeq .kpi{flex:1 1 160px;min-width:140px;padding:10px 14px}
+.costeq .kpi .v{font-size:20px}
+.costeq .op{align-self:center;flex:0 0 auto;font-size:20px;font-weight:700;color:var(--dim)}
+.costeq .op.eq{color:var(--fg)}
+.costeq .kpi.total{border-color:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:13px}
 /* 表格比 panel 宽时在 panel 内部横向滚动，不撑破边框 */
 .tw{overflow-x:auto;overflow-y:visible;max-width:100%;margin:0 -2px;padding:0 2px}
@@ -1154,6 +1162,8 @@ async function renderOverview(){
   // v1.2.3 起「活跃情况」挪到用量统计页，概览页放「星期 × 时段」热力图（随概览范围 chip 取数）
   const h1 = await api(`/api/stats/hourly?days=1&group=hour&split=${split}`);
   const hd = h1.today || h1.total || {requests: 0, errors: 0, avg_latency_ms: 0};
+  // v2.1.0 R172：当天费用分项等式（日历日口径：今日 00:00 起，与「今日请求/今日 tokens」同口径）
+  const pc = await api(`/api/stats/period?days=1&today=1`);
   const rgRange = p === 1 ? "today" : (p === 7 ? "7d" : "30d");
   const [chart, hm, rg] = p === 1
     ? await Promise.all([h1, api(`/api/stats/heatmap?days=${p}`), api(`/api/stats/regions?range=${rgRange}`)])
@@ -1176,14 +1186,31 @@ async function renderOverview(){
         <div class="s">累计 ${nf(t.total_requests)} 次</div></div>
       <div class="kpi"><div class="k">今日 tokens</div><div class="v">${fmtTok(t.today_tokens)}</div>
         <div class="s">入 ${fmtTok(t.today_prompt_tokens)} / 出 ${fmtTok(t.today_completion_tokens)}</div></div>
-      <div class="kpi"><div class="k">成功率</div><div class="v">${okRate}<span class="dim" style="font-size:14px">%</span></div>
-        <div class="s">今日错误 ${nf(hd.errors)}</div></div>
-      <div class="kpi"><div class="k">平均耗时</div><div class="v">${fmtMs(hd.avg_latency_ms)}</div>
-        <div class="s">今日均值 · 整体 ${fmtMs(t.avg_latency_ms)}</div></div>
       <div class="kpi"><div class="k">累计 tokens</div><div class="v">${fmtTok(t.total_tokens)}</div>
         <div class="s">其中缓存命中 ${fmtTok(t.total_cached_tokens)}</div></div>
+      <div class="kpi"><div class="k">平均耗时</div><div class="v">${fmtMs(hd.avg_latency_ms)}</div>
+        <div class="s">今日均值 · 整体 ${fmtMs(t.avg_latency_ms)}</div></div>
+      <div class="kpi"><div class="k">成功率</div><div class="v">${okRate}<span class="dim" style="font-size:14px">%</span></div>
+        <div class="s">今日错误 ${nf(hd.errors)}</div></div>
       <div class="kpi"><div class="k">上游平台</div><div class="v">${nf(ov.enabled_providers)}<span class="dim" style="font-size:14px"> / ${nf(ov.providers)}</span></div>
         <div class="s">可用模型 ${nf(ov.models)} 个</div></div>
+    </div>
+    <!-- v2.1.0 R172：当天费用分项等式（4 分项在左，+ / = 显式关系；日历日今日 00:00 起） -->
+    <div class="costeq" style="margin:0 0 16px">
+      <div class="kpi"><div class="k">请求费用</div><div class="v">${fmtMoney(pc.cost_req||0)}</div>
+        <div class="s">请求费 ¥/次 × 成功次数</div></div>
+      <div class="op">+</div>
+      <div class="kpi"><div class="k">输入token费用</div><div class="v">${fmtMoney(pc.cost_input||0)}</div>
+        <div class="s">输入费 ¥/1K ×（输入−缓存命中）</div></div>
+      <div class="op">+</div>
+      <div class="kpi"><div class="k">输出token费用</div><div class="v">${fmtMoney(pc.cost_output||0)}</div>
+        <div class="s">输出费 ¥/1K × 输出</div></div>
+      <div class="op">+</div>
+      <div class="kpi"><div class="k">缓存命中费用</div><div class="v">${fmtMoney(pc.cost_cache||0)}</div>
+        <div class="s">缓存费 ¥/1K × 缓存命中</div></div>
+      <div class="op eq">=</div>
+      <div class="kpi total"><div class="k">当天费用</div><div class="v">${fmtMoney(pc.cost)}</div>
+        <div class="s">单次均价 ${fmtMoney(pc.cost_per_request)} · 今日 0 点起 · 成功才计费</div></div>
     </div>
     <div class="split ov">
       <div class="panel">
@@ -2074,8 +2101,24 @@ async function renderUsage(){
           <div class="s">错误 ${nf(p.errors)} 次</div></div>
         <div class="kpi"><div class="k">流式占比</div><div class="v">${pct(p.stream_rate)}<span class="dim" style="font-size:14px">%</span></div>
           <div class="s">流式 ${nf(p.stream_requests)} 次</div></div>
-        <div class="kpi"><div class="k">区间费用</div><div class="v">${fmtMoney(p.cost)}</div>
-          <div class="s">单次均价 ${fmtMoney(p.cost_per_request)} · 请求 ${fmtMoney(p.cost_req)}</div></div>
+      </div>
+      <!-- v2.1.0 R171：费用分项等式（分项在「区间费用」左边，+ / = 显式展示关系；
+           分项小计 = 对应价格条目 × 区间用量，成功调用才计费，未配价格 = 0） -->
+      <div class="costeq">
+        <div class="kpi"><div class="k">请求费用</div><div class="v">${fmtMoney(p.cost_req||0)}</div>
+          <div class="s">请求费 ¥/次 × 成功次数</div></div>
+        <div class="op">+</div>
+        <div class="kpi"><div class="k">输入token费用</div><div class="v">${fmtMoney(p.cost_input||0)}</div>
+          <div class="s">输入费 ¥/1K ×（输入−缓存命中）</div></div>
+        <div class="op">+</div>
+        <div class="kpi"><div class="k">输出token费用</div><div class="v">${fmtMoney(p.cost_output||0)}</div>
+          <div class="s">输出费 ¥/1K × 输出</div></div>
+        <div class="op">+</div>
+        <div class="kpi"><div class="k">缓存命中费用</div><div class="v">${fmtMoney(p.cost_cache||0)}</div>
+          <div class="s">缓存费 ¥/1K × 缓存命中</div></div>
+        <div class="op eq">=</div>
+        <div class="kpi total"><div class="k">区间费用</div><div class="v">${fmtMoney(p.cost)}</div>
+          <div class="s">单次均价 ${fmtMoney(p.cost_per_request)} · 成功调用才计费</div></div>
       </div>
     </div>
     <div class="panel">

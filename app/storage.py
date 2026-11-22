@@ -640,9 +640,16 @@ class Store:
         idx = min(len(vs) - 1, int(0.95 * len(vs)))
         return int(round(vs[idx]))
 
-    def period(self, days: int = 30, user_id: int | list | None = None) -> dict:
-        """区间 KPI：请求/tokens/平均&P95 耗时/TTFT/缓存命中/错误/流式/推理 + 费用（v2.1.0）。"""
-        since = self._since(days)
+    def period(self, days: int = 30, user_id: int | list | None = None, today: bool = False) -> dict:
+        """区间 KPI：请求/tokens/平均&P95 耗时/TTFT/缓存命中/错误/流式/推理 + 费用（v2.1.0）。
+
+        v2.1.0 R172：today=True → 日历日口径（今日 00:00 起，与概览页「今日请求/今日 tokens」
+        同口径，概览页「当天费用」等式用）；默认滚动 N×24h（用量统计页「区间费用」原口径）。
+        """
+        if today:
+            since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        else:
+            since = self._since(days)
         where, args = self._user_clause(user_id)
         cond = (f"{where} AND ts >= ?" if where else " WHERE ts >= ?")
         params = args + (since,)
