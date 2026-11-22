@@ -137,8 +137,8 @@ tbody tr:hover td{background:#101a28}
 #toast .t.err{border-color:#4a2530;color:#ffb4b4}
 #toast .t.ok{border-color:#1f4438;color:#a7f3d0}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-/* v2.1.0 R157/R159/R161：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
-.split.four{grid-template-columns:minmax(160px,240px) minmax(180px,210px) minmax(180px,240px) minmax(80px,100px)}
+/* v2.1.0 R157/R159/R161/R162：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时）——按内容适配宽度，不铺满 */
+.split.four{grid-template-columns:minmax(160px,240px) minmax(160px,180px) minmax(180px,240px) minmax(80px,100px)}
 /* 概览页：星期 × 时段（左，热力图）× 近期活动（右）——v1.2.3 panel 互换后左宽右窄（11:9）：
    热力图 24 个时段列弹性铺满（minmax 列，不出现横向滚动条），留白消失；堆叠图相应收窄仍舒展 */
 .split.ov{grid-template-columns:minmax(0,11fr) minmax(0,9fr);gap:14px}
@@ -210,12 +210,17 @@ tbody tr:hover td{background:#101a28}
    由真正的宽元素（模型行 ≈1110）决定。v2.1.0 R161：上限 600→1100（用户反馈说明文字太窄、换行过多；
    1100 < 模型行 1110，弹窗固有宽仍由模型行决定，不变） */
 #modal .sheet.wide .field > label{max-width:1100px}
+/* v2.1.0 R162：「高级配置 JSON」标签行 = 标签 + 右侧「复制」按钮（复制文本框内容到剪贴板）；
+   模型级设置说明按用户指定分组用 <br> 折 3 行（一个 label，非三段） */
+#modal .lblrow{display:flex;align-items:flex-start;gap:10px}
+#modal .lblrow > label{flex:1}
+#modal .lblrow .btn{margin-top:2px}
 .provcols{display:flex;gap:18px;align-items:stretch}
 .provcols .col-l{flex:0 0 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
 .provcols .col-r{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
 /* 右列 Base URL/出口代理 输入框定宽（fit-content 下 input  intrinsic 宽太窄）；窄屏回落 100%。
-   v2.1.0 R161：640→520（用户反馈再窄一些） */
-.provcols .col-r .field input{width:min(520px,100%)}
+   v2.1.0 R161：640→520（用户反馈再窄一些）；R162：520→440 */
+.provcols .col-r .field input{width:min(440px,100%)}
 /* 左列 API Key 字段拉满列高：textarea 弹性伸展，底部（含说明文字）与右列 出口代理 底部对齐 */
 .provcols .col-l .field{flex:1;display:flex;flex-direction:column}
 .provcols .col-l .field textarea{flex:1;min-height:64px}
@@ -1287,11 +1292,11 @@ async function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（最右列「关闭写法」手选实发字段，默认自动解析，悬停该下拉框可见解析结果）；列表第一排为列头（模型名/模型类型/别名/思考模式 + 4 个价格列：请求费 ¥/次、输入费 ¥/1K、缓存命中 ¥/1K、输出费 ¥/1K，单位元，成功调用才计费，留空/0 = 免费只统计消费，表头不随列表滚动）；点 × 删除该模型（其价格条目一并清掉）</label>
+    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map<br>点 × 删除该模型（其价格条目一并清掉）；思考默认跟随客户端，选「关闭」才会改上游请求（最右列「关闭写法」手选实发字段，默认自动解析，悬停该下拉框可见解析结果）<br>列表第一排为列头（模型名/模型类型/别名/思考模式 + 4 个价格列：请求费 ¥/次、输入费 ¥/1K、缓存命中 ¥/1K、输出费 ¥/1K，单位元，成功调用才计费，留空/0 = 免费只统计消费，表头不随列表滚动）</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
-    <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
-      <textarea id="f_extra" rows="5" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
+    <div class="field"><div class="lblrow"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label><button class="btn sm" onclick="copyExtraJson()" title="复制文本框中的 JSON 到剪贴板">复制</button></div>
+      <textarea id="f_extra" rows="8" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
     <div class="field"><label><input type="checkbox" id="f_enabled" ${(!p || p.enabled) ? "checked":""} style="width:auto;margin-right:6px">启用该平台</label></div>
     <div class="row" style="justify-content:flex-end">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -1583,6 +1588,19 @@ function collectModelReasoning(extra){
   });
   if(Object.keys(mr).length) extra.model_reasoning = mr; else delete extra.model_reasoning;
   return extra;
+}
+
+/* v2.1.0 R162：「高级配置 JSON」复制按钮——复制文本框当前内容（含用户未保存的编辑）到剪贴板；
+   clipboard API（localhost/https 可用）失败时回落 select + execCommand */
+async function copyExtraJson(){
+  const el = $("#f_extra"); if(!el) return;
+  const text = el.value || "{}";
+  let ok = false;
+  try{ await navigator.clipboard.writeText(text); ok = true; }
+  catch(e){
+    try{ el.focus(); el.select(); ok = document.execCommand("copy"); }catch(e2){}
+  }
+  toast(ok ? "已复制高级配置 JSON（" + text.length + " 字符）" : "复制失败：请在文本框内手动全选复制", ok ? "ok" : "err");
 }
 
 function applyPreset(platform){
