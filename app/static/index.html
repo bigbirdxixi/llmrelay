@@ -198,22 +198,32 @@ tbody tr:hover td{background:#101a28}
   font-family:ui-monospace,Consolas,monospace;font-size:12.3px;color:#b9cfe6;
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
-/* v2.1.0 R156–R159：「编辑平台」弹窗加宽 1200；中部双列：左 = API Key（320px），右 = Base URL/出口代理（自适应加宽）；
-   模型列表首排 = sticky 表头（模型名/模型类型/别名/思考模式/关闭写法 + 4 个价格列标签，不随列表滚动），
-   每模型行：× | 模型名 | 类型 | 别名 | 思考 | 关闭写法（占列，非常态隐藏）| 4 价格输入（与表头列 1:1 对齐） */
-#modal .sheet.wide{max-width:1200px}
-.provcols{display:flex;gap:18px;align-items:flex-start}
+/* v2.1.0 R156–R160：「编辑平台」弹窗：宽度随内容自适应（fit-content，不再固定 1200）；中部双列：
+   左 = API Key（320px，高度拉伸到与右列 出口代理 底部对齐），右 = Base URL/出口代理（竖排）；
+   模型列表首排 = sticky 表头（模型名/模型类型/别名/思考模式 + 4 个价格列 + 关闭写法（最右列），不随列表滚动）；
+   每模型行：× | 模型名 | 类型 | 别名 | 思考 | 4 价格输入 | 关闭写法（与表头列 1:1 对齐） */
+#modal .sheet.wide{width:fit-content;max-width:min(1500px,calc(100vw - 48px))}
+/* fit-content 取内容 max-content；长说明标签（模型级设置等）单行宽会顶满弹窗，限宽 600 让弹窗宽度
+   由真正的宽元素（模型行 ≈1110）决定，弹窗随内容收窄 */
+#modal .sheet.wide .field > label{max-width:600px}
+.provcols{display:flex;gap:18px;align-items:stretch}
 .provcols .col-l{flex:0 0 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
 .provcols .col-r{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
+/* 右列 Base URL/出口代理 输入框定宽（fit-content 下 input  intrinsic 宽太窄）；窄屏回落 100% */
+.provcols .col-r .field input{width:min(640px,100%)}
+/* 左列 API Key 字段拉满列高：textarea 弹性伸展，底部（含说明文字）与右列 出口代理 底部对齐 */
+.provcols .col-l .field{flex:1;display:flex;flex-direction:column}
+.provcols .col-l .field textarea{flex:1;min-height:64px}
 /* 两列 label 统一按两行高度：Base URL/出口代理 标签折行时，输入框顶边仍与左列 API Key 顶边水平对齐 */
 .provcols .field > label{min-height:34px}
 @media (max-width:1100px){.provcols{flex-direction:column}
   .provcols .col-l,.provcols .col-r{flex:1 1 0;width:100%}
+  .provcols .col-r .field input{width:100%}
   .provcols .field > label{min-height:0}}
 .mrow{display:grid;grid-template-columns:30px minmax(0,1fr);gap:4px 8px;align-items:center}
 .mbody{min-width:0}
 .mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.mrow .mono.mname{flex:1 1 280px;min-width:140px;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
+.mrow .mono.mname{flex:1 1 240px;min-width:140px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:104px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
 .mrow select.mkd{width:96px}
 .mrow select.mrf{width:64px}
@@ -228,7 +238,7 @@ tbody tr:hover td{background:#101a28}
 .hdmain{display:flex;align-items:center;gap:8px;min-width:0}
 .mhead .hcell{font-size:11px;color:var(--dim);white-space:nowrap}
 .mhead .hx{width:30px}
-.mhead .hname{flex:1 1 280px;min-width:140px;max-width:440px}
+.mhead .hname{flex:1 1 240px;min-width:140px;max-width:360px}
 .mhead .hkind{width:96px;flex:0 0 auto}
 .mhead .halias{width:96px;flex:0 0 auto}
 .mhead .hthink{width:104px;flex:0 0 auto}
@@ -1272,11 +1282,11 @@ async function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（「关闭写法」列默认自动，鼠标悬停该下拉框可查看解析结果 = 实际发给上游的字段）；列表第一排为列头（模型名/模型类型/别名/思考模式/关闭写法 + 4 个价格列：请求费 ¥/次、输入费 ¥/1K、缓存命中 ¥/1K、输出费 ¥/1K，单位元，成功调用才计费，留空/0 = 免费只统计消费，表头不随列表滚动）；点 × 删除该模型（其价格条目一并清掉）</label>
+    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map；思考默认跟随客户端，选「关闭」才会改上游请求（最右列「关闭写法」手选实发字段，默认自动解析，悬停该下拉框可见解析结果）；列表第一排为列头（模型名/模型类型/别名/思考模式 + 4 个价格列：请求费 ¥/次、输入费 ¥/1K、缓存命中 ¥/1K、输出费 ¥/1K，单位元，成功调用才计费，留空/0 = 免费只统计消费，表头不随列表滚动）；点 × 删除该模型（其价格条目一并清掉）</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label>
-      <textarea id="f_extra" rows="3" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
+      <textarea id="f_extra" rows="5" class="mono">${esc(JSON.stringify((p && p.extra) || {}, null, 2))}</textarea></div>
     <div class="field"><label><input type="checkbox" id="f_enabled" ${(!p || p.enabled) ? "checked":""} style="width:auto;margin-right:6px">启用该平台</label></div>
     <div class="row" style="justify-content:flex-end">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -1391,7 +1401,8 @@ function _modalExtra(){
 function syncRowField(sel){
   const row = sel.closest(".mrow");
   const f = row && row.querySelector(".mrf");
-  if(f) f.style.display = (sel.value === "off") ? "" : "none";
+  /* v2.1.0 R160：visibility 而非 display —— 隐藏也占列宽，各行「关闭写法」列保持纵向对齐 */
+  if(f) f.style.visibility = (sel.value === "off") ? "visible" : "hidden";
   if(row && sel.value === "off" && f) previewOffRow(f);
 }
 
@@ -1421,8 +1432,9 @@ function renderModelReasoning(){
     box.innerHTML = '<div class="dim" style="font-size:12px">还没有模型：在上方下拉框选择（聚焦自动拉取）或手动输入添加</div>';
     return;
   }
-  // v2.1.0 R159：首排表头 sticky 置顶（不随模型列表滚动）：模型名/模型类型/别名/思考模式/关闭写法 + 4 价格列标签；
-  // 列宽与行控件 1:1（mhead .h* 与 .mrow 控件同宽），价格标签只在表头、行内只留 4 个输入
+  // v2.1.0 R159/R160：首排表头 sticky 置顶（不随模型列表滚动）：模型名/模型类型/别名/思考模式 + 4 价格列 + 关闭写法（最右列）；
+  // 列宽与行控件 1:1（mhead .h* 与 .mrow 控件同宽），价格标签只在表头、行内只留 4 个输入。
+  // 「关闭写法」列（v2.1.0 R160 移到最后一列）：思考选「关闭」时才可见，手选实发字段（默认自动解析，同 Hermes）
   const HEAD = `<div class="mhead">
     <div class="hcell hx"></div>
     <div class="hdmain">
@@ -1430,11 +1442,11 @@ function renderModelReasoning(){
       <span class="hcell hkind">模型类型</span>
       <span class="hcell halias">别名</span>
       <span class="hcell hthink">思考模式</span>
-      <span class="hcell hrf">关闭写法</span>
       <span class="hcell hp">请求费 ¥/次</span>
       <span class="hcell hp">输入费 ¥/1K</span>
       <span class="hcell hp">缓存命中 ¥/1K</span>
       <span class="hcell hp">输出费 ¥/1K</span>
+      <span class="hcell hrf">关闭写法</span>
     </div>
   </div>`;
   box.innerHTML = HEAD + S.editModels.map(m => {
@@ -1459,13 +1471,14 @@ function renderModelReasoning(){
           <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
           <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
           <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
-          <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="visibility:${pol === "off" ? "visible" : "hidden"}">${fopts}</select>
           <div class="mprs">${priceRow}</div>
+          <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="visibility:${pol === "off" ? "visible" : "hidden"}">${fopts}</select>
         </div>
       </div>
     </div>`;
   }).join("");
   buildAddOptions();
+  // v2.1.0 R160：初始渲染时，思考=off 的行跑一次「关闭写法」解析（写进 title 悬停显示）
   document.querySelectorAll("#f_modelrows .mrow").forEach(row => {
     if(row.querySelector(".mrf") && row.querySelector(".mrs").value === "off") previewOffRow(row.querySelector(".mrf"));
   });
@@ -1479,7 +1492,7 @@ async function previewOffRow(sel){
   const model = row.dataset.model;
   const field = sel.value || "auto";
   const outFmt = ($("#f_type") && $("#f_type").value) || "openai";
-  const base = (($("#f_base") || {}).value) || "";
+  const base = ((("#f_base") || {}).value) || "";
   const extraObj = _modalExtra() || {};
   sel.title = "解析中…";
   try{
