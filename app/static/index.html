@@ -137,6 +137,8 @@ tbody tr:hover td{background:#101a28}
 #toast .t.err{border-color:#4a2530;color:#ffb4b4}
 #toast .t.ok{border-color:#1f4438;color:#a7f3d0}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* v2.1.0 R157：「编辑平台」弹窗第一排 4 字段（平台id/显示名/协议/超时） */
+.split.four{grid-template-columns:repeat(4,minmax(0,1fr))}
 /* 概览页：星期 × 时段（左，热力图）× 近期活动（右）——v1.2.3 panel 互换后左宽右窄（11:9）：
    热力图 24 个时段列弹性铺满（minmax 列，不出现横向滚动条），留白消失；堆叠图相应收窄仍舒展 */
 .split.ov{grid-template-columns:minmax(0,11fr) minmax(0,9fr);gap:14px}
@@ -196,16 +198,20 @@ tbody tr:hover td{background:#101a28}
   font-family:ui-monospace,Consolas,monospace;font-size:12.3px;color:#b9cfe6;
   overflow:auto;white-space:pre;line-height:1.65}
 .modelrows{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
-.mrow{display:flex;align-items:center;gap:8px}
+/* v2.1.0 R156/R157：「编辑平台」弹窗加宽（R157 提到 1200）+ 每模型行内联 4 个价格输入（元）；
+   行结构：左侧 × 删除钮（模型名左边）| 右侧 mbody（第一行 模型名/类型/别名/思考/关闭写法，
+   第二行 4 个价格输入与模型名对齐） */
+#modal .sheet.wide{max-width:1200px}
+.mrow{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 8px;align-items:start}
+.mbody{min-width:0}
+.mmain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .mrow .mono.mname{flex:0 0 auto;max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--fg)}
 .mrow select{width:128px;flex:0 0 auto;padding:5px 8px;font-size:12.5px}
 .mrow select.mkd{width:112px}
 .mrow input.mal{flex:1;min-width:90px;padding:5px 8px;font-size:12.5px}
-.mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
+.mrow .mdel{flex:0 0 auto;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px;margin-top:5px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
-/* v2.1.0 R156：「编辑平台」弹窗加宽 + 每模型行内联 4 个价格输入（元） */
-#modal .sheet.wide{max-width:980px}
-.mprice{flex:1 1 100%;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;padding:2px 0 0 2px}
+.mprice{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:2px}
 .mpr{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--dim)}
 .mpr input.mpv{width:112px;padding:4px 6px;font-size:12px}
 </style>
@@ -1209,13 +1215,11 @@ async function editProvider(platform){
       </select>
       <div class="dim" style="font-size:11.5px;margin-top:4px">选中后自动填 平台id / 显示名 / 协议 / Base URL / 模型，可再逐项改。</div>
     </div>`}
-    <div class="split" style="gap:14px">
+    <div class="split four" style="gap:14px">
       <div class="field"><label>平台 id（下游用 platform/model 前缀）</label>
         <input id="f_platform" value="${esc(p ? p.platform : "")}" ${p ? "disabled" : ""} placeholder="deepseek"></div>
       <div class="field"><label>显示名</label>
         <input id="f_name" value="${esc(p ? p.name : "")}" placeholder="DeepSeek"></div>
-    </div>
-    <div class="split" style="gap:14px">
       <div class="field"><label>协议类型</label>
         <select id="f_type">
           <option value="openai" ${p && p.type==="openai" ? "selected":""}>openai（OpenAI 兼容）</option>
@@ -1408,13 +1412,17 @@ function renderModelReasoning(){
         <input class="mpv" type="number" min="0" step="0.000001" placeholder="0"
           data-pf="${f}" value="${(pr[f] || 0) > 0 ? pr[f] : ""}" onchange="pricingChanged(this)"></label>`).join("");
     return `<div class="mrow" data-model="${esc(m)}">
-      <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
-      <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
-      <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
-      <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
-      <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
       <button class="mdel" title="删除这个模型（连同其价格条目）" onclick="delModel('${esc(m)}')">×</button>
-      <div class="mprice">${priceRow}</div>
+      <div class="mbody">
+        <div class="mmain">
+          <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
+          <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
+          <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
+          <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
+          <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="display:${pol === "off" ? "block" : "none"}">${fopts}</select>
+        </div>
+        <div class="mprice">${priceRow}</div>
+      </div>
     </div>`;
   }).join("");
   buildAddOptions();
