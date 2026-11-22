@@ -215,9 +215,13 @@ tbody tr:hover td{background:#101a28}
 #modal .sheet.wide .field > label{max-width:1100px}
 /* v2.1.0 R162：「高级配置 JSON」标签行 = 标签 + 右侧「复制」按钮（复制文本框内容到剪贴板）；
    模型级设置说明按用户指定分组用 <br> 折 3 行（一个 label，非三段） */
-#modal .lblrow{display:flex;align-items:flex-start;gap:10px}
-#modal .lblrow > label{flex:1}
+#modal .lblrow{display:flex;align-items:flex-start;gap:10px;margin-bottom:2px}
+#modal .lblrow > label{flex:1;margin-bottom:0}
 #modal .lblrow .btn{margin-top:2px}
+/* v2.1.0 R167：二排（API Key/Base URL/出口代理）与「高级配置 JSON」标签到输入框收紧 6→2px——
+   这些标签带括号说明常折 2 行，行高 leading（18px 行高/12px 字号 ≈3px 字下空隙）+ 全局 6px margin
+   让视觉间距明显大于首排单行标签（如「显示名」）；收紧到 2px 后视觉间距与首排一致 */
+.provcols .field > label{margin-bottom:2px}
 .provcols{display:flex;gap:18px;align-items:stretch}
 /* 左列 API Key 宽（v2.1.0 R163：320→724 左缘对齐；R164：724→424 改右缘对齐——
    「Base URL/出口代理」右缘 = 424+18+400 = 842 = 首排右缘（240+14+220+14+240+14+100），与「超时（秒）」右缘同垂直线） */

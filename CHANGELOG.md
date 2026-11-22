@@ -79,6 +79,11 @@
 - API Key 区「已保存的 key 显示为掩码」说明加 `<br>`：冒号后「掩码行保持原样不会动旧 key…」整体移到第二行
 - 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器断言（f_enabled 不存在 / 说明高 35px=2×17 两行 / toggle 停用后弹窗原样保存仍 enabled=false / 新建平台默认 enabled=true），全量 144 通过
 
+### 改动：弹窗标签-输入框间距收紧（API Key/Base URL/出口代理/高级配置 JSON，R167）
+- 生产反馈：「API Key」「Base URL」「出口代理」标签离输入框太大，参考「显示名」的间距；「高级配置 JSON」同样
+- 实测四组 margin 同为全局 6px，感知差来自带括号说明的标签折 2 行后行高 leading（18px 行高/12px 字号 ≈3px 字下空隙）；二排 3 字段 `.provcols .field > label` 与「高级配置 JSON」`.lblrow`（label margin 归 0 + 行 margin-bottom 2px）收紧到 2px，视觉间距与首排单行标签（显示名等）一致；首排/模型级设置等其余字段不变
+- 纯前端（单文件 index.html），无接口变化；门禁 = 内联 JS 语法检查 + 隔离实例浏览器 1600 断言（keys/base/proxy/extra gap=2、name gap=6 不变、无截断/溢出/重叠，截图目检），全量 144 通过
+
 ### 功能：下游 key 调用限额（余额预扣，超限额 403 拦截）
 - api_keys 新增 balance 列（NULL/0 = 不限额只统计消费；>0 = 预付余额）；key 管理弹窗（新建/修改）可设限额；`GET /api/keys` 返回 balance / spent（累计消费）/ balance_exhausted
 - 预扣语义：每笔成功调用原子扣减 `round(balance − cost, 6)`；扣成负数 = 余额耗尽，该 key 之后所有 /v1 入口（chat / embeddings / images / videos 状态 / anthropic messages）直接 403「余额已不足，访问已被限制」（拦截发生在转发前，不产生上游成本），充值（设更大的余额）即可恢复
