@@ -312,6 +312,14 @@ def resolve(ip: str) -> dict | None:
         return {"kind": "unknown", "region": "未知"}
     if a.is_private or a.is_loopback or a.is_unspecified or a.is_reserved:
         return {"kind": "local", "region": "局域网/代理出口"}
+    # v2.1.1 R178：v4-mapped 地址（::ffff:1.2.3.4）转回纯 v4 再查——按 v6 查 mmdb
+    # 会命中错误段（实测 ::ffff:1.2.3.4 被查成「澳大利亚」）；转回后走 v4 通道（xdb 优先）。
+    # 转回后若落私有段（如 ::ffff:10.1.2.3）归 local。
+    if isinstance(a, ipaddress.IPv6Address) and a.ipv4_mapped is not None:
+        a = ipaddress.ip_address(str(a.ipv4_mapped))
+        s = str(a)
+        if a.is_private or a.is_loopback or a.is_unspecified:
+            return {"kind": "local", "region": "局域网/代理出口"}
     # IP2Region xdb 优先：中国段精确到城市（免费 GeoLite2 很多国内家宽/运营商 IP 只到国家）；
     # xdb 未命中/境外段落回 GeoLite2
     if a.version == 4:

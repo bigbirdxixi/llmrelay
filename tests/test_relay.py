@@ -1855,6 +1855,36 @@ def test_r66b_geoip_cn_province_mapping(client, monkeypatch):
     assert G.resolve("8.8.8.8") is not None
 
 
+def test_r178_geoip_v4_mapped_normalized(client, monkeypatch):
+    """R178：v4-mapped IPv6 地址（::ffff:a.b.c.d）转回纯 v4 再查（v4 通道：xdb 优先）。
+
+    回归目标：按 v6 原文查 mmdb 会命中错误段（生产实测 ::ffff:1.2.3.4 被查成「澳大利亚」）；
+    转回后 117.139.165.171（四川移动）应走 v4 通道；mapped 私有段（::ffff:10.1.2.3）归 local；
+    普通 v6（非 mapped）不受影响、原样查 mmdb。"""
+    import app.geoip as G
+    import app.ip2xdb
+
+    seen = []
+
+    class FakeReader:
+        def get(self, ip):
+            seen.append(ip)
+            table = {"117.139.165.171": {"country": {"iso_code": "CN", "names": {"en": "China"}},
+                                          "subdivisions": [{"iso_code": "CN-SC", "names": {"en": "Sichuan"}}]},
+                     "2408:4003:1000::1": None}
+            return table.get(ip)
+
+    monkeypatch.setattr(G, "_load", lambda: FakeReader())
+    # xdb 固定查不到（非中国段/缺库统一 0|0|0|0|0）→ 保证断言落在 mmdb 通道的查询文本上
+    monkeypatch.setattr(app.ip2xdb, "query", lambda ip: "0|0|0|0|0")
+    r = G.resolve("::ffff:117.139.165.171")
+    assert r == {"kind": "cn", "region": "四川"}, r
+    assert seen == ["117.139.165.171"], f"v4-mapped 必须先转 v4 再查：{seen}"
+    assert G.resolve("::ffff:10.1.2.3") == {"kind": "local", "region": "局域网/代理出口"}
+    G.resolve("2408:4003:1000::1")
+    assert seen[-1] == "2408:4003:1000::1", "普通 v6 不转换、原样查 mmdb"
+
+
 def test_r67_region_cities_hotspots(client, hdr, monkeypatch):
     """/api/stats/regions 的城市热点（概览页「城市热点」圆点）：
     - 同一城市多个 IP 归并（按 kind+城市+坐标），count 求和；城市名转中文（CITY_ZH）
