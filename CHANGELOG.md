@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
-## [2.1.1] - 2026-11-23
+## [2.1.1] - 2026-11-24
 
 ### 功能：非文本模型按量计费（R176 价格表新增 second_fee 元/秒）
 - 价格条目新增第 5 个价格字段 `second_fee`（单价 元/秒，0=关闭）：视频生成按请求体 `seconds` 计量、音频转写按上游响应 `usage` 时长计量（`duration_seconds`/`audio_duration`/`duration`/`seconds` 择优，缺=0 秒走请求费兜底）；计量秒数与来源落日志新列 `usage_detail`（JSON：`{"seconds": N, "src": "request"|"response"}`），旧库自动补列不迁移
