@@ -23,6 +23,21 @@ _reader = None          # maxminddb.Reader 或 None
 _loaded_for: str | None = None
 _load_failed = False
 
+# v2.1.1 R179：可选的大陆高精度库 GeoCN.mmdb（v4+v6，自定义字段 division_code/isp/type）
+_cn_reader = None
+_cn_loaded_for: str | None = None
+_cn_failed = False
+
+# 大陆 31 省：GeoCN 的 division_code（6 位行政区划码）取前 2 位 → 省名
+CN_PROV_BY_CODE2 = {
+    "11": "北京", "12": "天津", "13": "河北", "14": "山西", "15": "内蒙古",
+    "21": "辽宁", "22": "吉林", "23": "黑龙江",
+    "31": "上海", "32": "江苏", "33": "浙江", "34": "安徽", "35": "福建", "36": "江西", "37": "山东",
+    "41": "河南", "42": "湖北", "43": "湖南", "44": "广东", "45": "广西", "46": "海南",
+    "50": "重庆", "51": "四川", "52": "贵州", "53": "云南", "54": "西藏",
+    "61": "陕西", "62": "甘肃", "63": "青海", "64": "宁夏", "65": "新疆",
+}
+
 # 中国省级行政区划：GeoLite2 的 subdivision.iso_code（FIPS 10-4）→ 中文名
 # 注：部分 GeoLite2 版本的 subdivision.iso_code 不是 FIPS 数字码（如四川返回 "SC"），
 # 所以 resolve() 还兜底按 subdivision 英文名映射（CN_PROVINCES_EN），两者缺一都不丢。
@@ -273,6 +288,66 @@ def _load() -> object | None:
         return None
 
 
+def cn_db_path() -> Path:
+    raw = (os.getenv("RELAY_GEOIP_CN_DB") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return DATA_DIR / "GeoCN.mmdb"
+
+
+def _load_cn() -> object | None:
+    """惰性加载 GeoCN 高精度库（v2.1.1 R179）；文件缺失/损坏返回 None（静默关闭，v6 回旧管线）。"""
+    global _cn_reader, _cn_loaded_for, _cn_failed
+    p = cn_db_path()
+    if _cn_reader is not None and _cn_loaded_for == str(p) and p.exists():
+        return _cn_reader
+    if _cn_failed:
+        return None
+    if not p.exists():
+        return None
+    try:
+        import maxminddb
+
+        _cn_reader = maxminddb.Reader(str(p))
+        _cn_loaded_for = str(p)
+        return _cn_reader
+    except Exception:
+        _cn_failed = True
+        _cn_reader = None
+        return None
+
+
+def _cn_prov(s: str) -> str | None:
+    """GeoCN 库查 division_code（6 位行政区划码）→ 前 2 位查表 → 省名；未命中/码异常返回 None。"""
+    reader = _load_cn()
+    if reader is None:
+        return None
+    try:
+        rec = reader.get(s)
+    except Exception:
+        return None
+    if not rec:
+        return None
+    code = rec.get("division_code")
+    if not isinstance(code, int) or code < 10000:
+        return None
+    return CN_PROV_BY_CODE2.get(str(code // 10000))
+
+
+def _global_city_info(s: str) -> dict:
+    """CN 库命中时从全局库补城市/坐标（城市热点不回归）；无记录/缺库返回空 dict。"""
+    reader = _load()
+    if reader is None:
+        return {}
+    try:
+        rec = reader.get(s)
+    except Exception:
+        return {}
+    if not rec:
+        return {}
+    return city_info(rec)
+
+
 def available() -> bool:
     """mmdb 或 IP2Region xdb 任一可用即可（中国段 xdb 优先，境外走 mmdb）。"""
     if _load() is not None:
@@ -287,9 +362,13 @@ def available() -> bool:
 def reset() -> None:
     """测试用：清缓存（换 db 文件后重新加载）。"""
     global _reader, _loaded_for, _load_failed
+    global _cn_reader, _cn_loaded_for, _cn_failed
     _reader = None
     _loaded_for = None
     _load_failed = False
+    _cn_reader = None
+    _cn_loaded_for = None
+    _cn_failed = False
     try:
         from app import ip2xdb
         ip2xdb.reset()
@@ -320,6 +399,16 @@ def resolve(ip: str) -> dict | None:
         s = str(a)
         if a.is_private or a.is_loopback or a.is_unspecified:
             return {"kind": "local", "region": "局域网/代理出口"}
+    # v2.1.1 R179：v6 先查可选的 GeoCN 高精度库（大陆 v4+v6 段、精确到区县；免费 GeoLite2
+    # 的国内 v6 段多数只到国家）。命中 → kind=cn + division_code 前 2 位查表出省；
+    # 城市/坐标仍由全局库补（城市热点不回归）。未命中/缺库/损坏 → 走原 v6 管线（GeoLite2）。
+    # v4 不查 CN 库（IP2Region xdb 已把国内 v4 到城市，多查一层无收益）。
+    if a.version == 6:
+        prov = _cn_prov(s)
+        if prov:
+            out = {"kind": "cn", "region": prov}
+            out.update(_global_city_info(s))
+            return out
     # IP2Region xdb 优先：中国段精确到城市（免费 GeoLite2 很多国内家宽/运营商 IP 只到国家）；
     # xdb 未命中/境外段落回 GeoLite2
     if a.version == 4:

@@ -1875,6 +1875,7 @@ def test_r178_geoip_v4_mapped_normalized(client, monkeypatch):
             return table.get(ip)
 
     monkeypatch.setattr(G, "_load", lambda: FakeReader())
+    monkeypatch.setattr(G, "_load_cn", lambda: None)
     # xdb 固定查不到（非中国段/缺库统一 0|0|0|0|0）→ 保证断言落在 mmdb 通道的查询文本上
     monkeypatch.setattr(app.ip2xdb, "query", lambda ip: "0|0|0|0|0")
     r = G.resolve("::ffff:117.139.165.171")
@@ -1883,6 +1884,57 @@ def test_r178_geoip_v4_mapped_normalized(client, monkeypatch):
     assert G.resolve("::ffff:10.1.2.3") == {"kind": "local", "region": "局域网/代理出口"}
     G.resolve("2408:4003:1000::1")
     assert seen[-1] == "2408:4003:1000::1", "普通 v6 不转换、原样查 mmdb"
+
+
+def test_r179_geoip_cn_v6_highres(client, monkeypatch):
+    """R179：v6 先查可选 GeoCN 高精度库（data/GeoCN.mmdb，自定义字段 division_code → 前 2 位查省）。
+
+    - 国内 v6 命中 → kind=cn + 省名（440000→广东 / 510100→四川）；城市/坐标由全局库补（不回归）
+    - CN 库未命中（境外 v6）→ 旧管线（全局库：境外国家名）
+    - v4 不查 CN 库（xdb 优先管线不变，xdb 仍第一查）
+    - CN 库缺失（_load_cn 返回 None）→ 行为等价 R179 前（国内 v6 落全局库「中国大陆」兜底桶）"""
+    import app.geoip as G
+    import app.ip2xdb
+
+    cn_calls = []
+
+    class FakeCN:
+        def get(self, ip):
+            cn_calls.append(ip)
+            table = {"2408:845a:1000:2000::1": {"division_code": 440000, "isp": "移动"},
+                     "2409:891e:6001:2a00::1": {"division_code": 510100, "isp": "联通"},
+                     "2001:4860:4860::8888": None}   # 境外 v6 不在 CN 库
+            return table.get(ip)
+
+    class FakeReader:
+        def get(self, ip):
+            table = {"2408:845a:1000:2000::1": {"country": {"iso_code": "CN", "names": {"en": "China"}},
+                                                  "subdivisions": []},
+                     "2409:891e:6001:2a00::1": {"country": {"iso_code": "CN", "names": {"en": "China"}},
+                                                  "subdivisions": [{"iso_code": "CN-SC", "names": {"en": "Sichuan"}}],
+                                                  "city": {"names": {"en": "Chengdu"}},
+                                                  "location": {"latitude": 30.67, "longitude": 104.07}},
+                     "2001:4860:4860::8888": {"country": {"iso_code": "US", "names": {"en": "United States"}},
+                                               "subdivisions": []}}
+            return table.get(ip)
+
+    monkeypatch.setattr(G, "_load_cn", lambda: FakeCN())
+    monkeypatch.setattr(G, "_load", lambda: FakeReader())
+    monkeypatch.setattr(app.ip2xdb, "query", lambda ip: "0|0|0|0|0")
+
+    r = G.resolve("2408:845a:1000:2000::1")
+    assert r["kind"] == "cn" and r["region"] == "广东", r
+    assert r.get("city") is None, "全局库无城市记录时不补城市"
+    r2 = G.resolve("2409:891e:6001:2a00::1")
+    assert r2["kind"] == "cn" and r2["region"] == "四川" and r2.get("city") == "Chengdu" and r2.get("lat") is not None, r2
+    r3 = G.resolve("2001:4860:4860::8888")
+    assert r3["kind"] == "world" and r3["region"] == "美国", r3
+    G.resolve("117.139.165.171")
+    assert "117.139.165.171" not in cn_calls, "v4 不查 CN 库：{cn_calls}"
+    # CN 库缺失 → 旧管线等价（国内 v6 国家级记录落「中国大陆」兜底桶）
+    monkeypatch.setattr(G, "_load_cn", lambda: None)
+    r4 = G.resolve("2408:845a:1000:2000::1")
+    assert r4["kind"] == "cn" and r4["region"] == "中国大陆", r4
 
 
 def test_r67_region_cities_hotspots(client, hdr, monkeypatch):

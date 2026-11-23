@@ -24,6 +24,13 @@
 - 回归测试 R178（FakeReader 断言查询文本先转 v4 + mapped 私有段 local + 普通 v6 原样查），全量 148 通过
 - 说明（非代码改动）：GeoLite2-City.mmdb 本身支持 IPv6 但**国内 v6 省市数据稀疏**——多数国内运营商 v6 段只到国家级（走「中国大陆（未解析到省）」兜底桶，广州等个别段可到城市）；IP2Region.xdb 为纯 v4 库。要国内 v6 到省市需换更全的数据源（如 iPip.NET 的 v6 库，mmdb 格式可直接替换 `RELAY_GEOIP_DB` 文件、零代码改动；MaxMind 付费 GeoIP2-City 同理）
 
+### 功能：v6 地域定位接入 GeoCN 大陆高精度库（R179）
+- 新增可选第二数据源 `data/GeoCN.mmdb`（ljxi/GeoCN 开源大陆高精度库，v4+v6 精确到区县；可用 `RELAY_GEOIP_CN_DB` 覆盖路径）：**v6 命中大陆段时第一查**，`division_code`（6 位行政区划码）前 2 位映射 31 省 → 省级定位；城市/坐标仍由全局 GeoLite2 补充（城市热点不回归）；未命中/缺库/损坏静默回旧管线，**文件不存在时行为与之前完全一致**
+- 分工：国内 v6 定位从「中国大陆（未解析到省）」兜底桶升级为省级（如 2408:845a→广东、2409:891e→上海，探针实测）；v4 通道不动（IP2Region xdb 已把国内 v4 到城市，CN 库只服务 v6）；境外定位与城市热点仍由 GeoLite2 负责（**GeoLite2-City.mmdb 不可删除**）
+- 合规：GeoCN 仓库无 LICENSE 声明 → **仅自用部署（data/ 本就 gitignore，不进 release 包），不随开源包分发**
+- 回归测试 R179（FakeCN/FakeReader：v6 命中出省 + 城市补充、境外 v6 落旧管线、v4 不查 CN 库、CN 缺失等价 R179 前），全量 149 通过
+- 部署：`data/GeoCN.mmdb` 放 8800 与生产 `data/` 各一份（9MB，GitHub Release 直接下载），重启进程生效
+
 ## [2.1.0] - 2026-11-23
 
 ### 功能：模型调用费用配置与计费（价格按模型，成功调用按量计费）
