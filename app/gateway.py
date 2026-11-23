@@ -408,16 +408,17 @@ class Gateway:
         if kw.get("status") in ("ok", "aborted"):
             uid = kw.get("user_id")
             reg = self.tenants.get(int(uid)) if (self.tenants is not None and uid) else None
-            total, creq, cin, ccache, cout = P.compute_cost(
+            total, creq, cin, ccache, cout, csec = P.compute_cost(
                 getattr(reg, "pricing", None) or {},
                 kw.get("model_alias") or "",
                 prompt_tokens=kw.get("prompt_tokens") or 0,
                 completion_tokens=kw.get("completion_tokens") or 0,
                 cached_tokens=kw.get("cached_tokens") or 0,
+                seconds=kw.get("seconds") or 0,
             )
             if total > 0:
                 kw["cost"], kw["cost_req"], kw["cost_input"] = total, creq, cin
-                kw["cost_cache"], kw["cost_output"] = ccache, cout
+                kw["cost_cache"], kw["cost_output"], kw["cost_second"] = ccache, cout, csec
                 dkey = kw.get("dkey_id")
                 if dkey:
                     with contextlib.suppress(Exception):
@@ -902,7 +903,8 @@ class Gateway:
                                    content_type: str, upstream: Upstream,
                                    client_model: str, request_id: str, started_at: float,
                                    user_id: int | None = None, client: str = "",
-                                   dkey_id: int | None = None, client_ip: str = "") -> Any:
+                                   dkey_id: int | None = None, client_ip: str = "",
+                                   alias: str = "") -> Any:
         """生成类端点透传：kind ∈ images | videos | audio_speech | audio_trans。
         - images/videos/audio_speech：JSON body，model 字段改写为上游模型名，走 send（key 轮换）；
         - audio_trans：multipart 原样透传（见 _send_multipart），别名 model 字节级替换；
@@ -910,6 +912,9 @@ class Gateway:
           上游 4xx/5xx 也记一条 status=error（请求日志可查），随后抛出由入口转 4xx/502。"""
         reg = self.tenants.get(user_id) if user_id is not None else None
         url = upstream.url_for(kind)
+        # v2.1.1 R176：计费/日志 alias = 客户端请求的模型名（与 chat 流口径一致：
+        # 价格表按客户端模型名配置）；未提供时退回上游模型名（老调用方兼容）
+        bill_alias = alias or client_model
         try:
             if kind == "audio_trans":
                 resp = await self._send_multipart(reg, upstream, url, raw, content_type, client_model)
@@ -919,7 +924,7 @@ class Gateway:
                 resp = await self.send(reg, upstream, url, payload, stream=False)
         except UpstreamError as exc:
             self.record(request_id=request_id, platform=upstream.platform,
-                        model=client_model, model_alias=client_model, in_format="openai",
+                        model=client_model, model_alias=bill_alias, in_format="openai",
                         stream=False, status="error", http_status=exc.status,
                         error=exc.message()[:800],
                         latency_ms=int((time.perf_counter() - started_at) * 1000),
@@ -934,12 +939,37 @@ class Gateway:
             out_info = self.gen_output_info(kind, data, resp) if isinstance(data, dict) else \
                 (json.dumps({"audio_bytes": len(resp.content), "content_type": ct}, ensure_ascii=False)
                  if data is None else "")
+            # v2.1.1 R176：可计费秒数 + TTS 输入 token 计量（记账时冻结，配合价格 second_fee/输入费）
+            seconds, sec_src = 0.0, ""
+            if kind == "videos":
+                try:
+                    seconds = max(0.0, float((body or {}).get("seconds") or 0.0))
+                except (TypeError, ValueError):
+                    seconds = 0.0
+                sec_src = "request"
+            elif kind == "audio_trans" and isinstance(data, dict):
+                for u in (data.get("usage"), data):
+                    if not isinstance(u, dict):
+                        continue
+                    for k in ("duration_seconds", "audio_duration", "duration", "seconds"):
+                        v = u.get(k)
+                        if isinstance(v, (int, float)) and v > 0:
+                            seconds, sec_src = float(v), "response"
+                            break
+                    if seconds:
+                        break
+            usage_detail = json.dumps({"seconds": seconds, "src": sec_src}, ensure_ascii=False) \
+                            if seconds > 0 else ""
+            tts_prompt = T.estimate_tokens(str((body or {}).get("input") or "")) \
+                if kind == "audio_speech" else 0
             self.record(resp=resp, request_id=request_id, platform=upstream.platform,
-                        model=client_model, model_alias=client_model, in_format="openai",
+                        model=client_model, model_alias=bill_alias, in_format="openai",
                         stream=False, status="ok", http_status=resp.status_code,
                         latency_ms=int((time.perf_counter() - started_at) * 1000),
                         client_ip=client_ip, user_id=user_id, client=client or "master",
-                        dkey_id=dkey_id, estimated=True, output_info=out_info[:4000])
+                        dkey_id=dkey_id, estimated=True, output_info=out_info[:4000],
+                        seconds=seconds, usage_detail=usage_detail,
+                        prompt_tokens=tts_prompt)
         finally:
             with contextlib.suppress(Exception):
                 await resp.aclose()

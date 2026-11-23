@@ -42,6 +42,9 @@ COLUMNS: dict[str, str] = {
     "cost_input": "REAL",     # 其中：输入费（非缓存输入 token）
     "cost_cache": "REAL",     # 其中：缓存命中费（cached_tokens）
     "cost_output": "REAL",    # 其中：输出费（completion_tokens）
+    # ---- v2.1.1 R176：秒费分项 + 计量秒数留痕（视频=请求 seconds；音频转写=响应时长）----
+    "cost_second": "REAL",    # 其中：秒费（seconds × 单价 second_fee，元）
+    "usage_detail": "TEXT",   # 计量留痕 JSON：{"seconds": N, "src": "request"|"response"}
 }
 
 BASE_DDL = """
@@ -195,6 +198,8 @@ class Store:
             "cost_input": round(float(kw.get("cost_input") or 0.0), 6),
             "cost_cache": round(float(kw.get("cost_cache") or 0.0), 6),
             "cost_output": round(float(kw.get("cost_output") or 0.0), 6),
+            "cost_second": round(float(kw.get("cost_second") or 0.0), 6),
+            "usage_detail": (kw.get("usage_detail") or "")[:4000],
         }
         if not payload["total_tokens"]:
             payload["total_tokens"] = payload["prompt_tokens"] + payload["completion_tokens"]
@@ -606,6 +611,7 @@ class Store:
                 " COALESCE(SUM(cost_input),0) AS cost_input,"
                 " COALESCE(SUM(cost_cache),0) AS cost_cache,"
                 " COALESCE(SUM(cost_output),0) AS cost_output,"
+                " COALESCE(SUM(cost_second),0) AS cost_second,"
                 " COUNT(*) AS requests"
                 f" {from_clause} WHERE {tscol} >= ?{where} GROUP BY day, k ORDER BY day",
                 args)]
@@ -616,7 +622,7 @@ class Store:
         out_rows = []
         for d in day_list:
             item = {"day": d, "cost": 0.0, "cost_req": 0.0, "cost_input": 0.0,
-                   "cost_cache": 0.0, "cost_output": 0.0, "requests": 0}
+                   "cost_cache": 0.0, "cost_output": 0.0, "cost_second": 0.0, "requests": 0}
             for k in keys:
                 r = index.get((d, k))
                 item[k] = round(float(r["cost"] or 0), 6) if r else 0.0
@@ -625,8 +631,9 @@ class Store:
                 item["cost_input"] += float(r["cost_input"] or 0) if r else 0
                 item["cost_cache"] += float(r["cost_cache"] or 0) if r else 0
                 item["cost_output"] += float(r["cost_output"] or 0) if r else 0
+                item["cost_second"] += float(r["cost_second"] or 0) if r else 0
                 item["requests"] += int(r["requests"] or 0) if r else 0
-            for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output"):
+            for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output", "cost_second"):
                 item[f] = round(item[f], 6)
             out_rows.append(item)
         return {"days": day_list, "group_by": group_by, "keys": keys,
@@ -664,7 +671,8 @@ class Store:
                 " COALESCE(AVG(CASE WHEN status='ok' THEN ttft_ms END),0) AS ttft,"
                 " COALESCE(SUM(cost),0) AS cost,"
                 " COALESCE(SUM(cost_req),0) AS creq, COALESCE(SUM(cost_input),0) AS cin,"
-                " COALESCE(SUM(cost_cache),0) AS ccache, COALESCE(SUM(cost_output),0) AS cout"
+                " COALESCE(SUM(cost_cache),0) AS ccache, COALESCE(SUM(cost_output),0) AS cout,"
+                " COALESCE(SUM(cost_second),0) AS csec2"
                 f" FROM requests{cond}", params).fetchone()
             # P95 只算成功请求（失败请求的耗时没有统计意义）
             ok_cond = (f"{where} AND status='ok' AND ts >= ?" if where
@@ -692,6 +700,7 @@ class Store:
                 "cost_input": round(float(t["cin"] or 0), 6),
                 "cost_cache": round(float(t["ccache"] or 0), 6),
                 "cost_output": round(float(t["cout"] or 0), 6),
+                "cost_second": round(float(t["csec2"] or 0), 6),
                 "cost_per_request": round(cost / requests_n, 6) if requests_n else 0.0}
 
     def latency_series(self, days: int = 30, user_id: int | list | None = None) -> dict:

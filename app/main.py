@@ -529,6 +529,8 @@ async def _generate_endpoint(request: Request, kind: str):
             client_model=up_model, request_id=request_id, started_at=started_at,
             user_id=user["id"], client=user.get("email") or "", dkey_id=user.get("_key_id"),
             client_ip=ip,
+            # v2.1.1 R176：计费/日志按客户端请求的模型名（价格表配置口径，同 chat 流）
+            alias=model,
         )
     except UpstreamError as exc:
         # 错误行已由 gateway 记入请求日志（含上游报错原文）

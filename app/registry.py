@@ -121,7 +121,7 @@ class Registry:
         self.aggregates: dict[str, list[str]] = {}
         self._agg_rr: dict[str, int] = {}
         self._agg_cd: dict[tuple[str, str], float] = {}
-        # 模型费用配置（v2.1.0 R153）：{客户端模型名: {4 价格字段}}，
+        # 模型费用配置（v2.1.0 R153）：{客户端模型名: {价格字段}}，
         # 文件里以 {"_kind":"pricing"} 标记项存放（与聚合标记项同构，热加载/原子保存复用同一套）
         self.pricing: dict[str, dict] = {}
         self.reload()
@@ -308,7 +308,7 @@ class Registry:
             self._write(base)
 
     def save_pricing(self, entries: dict) -> None:
-        """全量覆盖保存费用配置（入参 = parse_pricing 归一后的 {模型名: 4 价格字段}；
+        """全量覆盖保存费用配置（入参 = parse_pricing 归一后的 {模型名: 价格字段}；
         空 dict = 清空全部条目，标记行随之移除）。"""
         with self._lock:
             self.pricing = {n: dict(v) for n, v in (entries or {}).items()}

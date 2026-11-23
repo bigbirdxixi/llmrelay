@@ -257,7 +257,9 @@ async def audio_trans(request: Request):
         nbytes = len(f.file.read())
     _record("/v1/audio/transcriptions",
             {"model": model, "file_bytes": nbytes, "language": str(form.get("language") or "")})
-    return {"text": "hello from fake transcription", "model": model}
+    # v2.1.1 R176：模拟上游上报音频时长（OpenAI 系 usage 字段），供转写按秒计费计量
+    return {"text": "hello from fake transcription", "model": model,
+            "usage": {"duration_seconds": 30}}
 
 
 # ---------------------------------------------------------------- embeddings（v2.0.2 透传测试）

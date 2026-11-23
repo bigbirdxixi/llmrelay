@@ -4710,7 +4710,8 @@ def test_r153_pricing_config_and_cost(client, hdr, upstream_port):
     r = _set_pricing(client, hdr, [{"model": m, **f} for m, f in T153.items()])
     assert r.status_code == 200
     got = client.get("/api/pricing", headers=hdr).json()
-    assert ({e["model"]: {k: v for k, v in e.items() if k != "model"}
+    # v2.1.1 R176：pricing_info 全 5 字段回显（second_fee 零值也带），比对 T153（4 字段）前剥掉
+    assert ({e["model"]: {k: v for k, v in e.items() if k not in ("model", "second_fee")}
              for e in got["entries"]} == T153)
     # Bearer 形态同样可读可写
     bearer = {"Authorization": f"Bearer {hdr['authorization'][7:]}"}
@@ -4869,10 +4870,80 @@ def test_r155_cost_stats(client, hdr, upstream_port):
     assert client.app.state.store.recent(1)[0]["cost"] == 0
 
 
+def test_r176_second_fee_billing(client, hdr, upstream_port):
+    """R176：非文本模型按秒计费（价格表新增 second_fee 元/秒字段）。
+
+    - 视频生成：计费秒数 = 请求体 seconds 字段（fake 视频任务返回 200 任务 JSON）；
+    - 音频转写：计费秒数 = 上游响应 usage 时长（fake 回 duration_seconds=30）；
+    - TTS：按既有输入费（输入文本计入 prompt_tokens，无新增字段）；
+    - 图片：按既有请求费（每次调用一次，元/次）；
+    - 计费键 = 客户端请求的模型名（alias 语义不变，同 chat 流）；
+    - cost_second 分项进 period()/cost_series（图表堆叠口径 5 分项合计 == 总费用）。
+
+    注：session 级共享 DB，金额断言用前后差值口径（前面测试不留秒费行，秒费可断绝对值）。"""
+    import json as _json
+    store = client.app.state.store
+    r = client.post("/api/providers", headers=hdr, json={
+        "platform": "r176gen", "name": "R176 kinds(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["vid", "trans", "tts", "img"],
+        "extra": {"model_kind": {"vid": "video", "trans": "audio_trans",
+                                  "tts": "audio_tts", "img": "image"}}})
+    assert r.status_code == 200, r.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    rp = _set_pricing(client, hdr, [
+        {"model": "r176gen/vid", "second_fee": 0.5},
+        {"model": "r176gen/trans", "second_fee": 0.1},
+        {"model": "r176gen/tts", "input_per_1k": 1.0},
+        {"model": "r176gen/img", "request_fee": 0.3}])
+    assert rp.status_code == 200, rp.text
+    p0 = client.get("/api/stats/period", headers=hdr).json()
+    # 1) 视频：10 秒 × 0.5 元/秒 = 5.0（请求 seconds 计量，usage_detail 留痕）
+    rv = client.post("/v1/videos", headers=bh, json={"model": "r176gen/vid", "seconds": 10})
+    assert rv.status_code == 200, rv.text
+    rec = store.recent(1)[0]
+    assert rec["status"] == "ok" and rec["model_alias"] == "r176gen/vid"
+    assert rec["cost_second"] == pytest.approx(5.0, abs=1e-6), rec
+    assert rec["cost"] == pytest.approx(5.0, abs=1e-6), rec
+    assert _json.loads(rec["usage_detail"]) == {"seconds": 10.0, "src": "request"}
+    # 2) 转写：fake 响应 usage.duration_seconds=30 → 30 × 0.1 = 3.0
+    rt = client.post("/v1/audio", headers=bh, data={"model": "r176gen/trans"},
+                     files={"file": ("a.wav", b"RIFFfake", "audio/wav")})
+    assert rt.status_code == 200, rt.text
+    rec = store.recent(1)[0]
+    assert rec["cost_second"] == pytest.approx(3.0, abs=1e-6), rec
+    assert _json.loads(rec["usage_detail"]) == {"seconds": 30.0, "src": "response"}
+    # 3) TTS：输入文本计入 prompt_tokens → 输入费 1 元/1K；无秒费
+    rs = client.post("/v1/audio", headers=bh, json={
+        "model": "r176gen/tts", "input": "你好，世界。这是一段 TTS 计费测试文本。"})
+    assert rs.status_code == 200, rs.text
+    rec = store.recent(1)[0]
+    assert rec["prompt_tokens"] > 0, rec
+    assert rec["cost_second"] == 0, rec
+    assert rec["cost_input"] == pytest.approx(rec["prompt_tokens"] / 1000.0, abs=1e-6), rec
+    assert rec["cost"] == pytest.approx(rec["cost_input"], abs=1e-6), rec
+    # 4) 图片：请求费 0.3 元/次，与秒费互不干扰
+    ri = client.post("/v1/images", headers=bh, json={"model": "r176gen/img", "n": 2})
+    assert ri.status_code == 200, ri.text
+    rec = store.recent(1)[0]
+    assert rec["cost_req"] == pytest.approx(0.3, abs=1e-6), rec
+    assert rec["cost_second"] == 0 and rec["cost"] == pytest.approx(0.3, abs=1e-6), rec
+    # 5) period()：秒费分项 = 视频 5 + 转写 3（前面测试无秒费行，断绝对值）
+    p1 = client.get("/api/stats/period", headers=hdr).json()
+    assert p1["cost_second"] - p0.get("cost_second", 0.0) == pytest.approx(8.0, abs=1e-6)
+    # 6) cost_series：今日行含 cost_second 分项（5 分项 + 总费用 恒等式扩展位）
+    cs = client.get("/api/stats/cost", params={"group_by": "model"}, headers=hdr).json()
+    row = cs["rows"][-1]
+    assert row["cost_second"] == pytest.approx(8.0, abs=1e-6), row
+    # 清理：清空价格（平台留着不影响后续测试——无秒费价格则 0）
+    assert _set_pricing(client, hdr, []).status_code == 200
+
+
 def test_r172_stats_period_today_calendar_day(client, hdr, upstream_port):
     """R172：GET /api/stats/period?today=1 → 日历日口径（今日 00:00 起，概览页「当天费用」等式用）。
 
-    判别样本：ts=「今日 0 点前 1 小时」的计费行——落在滚动 24h 内但落在今日 0 点前，
+    判别样本：ts=滚动 24h 起点与今日 0 点之间中点的计费行（带中点采样、时段无关）——
+    落在滚动 24h 内但落在今日 0 点前，
     是两种口径唯一的差别带。today=1 必须排除它，默认滚动口径必须包含它；
     今天的正常调用（ts=now）则两种口径都包含。"""
     from datetime import datetime, timedelta
@@ -4884,8 +4955,12 @@ def test_r172_stats_period_today_calendar_day(client, hdr, upstream_port):
     assert uid, "主 key 调用未落 user_id"
     pd0 = client.get("/api/stats/period", params={"days": 1, "today": 1}, headers=hdr).json()
     pr0 = client.get("/api/stats/period", params={"days": 1}, headers=hdr).json()
-    ts_before_today = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                       - timedelta(hours=1)).astimezone().isoformat(timespec="seconds")
+    # 判别带 = (滚动 24h 起点 now-24h, 今日 00:00)：样本取带中点——时段无关。
+    # （原「今日 00:00 - 1h」在 now 处于一天最后一小时时落出滚动窗口，23 点后跑测试必挂）
+    _now = datetime.now()
+    _today0 = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+    ts_before_today = (_today0 - (_today0 - (_now - timedelta(days=1))) / 2
+                      ).astimezone().isoformat(timespec="seconds")
     store.record(request_id="r172-backdated", platform="fake", model="fake/r172",
                  prompt_tokens=1000, completion_tokens=500, status="ok",
                  cost=9.9, cost_req=1.0, cost_input=2.0, cost_cache=3.0, cost_output=3.9,
@@ -4911,10 +4986,13 @@ def test_r172_stats_period_today_calendar_day(client, hdr, upstream_port):
     assert pr2["cost"] - pr1["cost"] == pytest.approx(delta_today, abs=1e-6)
     assert pr2["requests"] == pr0["requests"] + 2
     # today=1 响应仍带完整分项字段（前端等式行消费）
-    for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output", "cost_per_request"):
+    for f in ("cost", "cost_req", "cost_input", "cost_cache", "cost_output",
+              "cost_second", "cost_per_request"):
         assert f in pd2, f
+    # 分项恒等式（v2.1.1 R176 起含秒费共 5 分项；session 共享库可能有前序测试的秒费行）
     assert pd2["cost"] == pytest.approx(
-        pd2["cost_req"] + pd2["cost_input"] + pd2["cost_cache"] + pd2["cost_output"], abs=1e-6)
+        pd2["cost_req"] + pd2["cost_input"] + pd2["cost_cache"]
+        + pd2["cost_output"] + pd2["cost_second"], abs=1e-6)
     _set_pricing(client, hdr, [])
 
 
@@ -5083,7 +5161,7 @@ def test_r174_aggregate_prune_bare_entries(client, hdr, upstream_port):
 def test_r175_stats_heatmap_today_calendar_day(client, hdr, upstream_port):
     """R175：GET /api/stats/heatmap?days=1&today=1 → 日历日口径（今日 00:00 起，概览页「星期 × 时段」今日 chip 用）。
 
-    判别样本：ts=「今日 0 点前 1 小时」（昨夜 23:00）的补造行——落在滚动 24h 内但落在今日 0 点前，
+    判别样本：ts=滚动 24h 起点与今日 0 点之间中点的补造行（带中点采样、时段无关）——落在滚动 24h 内但落在今日 0 点前，
     是两种口径唯一的差别带：滚动 days=1 必须包含它、today=1 必须排除它；
     今天的正常调用（ts=now）则两种口径都包含。"""
     from datetime import datetime, timedelta
@@ -5100,8 +5178,12 @@ def test_r175_stats_heatmap_today_calendar_day(client, hdr, upstream_port):
     h0 = client.get("/api/stats/heatmap", params={"days": 1}, headers=hdr).json()
     ht0 = client.get("/api/stats/heatmap", params={"days": 1, "today": 1}, headers=hdr).json()
     assert h0["today"] is False and ht0["today"] is True
-    ts_before_today = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                       - timedelta(hours=1)).astimezone().isoformat(timespec="seconds")
+    # 判别带 = (滚动 24h 起点 now-24h, 今日 00:00)：样本取带中点——时段无关。
+    # （原「今日 00:00 - 1h」在 now 处于一天最后一小时时落出滚动窗口，23 点后跑测试必挂）
+    _now = datetime.now()
+    _today0 = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+    ts_before_today = (_today0 - (_today0 - (_now - timedelta(days=1))) / 2
+                      ).astimezone().isoformat(timespec="seconds")
     store.record(request_id="r175-backdated", platform="fake", model="fake/r175",
                  prompt_tokens=10, completion_tokens=10, status="ok",
                  user_id=uid, ts=ts_before_today)

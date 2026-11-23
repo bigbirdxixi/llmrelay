@@ -371,7 +371,7 @@ async def list_pricing(request: Request, _: None = Depends(auth)):
 
 @router.post("/pricing")
 async def save_pricing(request: Request, _: None = Depends(auth)):
-    """全量覆盖保存费用配置。body: {"entries": [{model, 4 价格字段}]}。
+    """全量覆盖保存费用配置。body: {"entries": [{model, 价格字段}]}。
 
     校验（对齐 v2.0.1 聚合保存严格校验）：模型名必须在当前上游配置里可调用
     （all_model_ids：平台/模型全名、裸模型名、别名、聚合名），否则 400 并列出坏名字。
@@ -386,7 +386,7 @@ async def save_pricing(request: Request, _: None = Depends(auth)):
         entries: dict = {}
         for row in raw:
             if not isinstance(row, dict):
-                raise HTTPException(400, "费用条目必须是对象（含 model 与 4 个价格字段）")
+                raise HTTPException(400, "费用条目必须是对象（含 model 与价格字段）")
             m = str(row.get("model") or "").strip()
             if not m:
                 continue
