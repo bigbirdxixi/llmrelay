@@ -861,7 +861,7 @@ function heatmapHtml(data){
           background:${v ? `rgba(52,211,153,${a.toFixed(2)})` : "var(--panel2)"}"></i>`;
       }).join("")}</div>`).join("");
   return `<div style="overflow-x:auto"><div style="min-width:fit-content">${head}${grid}</div>
-    <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该星期几该小时的请求量（近 ${data.days} 天合并）</div></div>`;
+    <div class="dim" style="font-size:11.5px;margin-top:6px">颜色深浅 = 该星期几该小时的请求量${data.today ? "（当天）" : `（近 ${data.days} 天合并）`}</div></div>`;
 }
 
 /* 结构组成：小组横向条形（协议/流式/状态/思考策略/错误码） */
@@ -1165,11 +1165,14 @@ async function renderOverview(){
   // v2.1.0 R172：当天费用分项等式（日历日口径：今日 00:00 起，与「今日请求/今日 tokens」同口径）
   const pc = await api(`/api/stats/period?days=1&today=1`);
   const rgRange = p === 1 ? "today" : (p === 7 ? "7d" : "30d");
+  // v2.1.0 R175：「今日」chip 热力图走日历日口径（today=1，今日 00:00 起）——
+  // 滚动 24h 会把前一天夜间数据混进星期行；近7/30天 chip 保持滚动口径
+  const hmUrl = p === 1 ? "/api/stats/heatmap?days=1&today=1" : `/api/stats/heatmap?days=${p}`;
   const [chart, hm, rg] = p === 1
-    ? await Promise.all([h1, api(`/api/stats/heatmap?days=${p}`), api(`/api/stats/regions?range=${rgRange}`)])
+    ? await Promise.all([h1, api(hmUrl), api(`/api/stats/regions?range=${rgRange}`)])
     : await Promise.all([
         api(`/api/stats/hourly?days=${p}&group=day&split=${split}`),
-        api(`/api/stats/heatmap?days=${p}`),
+        api(hmUrl),
         api(`/api/stats/regions?range=${rgRange}`),
       ]);
   const oc = bucketOpts(p);

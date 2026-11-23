@@ -5078,3 +5078,41 @@ def test_r174_aggregate_prune_bare_entries(client, hdr, upstream_port):
             client.delete(f"/api/providers/{p}", headers=hdr)
         for n in ("E174", "F174"):
             client.delete(f"/api/aggregates/{n}", headers=hdr)
+
+
+def test_r175_stats_heatmap_today_calendar_day(client, hdr, upstream_port):
+    """R175：GET /api/stats/heatmap?days=1&today=1 → 日历日口径（今日 00:00 起，概览页「星期 × 时段」今日 chip 用）。
+
+    判别样本：ts=「今日 0 点前 1 小时」（昨夜 23:00）的补造行——落在滚动 24h 内但落在今日 0 点前，
+    是两种口径唯一的差别带：滚动 days=1 必须包含它、today=1 必须排除它；
+    今天的正常调用（ts=now）则两种口径都包含。"""
+    from datetime import datetime, timedelta
+    store = client.app.state.store
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+
+    def total(hm):
+        return sum(v for row in hm["matrix"] for v in row)
+
+    # 主 key 落一笔（带上 user_id，admin 聚合视图按 user 过滤可见）
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    uid = store.recent(1)[0]["user_id"]
+    assert uid, "主 key 调用未落 user_id"
+    h0 = client.get("/api/stats/heatmap", params={"days": 1}, headers=hdr).json()
+    ht0 = client.get("/api/stats/heatmap", params={"days": 1, "today": 1}, headers=hdr).json()
+    assert h0["today"] is False and ht0["today"] is True
+    ts_before_today = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                       - timedelta(hours=1)).astimezone().isoformat(timespec="seconds")
+    store.record(request_id="r175-backdated", platform="fake", model="fake/r175",
+                 prompt_tokens=10, completion_tokens=10, status="ok",
+                 user_id=uid, ts=ts_before_today)
+    h1 = client.get("/api/stats/heatmap", params={"days": 1}, headers=hdr).json()
+    ht1 = client.get("/api/stats/heatmap", params={"days": 1, "today": 1}, headers=hdr).json()
+    # 跨日补造行（昨夜 23:00）：滚动 days=1 含（+1），today=1 日历日口径不含
+    assert total(h1) == total(h0) + 1
+    assert total(ht1) == total(ht0)
+    # 今天的正常调用：两种口径都计入
+    assert client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr).status_code == 200
+    h2 = client.get("/api/stats/heatmap", params={"days": 1}, headers=hdr).json()
+    ht2 = client.get("/api/stats/heatmap", params={"days": 1, "today": 1}, headers=hdr).json()
+    assert total(h2) == total(h1) + 1
+    assert total(ht2) == total(ht1) + 1

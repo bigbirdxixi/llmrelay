@@ -722,9 +722,17 @@ class Store:
         return {"days": day_list, "group_by": "day",
                 "keys": ["avg", "p95", "ttft"], "rows": out_rows}
 
-    def heatmap(self, days: int = 30, user_id: int | list | None = None) -> dict:
-        """星期 × 小时 请求量矩阵（7 行周一..周日 × 24 列）。"""
-        since = self._since(days)
+    def heatmap(self, days: int = 30, user_id: int | list | None = None, today: bool = False) -> dict:
+        """星期 × 小时 请求量矩阵（7 行周一..周日 × 24 列）。
+
+        v2.1.0 R175：today=True → 日历日口径（今日 00:00 起，概览页「今日」chip 用——
+        滚动 24h 会把前一天夜间数据混进「该星期几」行，与自然日错位）；
+        默认滚动 N×24h（近7天/近30天 chip 口径不变）。
+        """
+        if today:
+            since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        else:
+            since = self._since(days)
         where, args = self._user_clause(user_id)
         cond = (f"{where} AND ts >= ?" if where else " WHERE ts >= ?")
         params = args + (since,)
@@ -744,7 +752,7 @@ class Store:
             if 0 <= wd < 7 and 0 <= h < 24:
                 matrix[wd][h] = int(r["c"])
                 mx = max(mx, matrix[wd][h])
-        return {"days": days, "matrix": matrix, "max": mx,
+        return {"days": days, "today": bool(today), "matrix": matrix, "max": mx,
                 "labels": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
 
     def mix(self, days: int = 30, user_id: int | list | None = None) -> dict:

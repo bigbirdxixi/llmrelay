@@ -1144,10 +1144,15 @@ async def stats_latency(request: Request, days: int = 30, _: None = Depends(auth
 
 
 @router.get("/stats/heatmap")
-async def stats_heatmap(request: Request, days: int = 30, _: None = Depends(auth)):
-    """星期 × 小时 请求量热力矩阵。"""
+async def stats_heatmap(request: Request, days: int = 30, today: bool = False,
+                        _: None = Depends(auth)):
+    """星期 × 小时 请求量热力矩阵。
+
+    v2.1.0 R175：today=1 → 日历日口径（今日 00:00 起，概览页「今日」chip 用）；
+    默认滚动 N×24h。
+    """
     store = request.app.state.store
-    return store.heatmap(days, _data_user(request))
+    return store.heatmap(days, _data_user(request), today=bool(today))
 
 
 @router.get("/stats/mix")
