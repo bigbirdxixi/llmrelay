@@ -2,6 +2,8 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，版本号用 SemVer。
 
+## [2.1.2] - 2026-11-26
+
 ## [2.1.1] - 2026-11-24
 
 ### 功能：非文本模型按量计费（R176 价格表新增 second_fee 元/秒）
