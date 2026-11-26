@@ -4188,6 +4188,52 @@ def test_r139_video_status_get_passthrough(client, hdr, upstream_port):
         client.delete("/api/providers/r139vid2", headers=hdr)
 
 
+# ---------------------------------------------------------------- R180 视频状态查询参数镜像兼容（v2.1.2）
+def test_r180_video_status_param_mirror(client, hdr, upstream_port):
+    """R180: GET /v1/videos 查询参数镜像兼容（生产反馈：Agnes /agnesapi 只认 model + video_id）：
+
+    - 客户端传 task_id（OpenAI 式通用名）而缺 video_id → 自动补 video_id 镜像（Agnes 报 video_id is required）
+    - 客户端传 model_name 别名而缺 model → 自动补 model 镜像（Agnes 忽略 model_name → task not found）
+    - 两参数都传 → 不重复镜像（已有参数优先、不被覆盖）；镜像值与 R139 别名替换语义一致（上游模型名）
+    - 假上游同时收到原始参数 + 镜像参数；多余参数被上游忽略，OpenAI 式上游不受影响（R139 断言全保留）。"""
+    from tests import fake_upstream
+    rp = client.post("/api/providers", headers=hdr, json={
+        "platform": "r180vid", "name": "R180 video(fake)", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["vid3-model"],
+        "extra": {"model_kind": {"vid3-model": "video"}}})
+    assert rp.status_code == 200, rp.text
+    bh = {"authorization": f"Bearer {conftest._TEST_API_KEY}"}
+    try:
+        # task_id → video_id 镜像（原始 task_id 同时保留）
+        fake_upstream.RECEIVED.clear()
+        r1 = client.get("/v1/videos",
+                        params={"model": "r180vid/vid3-model", "task_id": "t-9"}, headers=bh)
+        assert r1.status_code == 200, r1.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/videos[GET]"]
+        assert got and got[0]["body"].get("video_id") == "t-9" \
+            and got[0]["body"].get("task_id") == "t-9", got
+        # model_name → model 镜像（值同为上游模型名）
+        fake_upstream.RECEIVED.clear()
+        r2 = client.get("/v1/videos",
+                        params={"model_name": "r180vid/vid3-model", "video_id": "t-8"}, headers=bh)
+        assert r2.status_code == 200, r2.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/videos[GET]"]
+        assert got and got[0]["body"].get("model") == "vid3-model" \
+            and got[0]["body"].get("model_name") == "vid3-model", got
+        # 两组参数都传 → 不重复镜像、不覆盖已有值
+        fake_upstream.RECEIVED.clear()
+        r3 = client.get("/v1/videos", params={
+            "model": "r180vid/vid3-model", "model_name": "r180vid/vid3-model",
+            "task_id": "t-7", "video_id": "t-6"}, headers=bh)
+        assert r3.status_code == 200, r3.text
+        got = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/videos[GET]"]
+        assert got and got[0]["body"].get("video_id") == "t-6" \
+            and got[0]["body"].get("task_id") == "t-7", got
+    finally:
+        client.delete("/api/providers/r180vid", headers=hdr)
+
+
 # ---------------------------------------------------------------- R140 日志筛选 facets：类型/账号选项不为空（v2.0.1）
 def test_r140_log_facets_type_and_account(client, hdr):
     """生产 bug 回归：日志页「类型」「账号」筛选框一个选项都没有。

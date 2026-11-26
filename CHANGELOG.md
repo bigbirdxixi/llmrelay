@@ -4,6 +4,11 @@
 
 ## [2.1.2] - 2026-11-26
 
+### 修复：视频任务状态查询参数镜像兼容（R180，生产反馈）
+- GET `/v1/videos` 查询参数转发自动补两类镜像参数：传 `task_id` 缺 `video_id` → 补 `video_id` 镜像（Agnes /agnesapi 要求 video_id，只传 task_id 报「video_id is required」）；传 `model_name` 别名缺 `model` → 补 `model` 镜像（Agnes 只认 `model`，忽略 `model_name` → 「task not found」）。两参数都传则不重复镜像（已有参数优先）；上游一般忽略多余参数，OpenAI 式上游不受影响
+- 设置页「客户端接入示例」视频查询 curl 由 `task_id` 改为 `video_id`，并标注镜像规则（task_id / video_id 传哪个都行）
+- 活体验证：生产 Agnes `?model=...&video_id=task_...` 返回 200 任务 JSON（status=completed、含 mp4 URL）；回归测试 R180（task_id→video_id / model_name→model / 不重复镜像 三组断言）
+
 ## [2.1.1] - 2026-11-24
 
 ### 功能：非文本模型按量计费（R176 价格表新增 second_fee 元/秒）

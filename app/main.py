@@ -610,6 +610,14 @@ async def videos_status(request: Request):
     for k in ("model", "model_name"):
         if k in params:
             params[k] = up_model  # 别名 → 上游模型名（与上游文档里的模型名对齐）
+    # v2.1.2 R180 镜像兼容（生产反馈：Agnes /agnesapi 只认 model + video_id）：
+    # 传 model_name 而缺 model → 补 model 镜像（Agnes 忽略 model_name → task not found）；
+    # 传 task_id（OpenAI 式通用名）而缺 video_id → 补 video_id 镜像（Agnes 报 video_id is required）。
+    # 两个参数同时传则不重复镜像；上游一般忽略多余参数，OpenAI 式上游不受影响。
+    if "model_name" in params and "model" not in params:
+        params["model"] = params["model_name"]
+    if "task_id" in params and "video_id" not in params:
+        params["video_id"] = params["task_id"]
     try:
         resp = await gw.send_get(reg, upstream, upstream.url_for("videos_status"), params)
     except UpstreamError as exc:
