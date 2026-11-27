@@ -124,6 +124,9 @@ class Registry:
         # 模型费用配置（v2.1.0 R153）：{客户端模型名: {价格字段}}，
         # 文件里以 {"_kind":"pricing"} 标记项存放（与聚合标记项同构，热加载/原子保存复用同一套）
         self.pricing: dict[str, dict] = {}
+        # 价格规则（v2.1.2 R181）：{规则名: {价格字段}}，文件里以 {"_kind":"pricing_rules"}
+        # 标记项存放（租户隔离，同 pricing 标记行同目录）；计费绑定在各平台 extra.model_pricing_rule
+        self.pricing_rules: dict[str, dict] = {}
         self.reload()
 
     # ---------- 加载 / 热重载 ----------
@@ -173,6 +176,21 @@ class Registry:
                         log.warning("租户文件 %s 的费用配置解析失败，按未配置处理: %s",
                                     self.upstreams_file.name, e)
             self.pricing = pricing
+            # 价格规则标记项（v2.1.2 R181）：同体例，坏条目按无规则处理并告警
+            pricing_rules: dict[str, dict] = {}
+            for mk in [x for x in raw if isinstance(x, dict) and x.get("_kind") == "pricing_rules"]:
+                if isinstance(mk.get("pricing_rules"), dict):
+                    try:
+                        pricing_rules.update(P.parse_pricing_rules(mk["pricing_rules"]))
+                    except ValueError as e:
+                        log.warning("租户文件 %s 的价格规则解析失败，按未配置处理: %s",
+                                    self.upstreams_file.name, e)
+            self.pricing_rules = pricing_rules
+            # v2.1.2 R181：旧按模型价格表已废弃——首次遇到「有旧表且无规则」自动一次性迁移
+            # （条目键 → 规则名，resolve 出 (平台, 上游模型) → extra.model_pricing_rule 绑定），
+            # 迁移后旧表标记行删除、写回磁盘，之后热加载不再触发
+            if pricing and not pricing_rules:
+                self._migrate_legacy_pricing(pricing)
             cmap: dict[str, str] = {}
             if self.clients_file.exists():
                 text = self.clients_file.read_text(encoding="utf-8").strip()
@@ -324,6 +342,124 @@ class Registry:
                 row[f] = p.get(f, 0.0)
             out.append(row)
         return out
+
+    # ---------- 价格规则（v2.1.2 R181：_kind=pricing_rules 标记项 + 平台 extra.model_pricing_rule 绑定） ----------
+    def _migrate_legacy_pricing(self, legacy: dict) -> None:
+        """旧按模型价格表一次性自动迁移为价格规则 + 每模型绑定（调用方须持锁，在 reload 内触发）。
+
+        规则名 = 旧表条目键（平台/模型 全名、裸名或聚合名）；resolve(键) → (平台, 上游模型)
+        → 该平台 extra.model_pricing_rule[上游模型] = 规则名（聚合展开到实际条目、计费跟随实际
+        命中上游，与手工绑定语义一致）。解析不了的条目跳过（平台已删/模型未登记，告警）。
+        迁移完成即删除旧表标记行、写回磁盘（_write 会触发再 reload，旧表已无 → 不重入）。
+        """
+        rules: dict[str, dict] = {}
+        binds: dict[str, dict[str, str]] = {}   # platform -> {上游模型: 规则名}
+        skipped: list[str] = []
+        for name, vals in legacy.items():
+            rule = str(name)
+            res = self.resolve(rule)
+            if res is None:
+                skipped.append(name)
+                log.warning("价格表迁移：模型 %s 无法解析（平台已删或模型未登记），跳过该条目", name)
+                continue
+            up, up_model = res
+            rules[rule] = dict(vals)
+            binds.setdefault(up.platform, {})[up_model] = rule
+        if rules:
+            self.pricing_rules = rules
+        self.pricing = {}
+        base = [x for x in self._raw
+                if not (isinstance(x, dict) and x.get("_kind") in ("pricing", "pricing_rules"))]
+        for x in base:
+            if isinstance(x, dict) and not x.get("_kind") and x.get("platform") in binds:
+                extra = x.get("extra")
+                if not isinstance(extra, dict):
+                    extra = {}
+                mpr = dict(extra.get("model_pricing_rule") or {})
+                mpr.update(binds[x["platform"]])
+                extra["model_pricing_rule"] = mpr
+                x["extra"] = extra
+        if rules:
+            base.append({"_kind": "pricing_rules", "pricing_rules": rules})
+        self._write(base)
+        log.info("旧按模型价格表已自动迁移为价格规则：规则 %d 条 / 绑定 %d 个模型%s",
+                 len(rules), sum(len(v) for v in binds.values()),
+                 f"（跳过 {len(skipped)} 条无法解析：{', '.join(skipped)}）" if skipped else "")
+
+    def resolve_pricing(self, alias: str, platform: str | None, up_model: str | None) -> dict | None:
+        """按（平台, 上游模型）的价格规则绑定解析计费 5 字段 dict（v2.1.2 R181）。
+
+        平台 extra.model_pricing_rule[上游模型] → pricing_rules[规则名]；
+        未绑定 / 规则已删 / 平台未知 / 缺参 → None（= 免费，只统计不计费——旧表废弃后的口径）。
+        注意：生成类端点 record 的 model kw 传的是客户端别名（不是上游模型名）——直查绑定
+        未命中时用 resolve(alias, force_platform) 归一到真上游模型名再查一次。"""
+        up = self.find(platform) if platform else None
+        if up is None:
+            return None
+        bind = (up.extra or {}).get("model_pricing_rule") or {}
+        if not bind:
+            return None
+        rule = str(bind.get(str(up_model or "").strip()) or "").strip()
+        if not rule and alias:
+            res = self.resolve(str(alias).strip(), force_platform=platform or None)
+            if res is not None:
+                rule = str(bind.get(str(res[1])) or "").strip()
+        if not rule:
+            return None
+        return (self.pricing_rules or {}).get(rule)
+
+    def _persist_pricing_rules(self) -> None:
+        with self._lock:
+            base = [x for x in self._raw
+                   if not (isinstance(x, dict) and x.get("_kind") == "pricing_rules")]
+            if self.pricing_rules:
+                base.append({"_kind": "pricing_rules", "pricing_rules": self.pricing_rules})
+            self._write(base)
+
+    def save_pricing_rules(self, rules: dict) -> None:
+        """全量覆盖保存价格规则（入参 = parse_pricing_rules 归一后的 {规则名: 价格字段}；
+        空 dict = 清空全部规则，标记行随之移除）。调用方负责清悬空绑定（strip_dangling_rule_bindings）。"""
+        with self._lock:
+            self.pricing_rules = {n: dict(v) for n, v in (rules or {}).items()}
+        self._persist_pricing_rules()
+
+    def pricing_rules_info(self) -> list[dict]:
+        """GET /api/pricing-rules 用：按规则名排序的列表（5 字段全量回显，零值也带）。"""
+        out = []
+        for name in sorted(self.pricing_rules):
+            p = dict(self.pricing_rules[name])
+            row = {"rule": name}
+            for f in P.PRICE_FIELDS:
+                row[f] = p.get(f, 0.0)
+            out.append(row)
+        return out
+
+    def strip_dangling_rule_bindings(self, keep: set) -> list[str]:
+        """全量保存规则后，清掉各平台 extra.model_pricing_rule 里指向已删规则的绑定。
+
+        返回被清理的 "平台/模型" 列表（响应里回显，前端可提示）。写回磁盘（_write 触发 reload）。"""
+        keep = {str(k) for k in (keep or set())}
+        stripped: list[str] = []
+        base = [x for x in self._raw
+                if not (isinstance(x, dict) and x.get("_kind") == "pricing_rules")]
+        for x in base:
+            if isinstance(x, dict) and not x.get("_kind") and x.get("platform"):
+                extra = x.get("extra")
+                if not isinstance(extra, dict):
+                    continue
+                mpr = extra.get("model_pricing_rule")
+                if not isinstance(mpr, dict):
+                    continue
+                for m in [k for k in list(mpr) if str(mpr[k]) not in keep]:
+                    stripped.append(f"{x['platform']}/{m}")
+                    del mpr[m]
+                if not mpr:
+                    extra.pop("model_pricing_rule", None)
+                    if not extra:
+                        x.pop("extra", None)
+        if stripped:
+            self._write(base)
+        return stripped
 
     def entry_fresh(self, e: str) -> bool:
         """单条聚合条目在配置层是否有效（v2.0.1，比 resolve 的透传更严）：

@@ -408,9 +408,13 @@ class Gateway:
         if kw.get("status") in ("ok", "aborted"):
             uid = kw.get("user_id")
             reg = self.tenants.get(int(uid)) if (self.tenants is not None and uid) else None
-            total, creq, cin, ccache, cout, csec = P.compute_cost(
-                getattr(reg, "pricing", None) or {},
-                kw.get("model_alias") or "",
+            # v2.1.2 R181：价格规则——按实际命中的 (平台, 上游模型) 绑定的规则计费；
+            # 未绑定 / 规则不存在 → 免费只统计（旧按模型价格表已废弃，记账时冻结规则价格）
+            prices = (reg.resolve_pricing(kw.get("model_alias") or "",
+                                          kw.get("platform"), kw.get("model"))
+                      if reg is not None else None)
+            total, creq, cin, ccache, cout, csec = P.cost_for(
+                prices,
                 prompt_tokens=kw.get("prompt_tokens") or 0,
                 completion_tokens=kw.get("completion_tokens") or 0,
                 cached_tokens=kw.get("cached_tokens") or 0,

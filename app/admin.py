@@ -405,6 +405,60 @@ async def save_pricing(request: Request, _: None = Depends(auth)):
     return {"ok": True, "entries": reg.pricing_info()}
 
 
+@router.get("/pricing-rules")
+async def list_pricing_rules(request: Request, _: None = Depends(auth)):
+    """当前账号（或管理员汇总）的价格规则（v2.1.2 R181，租户隔离：各租户独立一套规则）。
+
+    单账号：{"rules": [{rule, request_fee, input_per_1k, cache_hit_per_1k, output_per_1k, second_fee}]}
+    汇总视图：按账号分组的规则（带 tenant / tenant_label）。"""
+    if _multi_mode(request):
+        data = []
+        for uid, label, reg in _sel_tenant_regs(request):
+            data.append({"tenant": uid, "tenant_label": label,
+                         "rules": reg.pricing_rules_info()})
+        return {"data": data, "all": True}
+    reg = _reg(request)
+    return {"rules": reg.pricing_rules_info()}
+
+
+@router.post("/pricing-rules")
+async def save_pricing_rules(request: Request, _: None = Depends(auth)):
+    """全量覆盖保存价格规则（v2.1.2 R181）。body: {"rules": [{rule, 价格字段}]}（也兼容 {规则名: {字段}}）。
+
+    校验：规则名非空不重复；价格字段数字且非负（对齐 parse_pricing 体例），坏 → 400。
+    空 rules = 清空全部规则。保存后自动清掉各平台 model_pricing_rule 里指向已删规则的
+    悬空绑定（响应 stripped 回显被清理的 "平台/模型"）。"""
+    reg = _reg_scoped(request)
+    data = await request.json()
+    raw = data.get("rules") if isinstance(data, dict) else data
+    if raw is None:
+        raw = []
+    entries: dict = {}
+    if isinstance(raw, list):
+        seen: set = set()
+        for row in raw:
+            if not isinstance(row, dict):
+                raise HTTPException(400, "价格规则条目必须是对象（含 rule 与价格字段）")
+            n = str(row.get("rule") or "").strip()
+            if not n:
+                continue
+            if n in seen:
+                raise HTTPException(400, f"价格规则名重复：{n}")
+            seen.add(n)
+            entries[n] = {f: row.get(f, 0) for f in P.PRICE_FIELDS}
+    elif isinstance(raw, dict):
+        entries = raw
+    else:
+        raise HTTPException(400, "价格规则 body 必须是列表或对象")
+    try:
+        entries = P.parse_pricing_rules(entries)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    stripped = reg.strip_dangling_rule_bindings(set(entries))
+    reg.save_pricing_rules(entries)
+    return {"ok": True, "rules": reg.pricing_rules_info(), "stripped": stripped}
+
+
 @router.get("/providers/reasoning-preview")
 async def reasoning_preview(request: Request, _: None = Depends(auth),
                             platform: str = "", model: str = "",
@@ -520,6 +574,26 @@ async def upsert_provider(request: Request, _: None = Depends(auth)):
         raise HTTPException(400, "base_url 不能为空")
     if row["type"] not in ("openai", "anthropic"):
         raise HTTPException(400, "type 只能是 openai / anthropic")
+    # v2.1.2 R181：价格规则绑定（extra.model_pricing_rule = {上游模型: 规则名}）必须真实存在——
+    # 选了已删规则的绑定直接 400（对齐 v2.0.1 聚合保存严格校验，防悬空绑定静默变免费）；
+    # 未登记在本平台的模型键随保存剔除（R150 model_kind 体例：删掉的模型不留死绑定）
+    mpr_raw = (row.get("extra") or {}).get("model_pricing_rule")
+    if isinstance(mpr_raw, dict):
+        mpr = {str(k).strip(): str(v).strip()
+               for k, v in mpr_raw.items() if str(k).strip() and str(v).strip()}
+        exposed = set(row.get("models") or []) | set((row.get("model_map") or {}).keys())
+        mpr = {k: v for k, v in mpr.items() if k in exposed}
+        row["extra"] = dict(row.get("extra") or {})
+        if mpr:
+            known = set(getattr(reg, "pricing_rules", None) or {})
+            bad = sorted({v for v in mpr.values() if v not in known})
+            if bad:
+                raise HTTPException(400,
+                                     f"价格规则不存在：{', '.join(bad)}"
+                                     f"（规则已在「设置 → 价格规则」里删除——重选现有规则或先新建规则）")
+            row["extra"]["model_pricing_rule"] = mpr
+        else:
+            row["extra"].pop("model_pricing_rule", None)
     try:
         saved = reg.upsert(row)
     except Exception as exc:  # noqa: BLE001

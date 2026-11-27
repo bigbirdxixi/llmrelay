@@ -4827,33 +4827,88 @@ T153 = {"fake/fake-gpt": {"request_fee": 0.01, "input_per_1k": 1.0,
 
 
 def _set_pricing(client, hdr, entries):
-    return client.post("/api/pricing", json={"entries": entries}, headers=hdr)
+    """v2.1.2 R181：旧按模型价格表已废弃（计费走价格规则）——helper 语义升级：
+
+    每个条目 {model: "平台/模型", 价格字段} → 建同名规则 + 在该平台该模型上写
+    model_pricing_rule 绑定（与服务端自动迁移同源：规则名 = 旧表条目键，存量平滑）；
+    裸名条目不建绑定（测试全用 平台/模型）。entries=[] 清空全部规则
+    （悬空绑定由服务端自动清理）。调用形制不变，R153/R154/R155/R176 原样复用。"""
+    fields = ("request_fee", "input_per_1k", "cache_hit_per_1k", "output_per_1k", "second_fee")
+    rules = [{"rule": e["model"], **{f: e.get(f, 0) for f in fields}}
+             for e in (entries or []) if e]
+    r = client.post("/api/pricing-rules", json={"rules": rules}, headers=hdr)
+    if r.status_code != 200 or not entries:
+        return r
+    # 绑定按平台聚合后每平台只重存一次（逐条重存会用陈旧 extra 覆盖掉前面的绑定）
+    provs = (client.get("/api/providers", headers=hdr).json().get("data") or [])
+    binds: dict = {}
+    for e in entries:
+        key = str(e["model"])
+        if "/" not in key:
+            continue
+        plat, model = key.split("/", 1)
+        binds.setdefault(plat, {})[model] = key
+    for p in provs:
+        if p.get("platform") not in binds:
+            continue
+        payload = {k: p[k] for k in ("platform", "name", "type", "base_url", "models",
+                                     "model_map", "extra", "proxy", "enabled", "timeout_s")
+                   if k in p}
+        extra = dict(p.get("extra") or {})
+        mpr = dict(extra.get("model_pricing_rule") or {})
+        mpr.update(binds[p["platform"]])
+        extra["model_pricing_rule"] = mpr
+        payload["extra"] = extra
+        rr = client.post("/api/providers", json=payload, headers=hdr)
+        if rr.status_code != 200:
+            return rr
+    return r
 
 
 def test_r153_pricing_config_and_cost(client, hdr, upstream_port):
-    """R153：模型价格配置（/api/pricing 校验+落盘+热加载）+ 逐请求计费
-    （成功才计费、缓存命中独立计价、失败请求 0 费用、未配价格 0 费用）。"""
+    """R153→R181：价格配置（v2.1.2 起走价格规则：/api/pricing-rules + 平台模型绑定）
+    + 逐请求计费（成功才计费、缓存命中独立计价、失败请求 0 费用、未绑定模型免费）。"""
     store = client.app.state.store
     URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
     r = _set_pricing(client, hdr, [{"model": m, **f} for m, f in T153.items()])
     assert r.status_code == 200
-    got = client.get("/api/pricing", headers=hdr).json()
-    # v2.1.1 R176：pricing_info 全 5 字段回显（second_fee 零值也带），比对 T153（4 字段）前剥掉
-    assert ({e["model"]: {k: v for k, v in e.items() if k not in ("model", "second_fee")}
-             for e in got["entries"]} == T153)
+    got = client.get("/api/pricing-rules", headers=hdr).json()
+    # 规则全 5 字段回显（second_fee 零值也带），比对 T153（4 字段）前剥掉 second_fee
+    assert ({e["rule"]: {k: v for k, v in e.items() if k not in ("rule", "second_fee")}
+             for e in got["rules"]} == T153)
     # Bearer 形态同样可读可写
     bearer = {"Authorization": f"Bearer {hdr['authorization'][7:]}"}
-    assert client.get("/api/pricing", headers=bearer).status_code == 200
+    assert client.get("/api/pricing-rules", headers=bearer).status_code == 200
     r = _set_pricing(client, bearer, [])
-    assert r.status_code == 200 and r.json()["entries"] == []
-    assert client.get("/api/pricing", headers=bearer).json()["entries"] == []
+    assert r.status_code == 200 and r.json()["rules"] == []
+    assert client.get("/api/pricing-rules", headers=bearer).json()["rules"] == []
     assert _set_pricing(client, bearer, [{"model": m, **f} for m, f in T153.items()]).status_code == 200
-    # 校验：模型名不在上游配置 / 负价格 → 400
-    bad1 = _set_pricing(client, hdr, [{"model": "fake/nope", "request_fee": 0.01}])
-    assert bad1.status_code == 400 and "不在当前上游配置里" in bad1.json()["detail"]
-    assert _set_pricing(client, hdr,
-                       [{"model": "fake/fake-gpt", "input_per_1k": -1}]).status_code == 400
-    # OpenAI 非流式（fake usage：prompt 11 / completion 7）→ 单次 0.028
+    # 校验：负价格 / 规则名重复 → 400（规则名自由，不再有「模型名不在配置」校验——
+    # 悬空风险改由平台保存的规则存在性 400 + 删规则自动清绑定兜底）
+    assert client.post("/api/pricing-rules", json={"rules": [
+        {"rule": "fake/fake-gpt", "input_per_1k": -1}]}, headers=hdr).status_code == 400
+    assert client.post("/api/pricing-rules", json={"rules": [
+        {"rule": "dup"}, {"rule": "dup"}]}, headers=hdr).status_code == 400
+    # 绑定指向不存在的规则 → 400 严格校验（防悬空绑定静默变免费）
+    prov = next(x for x in client.get("/api/providers", headers=hdr).json()["data"]
+                if x["platform"] == "fake")
+    payload = {"platform": "fake", "name": prov["name"], "type": "openai",
+               "base_url": prov["base_url"], "models": list(prov.get("models") or []),
+               "extra": {"model_pricing_rule": {"fake-gpt": "ghost-rule"}}}
+    assert client.post("/api/providers", json=payload, headers=hdr).status_code == 400
+    # 未登记在本平台的模型键随保存静默剔除（不留死绑定）
+    payload["extra"]["model_pricing_rule"] = {"not-a-model": "fake/fake-gpt"}
+    rp = client.post("/api/providers", json=payload, headers=hdr)
+    assert rp.status_code == 200, rp.text
+    prov2 = next(x for x in client.get("/api/providers", headers=hdr).json()["data"]
+                 if x["platform"] == "fake")
+    assert "not-a-model" not in ((prov2.get("extra") or {}).get("model_pricing_rule") or {})
+    # 恢复绑定（后续计费断言依赖；只绑有规则的模型——T153 之外的模型不绑 = 免费口径）
+    payload["extra"]["model_pricing_rule"] = {m: f"fake/{m}"
+                                               for m in (prov2.get("models") or [])
+                                               if f"fake/{m}" in T153}
+    assert client.post("/api/providers", json=payload, headers=hdr).status_code == 200
+    # OpenAI 非流式（fake usage：prompt 11 / completion 7）→ 单次 0.028（按规则计费）
     r = client.post(URL, json={"model": "fake/fake-gpt"}, headers=hdr)
     assert r.status_code == 200
     rec = store.recent(1)[0]
@@ -4876,13 +4931,12 @@ def test_r153_pricing_config_and_cost(client, hdr, upstream_port):
     assert r.status_code == 400
     rec = store.recent(1)[0]
     assert rec["status"] == "error" and rec["cost"] == 0
-    # 未配价格的模型 0 费用
+    # 未绑定价格的模型免费（v2.1.2 口径：没绑规则 = 不计费，只统计用量）
     r = client.post(URL, json={"model": "fake/fake-gpt-2"}, headers=hdr)
     assert r.status_code == 200 and store.recent(1)[0]["cost"] == 0
-    # 清理：清空价格配置（GET 同步为空）
+    # 清理：清空规则（悬空绑定自动随之清理）
     r = _set_pricing(client, hdr, [])
-    assert r.json()["entries"] == []
-    assert client.get("/api/pricing", headers=hdr).json()["entries"] == []
+    assert r.json()["rules"] == []
 
 
 def test_r154_key_balance_limit(client, hdr, upstream_port):
@@ -5124,61 +5178,72 @@ def test_r172_stats_period_today_calendar_day(client, hdr, upstream_port):
     _set_pricing(client, hdr, [])
 
 
-def test_r156_provider_inline_pricing_merge(client, hdr):
-    """R156：「编辑平台」弹窗加宽 + 每模型行内联价格输入（随平台保存一并提交）。
+def test_r181_pricing_rules_binding_and_migration(client, hdr, upstream_port):
+    """R181：价格规则（租户隔离）+ 平台模型绑定全链路：
 
-    前端合并契约的后端钉扎（前端逻辑见 index.html saveProvider 的 R156 注释）：
-    价格条目按 平台/模型 命名空间归属，① 平台模型清单收窄后，已删模型的陈旧条目
-    必须随删随清（后端严格校验会对它 400）；② 合并提交保留其他平台条目；
-    ③ 全零条目自动剥离（行内输入留空 = 不计费）。"""
+    ① 平台保存带绑定 → 计费按规则；未绑定模型免费；
+    ② 绑定指向已删规则 → 400；③ 删规则 → 悬空绑定自动清理（stripped 回显）；
+    ④ 旧按模型价格表（_kind=pricing 标记行）首次 reload 自动一次性迁移为
+    规则 + 绑定，旧表标记行删除（计费语义不变、存量价格平滑）。"""
+    URL = f"http://127.0.0.1:{upstream_port}/v1/chat/completions"
+    store = client.app.state.store
     r = client.post("/api/providers", json={
-        "platform": "r156plat", "name": "R156", "type": "openai",
-        "base_url": "https://example-r156.invalid/v1",
-        "api_keys": ["sk-r156"], "models": ["r156a", "r156b"]}, headers=hdr)
+        "platform": "r181plat", "name": "R181", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1",
+        "api_keys": ["sk-r181"], "models": ["r181a", "r181b"],
+        "extra": {"model_pricing_rule": {"r181a": "fast"}}}, headers=hdr)
+    assert r.status_code == 400 and "fast" in r.json()["detail"], r.text  # 规则还没建
+    r = client.post("/api/pricing-rules", json={"rules": [
+        {"rule": "fast", "input_per_1k": 1.0, "output_per_1k": 2.0}]}, headers=hdr)
+    assert r.status_code == 200 and len(r.json()["rules"]) == 1, r.text
+    r = client.post("/api/providers", json={
+        "platform": "r181plat", "name": "R181", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1",
+        "api_keys": ["sk-r181"], "models": ["r181a", "r181b"],
+        "extra": {"model_pricing_rule": {"r181a": "fast"}}}, headers=hdr)
     assert r.status_code == 200, r.text
     try:
-        # ① 给平台两个模型配价格（= 弹窗行内输入后的保存结果）
-        assert _set_pricing(client, hdr, [
-            {"model": "r156plat/r156a", "request_fee": 0.01, "input_per_1k": 1.0,
-             "cache_hit_per_1k": 0.5, "output_per_1k": 1.0},
-            {"model": "r156plat/r156b", "input_per_1k": 2.0}]).status_code == 200
-        got = client.get("/api/pricing", headers=hdr).json()["entries"]
-        assert {e["model"] for e in got} == {"r156plat/r156a", "r156plat/r156b"}
-
-        # ② 弹窗里删掉 r156b → 平台模型清单收窄（价格条目仍留在配置里，热加载不清）
-        r2 = client.post("/api/providers", json={
-            "platform": "r156plat", "name": "R156", "type": "openai",
-            "base_url": "https://example-r156.invalid/v1",
-            "api_keys": ["sk-r156"], "models": ["r156a"],
-            "enabled": True}, headers=hdr)
-        assert r2.status_code == 200, r2.text
-        # 前端若忘记合并、直接回传旧表 → 陈旧条目被严格校验拦下（400 点名）
-        stale = client.post("/api/pricing", json={"entries": got}, headers=hdr)
-        assert stale.status_code == 400 and "r156plat/r156b" in stale.json()["detail"]
-        # 前端合并语义：过滤本平台命名空间 + 按当前模型清单重写
-        merged = [e for e in got if not str(e.get("model", "")).startswith("r156plat/")]
-        merged.append({"model": "r156plat/r156a", "request_fee": 0.01, "input_per_1k": 1.0,
-                       "cache_hit_per_1k": 0.5, "output_per_1k": 1.0})
-        assert _set_pricing(client, hdr, merged).status_code == 200
-        assert {e["model"] for e in
-                client.get("/api/pricing", headers=hdr).json()["entries"]} == {"r156plat/r156a"}
-
-        # ③ 合并提交保留其他平台条目（fixture 的 fake 平台不受影响）
-        assert _set_pricing(client, hdr, [
-            {"model": "fake/fake-gpt", "request_fee": 0.01},
-            {"model": "r156plat/r156a", "request_fee": 0.02, "input_per_1k": 1.0}]).status_code == 200
-        assert {e["model"] for e in
-                client.get("/api/pricing", headers=hdr).json()["entries"]} == \
-            {"fake/fake-gpt", "r156plat/r156a"}
-        # ④ 全零条目自动剥离（行内输入留空 = 不计费，不落条目）
-        assert _set_pricing(client, hdr, [
-            {"model": "fake/fake-gpt", "request_fee": 0.01},
-            {"model": "r156plat/r156a", "request_fee": 0, "input_per_1k": 0,
-             "cache_hit_per_1k": 0, "output_per_1k": 0}]).status_code == 200
-        assert {e["model"] for e in
-                client.get("/api/pricing", headers=hdr).json()["entries"]} == {"fake/fake-gpt"}
+        # ① 绑定模型按规则计费（fake chat usage：prompt 11 / completion 7）
+        rr = client.post(URL, json={"model": "r181plat/r181a"}, headers=hdr)
+        assert rr.status_code == 200, rr.text
+        rec = store.recent(1)[0]
+        assert rec["cost"] == pytest.approx(0.025, abs=1e-6), rec   # 11/1000*1 + 7/1000*2
+        # 未绑定模型免费
+        rr = client.post(URL, json={"model": "r181plat/r181b"}, headers=hdr)
+        assert rr.status_code == 200 and store.recent(1)[0]["cost"] == 0
+        # ③ 删规则 → 悬空绑定自动清理（stripped 回显）
+        rstrip = client.post("/api/pricing-rules", json={"rules": []}, headers=hdr)
+        assert rstrip.status_code == 200 and "r181plat/r181a" in rstrip.json()["stripped"], rstrip.text
+        p = next(x for x in client.get("/api/providers", headers=hdr).json()["data"]
+                 if x["platform"] == "r181plat")
+        assert not ((p.get("extra") or {}).get("model_pricing_rule")), p
+        # ④ 旧表自动迁移：直接往租户文件塞 _kind=pricing 标记行 → reload → 规则 + 绑定
+        import json as _json
+        from app.main import registry as _reg
+        treg = _reg.get(1)          # 租户 1（首个管理员）的内层 Registry
+        up_file = str(treg.upstreams_file)   # 租户目录内的真实配置（老 config 是认领拷贝）
+        rows = _json.loads(open(up_file, encoding="utf-8").read())
+        rows = [x for x in rows if not (isinstance(x, dict) and x.get("_kind") in ("pricing", "pricing_rules"))]
+        rows.append({"_kind": "pricing", "pricing": {"r181plat/r181b": {"request_fee": 0.3}}})
+        with open(up_file, "w", encoding="utf-8") as f:
+            _json.dump(rows, f, ensure_ascii=False)
+        treg.reload()
+        assert "r181plat/r181b" in treg.pricing_rules, treg.pricing_rules
+        assert treg.pricing == {}
+        p = next(x for x in client.get("/api/providers", headers=hdr).json()["data"]
+                 if x["platform"] == "r181plat")
+        assert ((p.get("extra") or {}).get("model_pricing_rule") or {}).get("r181b") == "r181plat/r181b", p
+        # 迁移后计费语义不变（r181b 请求费 0.3 元/次）
+        rr = client.post(URL, json={"model": "r181plat/r181b"}, headers=hdr)
+        assert rr.status_code == 200
+        rec = store.recent(1)[0]
+        assert rec["cost"] == pytest.approx(0.3, abs=1e-6), rec
+        # 迁移只触发一次（文件里已无旧表标记行）
+        rows2 = _json.loads(open(up_file, encoding="utf-8").read())
+        assert not any(isinstance(x, dict) and x.get("_kind") == "pricing" for x in rows2)
+        assert any(isinstance(x, dict) and x.get("_kind") == "pricing_rules" for x in rows2)
     finally:
-        client.delete("/api/providers/r156plat", headers=hdr)
+        client.delete("/api/providers/r181plat", headers=hdr)
         _set_pricing(client, hdr, [])
 
 

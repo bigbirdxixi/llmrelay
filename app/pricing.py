@@ -37,6 +37,24 @@ PRICE_FIELDS: tuple[str, ...] = (
 COST_DECIMALS = 6
 
 
+def _parse_price_fields(name: str, row) -> dict:
+    """单行 5 个价格字段归一 + 校验（价格表 / 价格规则共用）：缺字段补 0.0，
+    非数字 / 负数 → ValueError。返回干净 dict。"""
+    if not isinstance(row, dict):
+        raise ValueError(f"{name} 的费用条目必须是对象（价格字段：request_fee/input_per_1k/cache_hit_per_1k/output_per_1k/second_fee）")
+    vals: dict[str, float] = {}
+    for f in PRICE_FIELDS:
+        v = row.get(f, 0)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} 的 {f} 必须是数字（元）")
+        if v < 0:
+            raise ValueError(f"{name} 的 {f} 不能为负数")
+        vals[f] = v
+    return vals
+
+
 def parse_pricing(raw) -> dict:
     """{模型名: {价格字段}} 归一 + 校验。
 
@@ -52,33 +70,38 @@ def parse_pricing(raw) -> dict:
         name = str(name).strip()
         if not name:
             continue
-        if not isinstance(row, dict):
-            raise ValueError(f"模型 {name!r} 的费用条目必须是对象（价格字段：request_fee/input_per_1k/cache_hit_per_1k/output_per_1k/second_fee）")
-        vals: dict[str, float] = {}
-        for f in PRICE_FIELDS:
-            v = row.get(f, 0)
-            try:
-                v = float(v)
-            except (TypeError, ValueError):
-                raise ValueError(f"模型 {name!r} 的 {f} 必须是数字（元）")
-            if v < 0:
-                raise ValueError(f"模型 {name!r} 的 {f} 不能为负数")
-            vals[f] = v
+        vals = _parse_price_fields(f"模型 {name!r}", row)
         if any(v > 0 for v in vals.values()):
             out[name] = vals
     return out
 
 
-def compute_cost(pricing: dict | None, model_name: str,
-                 prompt_tokens: int = 0, completion_tokens: int = 0,
-                 cached_tokens: int = 0, billed: bool = True, seconds: float = 0.0):
-    """按模型价格条目算一次调用的费用。
+def parse_pricing_rules(raw) -> dict:
+    """v2.1.2 R181：{规则名: {价格字段}} 归一 + 校验（体例同 parse_pricing：
+    缺字段补 0.0，负数/非数字 → ValueError；全零规则剥离——选全零规则 = 免费，等价于不绑）。"""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("价格规则必须是对象：{规则名: {request_fee, input_per_1k, ...}}")
+    out: dict[str, dict] = {}
+    for name, row in raw.items():
+        name = str(name).strip()
+        if not name:
+            continue
+        vals = _parse_price_fields(f"价格规则 {name!r}", row)
+        if any(v > 0 for v in vals.values()):
+            out[name] = vals
+    return out
 
-    返回 (合计, 请求费, 输入费, 缓存命中费, 输出费, 秒费) 六元组（元，已按 6 位小数取整）。
-    seconds：v2.1.1 R176 可计费秒数（视频=请求 seconds；音频转写=上游响应时长；其余 0），
-    秒费 = max(0, seconds)*second_fee。无条目 / 全 0 / billed=False / 模型名为空 → 全 0。
+
+def cost_for(prices: dict | None, prompt_tokens: int = 0, completion_tokens: int = 0,
+             cached_tokens: int = 0, billed: bool = True, seconds: float = 0.0):
+    """按一个 5 字段价格 dict 直算一次调用的费用（v2.1.2 R181，价格规则计费路径）。
+
+    返回 (合计, 请求费, 输入费, 缓存命中费, 输出费, 秒费) 六元组（元，6 位小数取整）。
+    prices=None / 全 0 / billed=False → 全 0。
     """
-    p = (pricing or {}).get(str(model_name or "").strip())
+    p = prices or {}
     if not p or not billed:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     prompt = max(0, int(prompt_tokens or 0))
@@ -94,3 +117,15 @@ def compute_cost(pricing: dict | None, model_name: str,
     cout = round(completion / 1000.0 * float(p.get("output_per_1k", 0.0)), r)
     csec = round(max(0.0, float(seconds or 0.0)) * float(p.get("second_fee", 0.0)), r)
     return (round(creq + cin + ccache + cout + csec, r), creq, cin, ccache, cout, csec)
+
+
+def compute_cost(pricing: dict | None, model_name: str,
+                 prompt_tokens: int = 0, completion_tokens: int = 0,
+                 cached_tokens: int = 0, billed: bool = True, seconds: float = 0.0):
+    """按模型价格条目算一次调用的费用（v2.1.0 R153；v2.1.2 起为 cost_for 的按名查表薄壳）。
+
+    返回 (合计, 请求费, 输入费, 缓存命中费, 输出费, 秒费) 六元组（元，已按 6 位小数取整）。
+    无条目 / 全 0 / billed=False / 模型名为空 → 全 0。
+    """
+    p = (pricing or {}).get(str(model_name or "").strip())
+    return cost_for(p, prompt_tokens, completion_tokens, cached_tokens, billed, seconds)
