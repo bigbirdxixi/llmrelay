@@ -264,7 +264,8 @@ tbody tr:hover td{background:#101a28}
 .mrow .mdel{flex:0 0 auto;width:30px;padding:2px 0;border:0;background:none;color:var(--fg);opacity:.55;font-size:16px;line-height:1;cursor:pointer;border-radius:6px}
 .mrow .mdel:hover{opacity:1;background:rgba(255,90,90,.18)}
 .mprs{display:flex;gap:8px;flex:0 0 auto;align-items:center;margin-left:auto}
-.mprs input.mpv{width:72px;padding:4px 6px;font-size:12px}
+/* v2.1.2 R182：价格规则下拉（替代行内 5 个价格输入） */
+.mprs select.mprule{width:150px;padding:4px 6px;font-size:12px}
 /* 模型列表首排表头：sticky 置顶（列表 240px 内滚动时不随动），列宽与行控件 1:1（同 30px 首列栅格） */
 .mhead{display:grid;grid-template-columns:30px minmax(0,1fr);gap:0 8px;position:sticky;top:0;z-index:2;
   background:var(--panel);padding:0 0 6px;border-bottom:1px solid var(--line)}
@@ -276,7 +277,9 @@ tbody tr:hover td{background:#101a28}
 .mhead .halias{width:96px;flex:0 0 auto}
 .mhead .hthink{width:104px;flex:0 0 auto}
 .mhead .hrf{width:64px;flex:0 0 auto}
-.mhead .hp{width:72px;flex:0 0 auto;text-align:center}
+/* v2.1.2 R182：价格规则列（替代 5 个 .hp 价格列，与 .mprule 下拉 1:1）；
+   特异性提到 .hcell.hprule 三元——基础 .hcell{flex:0 1 auto} 定义在后，二元选择器压不住 */
+.mhead .hcell.hprule{width:150px;flex:0 0 auto;text-align:center}
 </style>
 </head>
 <body>
@@ -341,7 +344,7 @@ const S = { tab: "overview",
             modelTenants: [],
             users: [],
             costGroup: "model",      // v2.1.0：用量页「每日费用」曲线分组维度
-            pricingRows: null };     // v2.1.0：未保存的价格编辑行（null = 尚未开始编辑，按服务端值渲染）
+            pricingRuleRows: null, pricingRules: [] };     // v2.1.2 R182：未保存的价格规则编辑行（null = 尚未开始编辑，按服务端值渲染）+ 弹窗规则下拉用的规则名清单
 const PALETTE = ["#4f8cff","#38bdf8","#34d399","#fbbf24","#f472b6","#a78bfa","#fb923c","#22d3ee","#f87171","#a3e635"];
 
 /* 中国省级地图路径（DataV 边界数据投影 + Douglas-Peucker 2px 简化，离线内嵌，无外部依赖） */
@@ -1281,19 +1284,11 @@ async function editProvider(platform){
   for (const [a, t] of Object.entries(S.editModelMap)) if (!S.editAlias[t]) S.editAlias[t] = a;
   // 模型类型（生成类/embedding）：extra.model_kind 模型名 -> image|video|audio_tts|audio_trans|embedding（聊天模型无条目）
   S.editKind = Object.assign({}, ((p && p.extra) || {}).model_kind || {});
-  // v2.1.0 R156：行内价格设置——加载该平台已有价格条目（键 = 平台/模型全名，裸模型名 → 条目）进 S.editPricing
-  S.editPricing = {};
-  if(platform){
-    try{
-      const pj = await api("/api/pricing");
-      const pre = platform + "/";
-      (pj.entries || []).forEach(e => {
-        if(e.model && e.model.indexOf(pre) === 0) S.editPricing[e.model.slice(pre.length)] = e;
-      });
-    }catch(e){}
-  }
+  // v2.1.0 R156 → v2.1.2 R182：价格规则绑定——加载该平台已有绑定
+  // （extra.model_pricing_rule 裸模型名 -> 规则名）进 S.editRule（旧行内 5 价格输入已废弃）
+  S.editRule = Object.assign({}, ex.model_pricing_rule || {});
   S.availFetched = false;
-  $("#modalBody").classList.add("wide");   // v2.1.0 R156：平台弹窗加宽（容纳行内价格输入）
+  $("#modalBody").classList.add("wide");   // v2.1.0 R156：平台弹窗加宽（容纳模型行控件）
   $("#modalBody").innerHTML = `
     <h3>${p ? "编辑平台 · " + esc(p.platform) : "新增上游平台"}</h3>
     ${p ? "" : `<div class="field"><label>选择平台模板（下拉框）</label>
@@ -1476,12 +1471,10 @@ function kindChanged(sel){
   row.querySelectorAll(".mrs,.mrf").forEach(el => { el.disabled = gen; el.style.opacity = gen ? ".45" : ""; });
 }
 
-/* v2.1.0 R156：行内价格输入——只记进 S.editPricing（裸模型名 → 价格字段），点「保存」时随平台一并提交 */
-function pricingChanged(inp){
-  const row = inp.closest(".mrow"); if(!row) return;
-  const e = S.editPricing[row.dataset.model] = S.editPricing[row.dataset.model] || {};
-  const v = inp.value.trim();
-  if(v === "" || Number(v) <= 0) delete e[inp.dataset.pf]; else e[inp.dataset.pf] = Number(v);
+/* v2.1.2 R182：价格规则下拉——只记进 S.editRule（裸模型名 → 规则名），点「保存」时随平台一并提交 */
+function ruleChanged(sel){
+  const row = sel.closest(".mrow"); if(!row) return;
+  if(sel.value) S.editRule[row.dataset.model] = sel.value; else delete S.editRule[row.dataset.model];
 }
 
 function renderModelReasoning(){
@@ -1493,8 +1486,8 @@ function renderModelReasoning(){
     box.innerHTML = '<div class="dim" style="font-size:12px">还没有模型：在上方下拉框选择（聚焦自动拉取）或手动输入添加</div>';
     return;
   }
-  // v2.1.0 R159/R160：首排表头 sticky 置顶（不随模型列表滚动）：模型名/模型类型/别名/思考模式 + 4 价格列 + 关闭写法（最右列）；
-  // 列宽与行控件 1:1（mhead .h* 与 .mrow 控件同宽），价格标签只在表头、行内只留 4 个输入。
+  // v2.1.0 R159/R160 → v2.1.2 R182：首排表头 sticky 置顶（不随模型列表滚动）：模型名/模型类型/别名/思考模式 + 价格规则列 + 关闭写法（最右列）；
+  // 列宽与行控件 1:1（mhead .h* 与 .mrow 控件同宽）；5 个价格输入列已收敛为单列「价格规则」下拉。
   // 「关闭写法」列（v2.1.0 R160 移到最后一列）：思考选「关闭」时才可见，手选实发字段（默认自动解析，同 Hermes）
   const HEAD = `<div class="mhead">
     <div class="hcell hx"></div>
@@ -1503,11 +1496,7 @@ function renderModelReasoning(){
       <span class="hcell hkind">模型类型</span>
       <span class="hcell halias">别名</span>
       <span class="hcell hthink">思考模式</span>
-      <span class="hcell hp">请求费 ¥/次</span>
-      <span class="hcell hp">输入费 ¥/1K</span>
-      <span class="hcell hp">缓存命中 ¥/1K</span>
-      <span class="hcell hp">输出费 ¥/1K</span>
-      <span class="hcell hp">秒费 ¥/秒</span>
+      <span class="hcell hprule">价格规则</span>
       <span class="hcell hrf">关闭写法</span>
     </div>
   </div>`;
@@ -1520,20 +1509,21 @@ function renderModelReasoning(){
     const k = S.editKind[m] || "";
     const kopts = [["","聊天（默认）"],["image","图像模型"],["video","视频模型"],["audio_tts","音频 TTS"],["audio_trans","音频转写"],["embedding","embedding 模型"]]
       .map(([v,l]) => `<option value="${v}" ${k === v ? "selected" : ""}>${l}</option>`).join("");
-    // v2.1.0 R156/R159 + v2.1.1 R177：行内 5 个价格输入（元，标签在首排表头）；值存 S.editPricing[裸模型名]，保存平台时随表提交
-    const pr = S.editPricing[m] || {};
-    const priceRow = ["request_fee","input_per_1k","cache_hit_per_1k","output_per_1k","second_fee"]
-      .map(f => `<input class="mpv" type="number" min="0" step="0.000001" placeholder="0"
-          data-pf="${f}" value="${(pr[f] || 0) > 0 ? pr[f] : ""}" onchange="pricingChanged(this)">`).join("");
+    // v2.1.0 R156/R159 + v2.1.1 R177 → v2.1.2 R182：单列「价格规则」下拉（替代行内 5 个价格输入）；
+    // 值存 S.editRule[裸模型名]（规则名），保存平台时随 extra.model_pricing_rule 提交；选项 = S.pricingRules（当前租户规则名）
+    const rulOpts = [["", "— 无规则（免费） —"]]
+      .concat((S.pricingRules || []).map(n => [n, n]))
+      .map(([v,l]) => `<option value="${esc(v)}" ${(S.editRule[m] || "") === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+    const ruleSel = `<select class="mprule" title="价格规则：选中后该模型的成功调用按此规则的五项价格计费（设置 → 价格规则 维护）" onchange="ruleChanged(this)">${rulOpts}</select>`;
     return `<div class="mrow" data-model="${esc(m)}">
-      <button class="mdel" title="删除这个模型（连同其价格条目）" onclick="delModel('${esc(m)}')">×</button>
+      <button class="mdel" title="删除这个模型（连同其价格规则绑定）" onclick="delModel('${esc(m)}')">×</button>
       <div class="mbody">
         <div class="mmain">
           <span class="mono mname" title="${esc(m)}">${esc(m)}</span>
           <select class="mkd" title="模型类型：选生成类/embedding 后走 /v1/images /v1/videos /v1/audio /v1/embeddings 端点转发（chat 端点会 400 指路）" onchange="kindChanged(this)">${kopts}</select>
           <input class="mal" placeholder="别名（可选）" value="${esc(S.editAlias[m] || "")}" onchange="aliasChanged(this)"/>
           <select class="mrs" ${k ? "disabled" : ""} onchange="syncRowField(this)">${opts}</select>
-          <div class="mprs">${priceRow}</div>
+          <div class="mprs">${ruleSel}</div>
           <select class="mrf" ${k ? "disabled" : ""} onchange="previewOffRow(this)" title="悬停查看自动解析结果（= 实发字段）" style="visibility:${pol === "off" ? "visible" : "hidden"}">${fopts}</select>
         </div>
       </div>
@@ -1613,6 +1603,7 @@ function addManualModel(){
 function delModel(name){
   S.editModels = S.editModels.filter(m => m !== name);
   delete S.editAlias[name];
+  delete S.editRule[name];     // v2.1.2 R182：价格规则绑定（裸模型名 → 规则名）一并删
   buildAddOptions();
   renderModelReasoning();
 }
@@ -1691,6 +1682,11 @@ async function saveProvider(platform){
   // 模型类型（生成类）：只保留当前模型清单内的条目（删掉的模型不留陈旧分类）
   extra.model_kind = {};
   for (const m of S.editModels) if (S.editKind[m]) extra.model_kind[m] = S.editKind[m];
+  // v2.1.2 R182：价格规则绑定（extra.model_pricing_rule）：只保留当前模型清单内、选了规则的条目；
+  // 空映射不提交（后端对空/缺省 mpr 一律 pop，保持旧平台 JSON 干净）
+  extra.model_pricing_rule = {};
+  for (const m of S.editModels) if (S.editRule[m]) extra.model_pricing_rule[m] = S.editRule[m];
+  if(!Object.keys(extra.model_pricing_rule).length) delete extra.model_pricing_rule;
   const keys = $("#f_keys").value.split("\n").map(s => s.trim()).filter(Boolean);
   const models = S.editModels.slice();
   const body = {
@@ -1710,26 +1706,7 @@ async function saveProvider(platform){
   try{
     await api("/api/providers", { method:"POST", body: body });
   }catch(e){ return toast("保存失败：" + e.message, "err"); }
-  // v2.1.0 R156：行内价格随平台保存——合并提交：保留其他平台/聚合的条目，本平台命名空间
-  // （平台id/）按当前行内输入重写；删掉的模型价格条目自动清掉（模型不在上游配置后
-  // 后端校验会 400，必须随删随清）。价格保存失败不撤平台，保留弹窗让用户修正。
-  let priceNote = "";
-  try{
-    const pre = body.platform + "/";
-    const pj = await api("/api/pricing");
-    const merged = (pj.entries || []).filter(e => !String(e.model || "").startsWith(pre));
-    S.editModels.forEach(m => {
-      const e = S.editPricing[m];
-      if(e && Object.keys(e).length) merged.push(Object.assign({model: pre + m}, e));
-    });
-    await api("/api/pricing", { method:"POST", body: {entries: merged} });
-    priceNote = "（含模型价格）";
-  }catch(e){
-    toast("平台已保存，但价格保存失败：" + e.message, "err");
-    await refreshAll();
-    return;
-  }
-  toast("已保存 " + body.platform + priceNote, "ok");
+  toast("已保存 " + body.platform, "ok");
   closeModal();
   await refreshAll();
 }
@@ -3006,67 +2983,64 @@ async function renderSettings(){
   let mail = { mode: "log", host: "", port: 587, user: "", from: "", starttls: true,
                has_pass: false, pass_masked: "" };
   if(s.is_admin){ try{ mail = await api("/api/settings/mail"); }catch(e){} }
-  /* v2.1.0：模型费用配置（计费功能配置面；管理员单租户视角可改该租户的价格） */
-  let pr = {entries: []};
-  try{ pr = await api("/api/pricing"); }catch(e){}
+  /* v2.1.2 R182：价格规则（替代 v2.1.0 按模型价格表；租户隔离：各租户维护自己的规则集，存租户自己的 upstreams.json） */
+  let pr = {rules: []};
+  try{ pr = await api("/api/pricing-rules"); }catch(e){}
+  S.pricingRules = (pr.rules || []).map(r => r.rule);   // 弹窗「价格规则」下拉用的规则名清单（当前租户）
   // 工作副本按「视角」隔离：切租户视角（或首次进入）时从服务端重新初始化，
   // 避免 A 租户的未保存编辑被保存到 B 租户头上
   const prViewKey = S.tenant || "self";
-  if(S.pricingViewKey !== prViewKey){
-    S.pricingRows = (pr.entries || []).map(e => ({
-      model: e.model, request_fee: e.request_fee, input_per_1k: e.input_per_1k,
-      cache_hit_per_1k: e.cache_hit_per_1k, output_per_1k: e.output_per_1k,
-      second_fee: e.second_fee }));
-    S.pricingViewKey = prViewKey;
+  if(S.pricingRuleViewKey !== prViewKey){
+    S.pricingRuleRows = (pr.rules || []).map(r => ({
+      rule: r.rule, request_fee: r.request_fee, input_per_1k: r.input_per_1k,
+      cache_hit_per_1k: r.cache_hit_per_1k, output_per_1k: r.output_per_1k,
+      second_fee: r.second_fee }));
+    S.pricingRuleViewKey = prViewKey;
   }
-  const prRows = S.pricingRows;
-  const prModelOpts = [...(s.model_name_options || []), ...(s.bare_model_names || []),
-                       ...(s.aggregate_names || [])];
+  const prRows = S.pricingRuleRows;
   const prEdit = !agg;   // 汇总视角（all/多选）只读：保存是整表覆盖，必须锁定单账号
-  const prAddBtns = '<button class="btn sm" onclick="addPricingRow()">+ 添加模型</button>'
-                   + ' <button class="btn sm primary" onclick="savePricing()">保存价格</button>';
-  const prReadOnlyNote = '<span class="dim" style="font-size:12px">汇总视角只读（切到单账号可编辑该账号价格）</span>';
+  const prAddBtns = '<button class="btn sm" onclick="addPricingRuleRow()">+ 添加规则</button>'
+                   + ' <button class="btn sm primary" onclick="savePricingRules()">保存规则</button>';
+  const prReadOnlyNote = '<span class="dim" style="font-size:12px">汇总视角只读（切到单账号可编辑该账号规则）</span>';
   const prAgg = (pr.all && (pr.data || []).map(t =>
     `<div style="margin-top:6px;font-size:12px"><b class="mono">${esc(t.tenant_label || ("u" + t.tenant))}</b>`
-    + ((t.entries || []).length
-       ? " · " + (t.entries || []).map(e =>
-         `${esc(e.model)}：请求 ${e.request_fee} / 输入 ${e.input_per_1k} / 缓存 ${e.cache_hit_per_1k} / 输出 ${e.output_per_1k} / 秒 ${e.second_fee} 元`).join(" · ")
+    + ((t.rules || []).length
+       ? " · " + (t.rules || []).map(r =>
+         `${esc(r.rule)}：请求 ${r.request_fee} / 输入 ${r.input_per_1k} / 缓存 ${r.cache_hit_per_1k} / 输出 ${r.output_per_1k} / 秒 ${r.second_fee} 元`).join(" · ")
        : " · 未配置") + "</div>").join("")
     || "");
+  const prRowsHtml = prRows.map((r, i) => `<tr>
+    <td><input class="mono" value="${esc(r.rule || "")}"
+      oninput="S.pricingRuleRows[${i}].rule=this.value" style="width:100%;max-width:230px"
+      placeholder="规则名（如 GPT-4o / 视频生成）"></td>
+    ${["request_fee","input_per_1k","cache_hit_per_1k","output_per_1k","second_fee"].map(f =>
+      `<td class="num"><input type="number" min="0" step="0.000001" class="mono"
+        value="${(r[f] == null || r[f] === "" ? "" : r[f])}"
+        oninput="S.pricingRuleRows[${i}]['${f}']=this.value" style="width:110px"></td>`).join("")}
+    <td class="num">${prEdit ? `<button class="btn sm" onclick="delPricingRuleRow(${i})">删</button>` : ""}</td>
+  </tr>`).join("");
   const pricingPanel = `
     <div class="panel">
-      <h2>模型费用 <small>配置价格后，成功调用按「请求费 + 输入 + 缓存命中 + 输出 + 秒费」计费（元）；未配置的模型免费只统计</small>
+      <h2>价格规则 <small>先维护规则，再到「编辑平台」弹窗的每个模型行选择；选中后成功调用按「请求费 + 输入 + 缓存命中 + 输出 + 秒费」计费（元）；未选规则的模型免费只统计</small>
         <span style="flex:1"></span>
         ${prEdit ? prAddBtns : prReadOnlyNote}
       </h2>
       ${pr.all
-        ? (prAgg ? prAgg : '<div class="empty">所有账号都还没配置模型价格</div>')
+        ? (prAgg ? prAgg : '<div class="empty">所有账号都还没配置价格规则</div>')
         : (prRows.length ? `<table style="max-width:100%"><thead><tr>
-            <th style="width:24%">模型（平台/模型）</th>
+            <th style="width:24%">规则名</th>
             <th class="num">请求费<br><span class="dim" style="font-size:10.5px">元/次</span></th>
             <th class="num">输入费<br><span class="dim" style="font-size:10.5px">元/1K token</span></th>
             <th class="num">缓存命中费<br><span class="dim" style="font-size:10.5px">元/1K</span></th>
             <th class="num">输出费<br><span class="dim" style="font-size:10.5px">元/1K</span></th>
             <th class="num">秒费<br><span class="dim" style="font-size:10.5px">元/秒</span></th>
             <th class="num"></th>
-          </tr></thead><tbody>
-          ${prRows.map((r, i) => `<tr>
-            <td><input class="mono" list="pricingModels" value="${esc(r.model || "")}"
-              oninput="S.pricingRows[${i}].model=this.value" style="width:100%;max-width:230px"
-              placeholder="平台/模型"></td>
-            ${["request_fee","input_per_1k","cache_hit_per_1k","output_per_1k","second_fee"].map(f =>
-              `<td class="num"><input type="number" min="0" step="0.000001" class="mono"
-                value="${(r[f] == null || r[f] === "" ? "" : r[f])}"
-                oninput="S.pricingRows[${i}]['${f}']=this.value" style="width:110px"></td>`).join("")}
-            <td class="num">${prEdit ? `<button class="btn sm" onclick="delPricingRow(${i})">删</button>` : ""}</td>
-          </tr>`).join("")}
-          </tbody></table>
-          <datalist id="pricingModels">${prModelOpts.map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>`
-          : '<div class="empty">还没有配置任何模型价格。点「添加模型」开始配置；不配置价格的模型调用免费（平台只统计用量）。</div>')}
+          </tr></thead><tbody>${prRowsHtml}</tbody></table>`
+        : '<div class="empty">还没有配置任何价格规则。点「添加规则」开始；建好规则后在「编辑平台」弹窗的模型行上选择，即按该规则计费。未选规则的模型调用免费（平台只统计用量）。</div>')}
       <div class="dim" style="font-size:12px;margin-top:8px;line-height:1.8">
         计费口径：只对<b>成功</b>调用计费（失败请求 0 费用）；输入费只算「未缓存输入」（prompt − 缓存命中），缓存命中部分按缓存命中费单独计。<br>
         非文本模型：视频/音频转写按「秒费（元/秒 × 时长）」——视频取请求 seconds、转写取上游响应时长；图片按次 = 请求费，TTS 按字数 = 输入费（元/1K 输入 token）。<br>
-        保存后立即生效（热加载）；改价格只影响之后的请求（记账时冻结当时价格）。保存是整表覆盖——删掉某行再保存 = 清空该模型价格。
+        保存后立即生效（热加载）；改规则只影响之后的请求（记账时冻结当时规则价）。保存是整表覆盖——删掉某规则再保存 = 该规则作废，各平台里指向它的绑定会被自动清理。
       </div>
     </div>`;
   const mailPanel = !s.is_admin ? "" : `
@@ -3249,38 +3223,44 @@ async function testMail(){
   }catch(e){ toast("发送失败：" + e.message, "err"); }
 }
 
-/* ---------------- 模型费用（v2.1.0 R153） ----------------
-   工作副本 S.pricingRows（随租户视角隔离初始化，见 renderSettings）；保存 = 整表覆盖
-   POST /api/pricing {entries:[{model, 4 价格字段}]}，后端校验模型名必须在当前上游配置里。 */
-function addPricingRow(){
-  S.pricingRows = S.pricingRows || [];
-  S.pricingRows.push({model: "", request_fee: "", input_per_1k: "",
-                      cache_hit_per_1k: "", output_per_1k: "", second_fee: ""});
+/* ---------------- 价格规则（v2.1.2 R182，替代 v2.1.0 R153 按模型价格表） ----------------
+   工作副本 S.pricingRuleRows（随租户视角隔离初始化，见 renderSettings）；保存 = 整表覆盖
+   POST /api/pricing-rules {rules:[{rule, 5 价格字段}]}，全量覆盖（同 /api/pricing 体例）；
+   删掉的规则由后端自动清理各平台的悬空绑定（响应 stripped 回显「平台/模型」）。 */
+function addPricingRuleRow(){
+  S.pricingRuleRows = S.pricingRuleRows || [];
+  S.pricingRuleRows.push({rule: "", request_fee: "", input_per_1k: "",
+                          cache_hit_per_1k: "", output_per_1k: "", second_fee: ""});
   renderSettings();
 }
-function delPricingRow(i){
-  S.pricingRows.splice(i, 1);
+function delPricingRuleRow(i){
+  S.pricingRuleRows.splice(i, 1);
   renderSettings();
 }
-async function savePricing(){
-  const rows = (S.pricingRows || []).map(r => ({
-    model: String(r.model || "").trim(),
+async function savePricingRules(){
+  const rules = (S.pricingRuleRows || []).map(r => ({
+    rule: String(r.rule || "").trim(),
     request_fee: Number(r.request_fee) || 0,
     input_per_1k: Number(r.input_per_1k) || 0,
     cache_hit_per_1k: Number(r.cache_hit_per_1k) || 0,
     output_per_1k: Number(r.output_per_1k) || 0,
     second_fee: Number(r.second_fee) || 0,
-  })).filter(r => r.model);   // 空模型名的行丢弃
-  if(rows.some(r => r.request_fee < 0 || r.input_per_1k < 0 ||
+  })).filter(r => r.rule);   // 空规则名的行丢弃
+  if(rules.some(r => r.request_fee < 0 || r.input_per_1k < 0 ||
                     r.cache_hit_per_1k < 0 || r.output_per_1k < 0 || r.second_fee < 0))
     return toast("价格不能为负数", "err");
   try{
-    const res = await api("/api/pricing", { method: "POST", body: { entries: rows } });
-    S.pricingRows = (res.entries || []).map(e => ({
-      model: e.model, request_fee: e.request_fee, input_per_1k: e.input_per_1k,
-      cache_hit_per_1k: e.cache_hit_per_1k, output_per_1k: e.output_per_1k,
-      second_fee: e.second_fee }));
-    toast("模型价格已保存（" + (res.entries || []).length + " 个模型），立即生效", "ok");
+    const res = await api("/api/pricing-rules", { method: "POST", body: { rules: rules } });
+    S.pricingRuleRows = (res.rules || []).map(r => ({
+      rule: r.rule, request_fee: r.request_fee, input_per_1k: r.input_per_1k,
+      cache_hit_per_1k: r.cache_hit_per_1k, output_per_1k: r.output_per_1k,
+      second_fee: r.second_fee }));
+    S.pricingRules = (res.rules || []).map(r => r.rule);
+    let note = "价格规则已保存（" + (res.rules || []).length + " 条），立即生效";
+    if((res.stripped || []).length){
+      note += "；已自动清理失效绑定 " + res.stripped.map(x => x.platform + "/" + x.model).join("、");
+    }
+    toast(note, "ok");
     renderSettings();
   }catch(e){ toast("保存失败：" + e.message, "err"); }
 }
