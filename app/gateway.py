@@ -461,6 +461,18 @@ class Gateway:
         stream = bool(body.get("stream")) if stream is None else stream
         # 模型级思考设置：off 时在**发给上游的请求字段上**显式关闭思考
         policy, off_field = Registry.reasoning_rule(upstream, up_model)
+        # relay_reasoning：单请求思考档位（OpenAI 系词汇 none/minimal/low/medium/high/max，加 off）——
+        # 客户端显式请求时覆盖模型级策略（平台默认关思考但用户想这一次开思考，不用改平台配置）。
+        # 该键是 relay 专用载体：发上游前必须剥掉（官方 OpenAI 收到未知键直接 400）。
+        rr = body.get("relay_reasoning")
+        if rr is not None:
+            rr_s = str(rr).strip().lower()
+            if rr_s not in ("none", "minimal", "low", "medium", "high", "max", "off"):
+                return error_response(in_fmt, 400,
+                                      f"relay_reasoning 取值无效 {rr!r}（可选 none/minimal/low/medium/high/max/off）",
+                                      "invalid_request")
+            policy = "off" if rr_s == "off" else rr_s
+            body.pop("relay_reasoning", None)
         payload, url = self._build_payload(in_fmt, out_fmt, kind, body, upstream, up_model,
                                           est_prompt=est_prompt, policy=policy,
                                           off_field=off_field)
@@ -489,8 +501,20 @@ class Gateway:
                 and upstream.extra.get("thought_signature_bypass", True) is not False:
             if inject_thought_signatures(payload):
                 pass  # 静默补齐；真实签名已带时不动
+        # GBN 窗口重传（流式）：上游流中断 / 缺终止事件 / 空闲超时 → 整包重发，窗口内取成功的一次才转发。
+        # extra.gbn 缺省 None = 只对思考档请求（policy 不在 auto/off，含 relay_reasoning 覆盖后）启用，
+        # 普通对话保持实时透传不缓冲；True = 该平台上所有流式都走 GBN；False = 关闭。
+        gbn_cfg = upstream.extra.get("gbn")
+        if gbn_cfg is None:
+            gbn = stream and policy not in ("auto", "off")
+        else:
+            gbn = stream and bool(gbn_cfg)
+        gbn_window = max(1, min(int(upstream.extra.get("gbn_window") or 3), 5))
+        gbn_idle = float(upstream.extra.get("stream_idle_timeout") or 90.0)
         try:
-            resp = await self.send(reg, upstream, url, payload, stream=stream)
+            send_timeout = httpx.Timeout(gbn_idle, connect=CONNECT_TIMEOUT_S) if gbn else None
+            resp = await self.send(reg, upstream, url, payload, stream=stream,
+                                   timeout=send_timeout)
         except UpstreamError as exc:
             log.warning("上游错误 [%s] HTTP %s: %s", upstream.platform, exc.status, exc.message()[:300])
             self.record(
@@ -510,10 +534,12 @@ class Gateway:
 
         if stream:
             return self._streaming_response(
-                resp=resp, in_fmt=in_fmt, out_fmt=out_fmt, upstream=upstream,
-                up_model=up_model, client_model=client_model, request_id=request_id,
-                started_at=started_at, est_prompt=est_prompt, body=body,
-                policy=policy, client_ip=client_ip, user_id=user_id, client=client, dkey_id=dkey_id,
+                resp=resp, reg=reg, upstream=upstream, url=url, payload=payload,
+                in_fmt=in_fmt, out_fmt=out_fmt, up_model=up_model, client_model=client_model,
+                request_id=request_id, started_at=started_at, est_prompt=est_prompt,
+                body=body, policy=policy, client_ip=client_ip, user_id=user_id,
+                client=client, dkey_id=dkey_id, gbn=gbn, gbn_window=gbn_window,
+                gbn_idle=gbn_idle,
             )
         return await self._json_response(
             resp=resp, in_fmt=in_fmt, out_fmt=out_fmt, upstream=upstream,
@@ -643,16 +669,125 @@ class Gateway:
             bridge = T.OpenAIToAnthropicStream(client_model, est_input_tokens=est_prompt)
         return bridge
 
-    def _streaming_response(self, *, resp: httpx.Response, in_fmt: str, out_fmt: str,
-                            upstream: Upstream, up_model: str, client_model: str,
+    def _streaming_response(self, *, resp: httpx.Response, reg, upstream: Upstream,
+                            url: str, payload: dict, in_fmt: str, out_fmt: str,
+                            up_model: str, client_model: str,
                             request_id: str, started_at: float, est_prompt: int,
                             body: dict, policy: str = "auto",
                             client_ip: str = "", user_id: int | None = None,
-                            client: str = "", dkey_id: int | None = None):
-        bridge = self._make_bridge(in_fmt, out_fmt, client_model, body, est_prompt)
+                            client: str = "", dkey_id: int | None = None,
+                            gbn: bool = False, gbn_window: int = 1,
+                            gbn_idle: float = 90.0):
         gw = self
 
+        def _usage_or_estimated(br) -> T.Usage:
+            u = br.usage.finish() if br is not None else T.Usage()
+            if u.total_tokens == 0:
+                u.estimated = True
+                u.prompt_tokens = est_prompt
+                u.completion_tokens = T.estimate_tokens_from_chars(
+                    getattr(br, "text_chars", 0) if br is not None else 0)
+                u.total_tokens = u.prompt_tokens + u.completion_tokens
+            return u
+
+        def record_once(rk, st: str, err: str, br, ttft_ms: int) -> None:
+            u = _usage_or_estimated(br)
+            gw.record(
+                resp=rk,
+                request_id=request_id, platform=upstream.platform, model=up_model,
+                model_alias=client_model, in_format=in_fmt, stream=True,
+                status=st,
+                http_status=rk.status_code if rk is not None else 502,
+                error=err,
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                ttft_ms=ttft_ms,
+                prompt_tokens=u.prompt_tokens,
+                completion_tokens=u.completion_tokens,
+                total_tokens=u.total_tokens,
+                cached_tokens=u.cached_tokens,
+                cache_write_tokens=u.cache_write_tokens,
+                reasoning_tokens=u.reasoning_tokens,
+                estimated=u.estimated,
+                client_ip=client_ip,
+                user_id=user_id, client=client, dkey_id=dkey_id,
+                reasoning_policy=policy,
+            )
+
         async def gen() -> AsyncIterator[str]:
+            if gbn:
+                # ---- GBN 窗口重传：整包缓冲，成功才转发；窗口耗尽才报错 ----
+                attempt = 0
+                while True:
+                    attempt += 1
+                    if attempt == 1:
+                        rk = resp
+                    else:
+                        log.warning("GBN [%s] 窗口 %d/%d 重传整包",
+                                    upstream.platform, attempt, gbn_window)
+                        try:
+                            rk = await gw.send(reg, upstream, url, payload, stream=True,
+                                              timeout=httpx.Timeout(
+                                                  gbn_idle, connect=CONNECT_TIMEOUT_S))
+                        except UpstreamError as exc:
+                            yield T.sse_frame(json.dumps({
+                                "error": {"message": f"上游流重传失败: {exc.message()[:200]}"}},
+                                ensure_ascii=False))
+                            record_once(None, "error",
+                                        f"GBN 重传上游错误: {exc.message()[:200]}", None, 0)
+                            return
+                    br = gw._make_bridge(in_fmt, out_fmt, client_model, body, est_prompt)
+                    parser = T.SSEParser()
+                    frames: list[str] = []
+                    err = ""
+                    ttft_seen = 0
+                    try:
+                        async for text in rk.aiter_text():
+                            for event, data_lines, comments in parser.feed(text):
+                                if comments and not data_lines:
+                                    frames.append("".join(c + "\n" for c in comments) + "\n")
+                                    continue
+                                for frame in br.push(event, "\n".join(data_lines)):
+                                    if not ttft_seen and frame.strip():
+                                        ttft_seen = int((time.perf_counter() - started_at) * 1000)
+                                    frames.append(frame)
+                        for event, data_lines, comments in parser.flush():
+                            for frame in br.push(event, "\n".join(data_lines)):
+                                frames.append(frame)
+                        complete = br.finished  # close 前判定：缺终止事件即异常截断
+                        for frame in br.close():
+                            frames.append(frame)
+                        if not complete:
+                            err = "上游流未正常结束（缺终止事件）"
+                    except (asyncio.CancelledError, GeneratorExit):
+                        record_once(rk, "aborted", "", br, ttft_seen)
+                        with contextlib.suppress(BaseException):
+                            await rk.aclose()
+                        raise
+                    except httpx.HTTPError as exc:
+                        err = f"上游流中断: {exc}"
+                        for frame in br.close():
+                            frames.append(frame)
+                    if not err:
+                        for frame in frames:
+                            yield frame
+                        record_once(rk, "ok", "", br,
+                                    ttft_seen or int((time.perf_counter() - started_at) * 1000))
+                        with contextlib.suppress(BaseException):
+                            await rk.aclose()
+                        return
+                    with contextlib.suppress(BaseException):
+                        await rk.aclose()
+                    if attempt < gbn_window:
+                        log.warning("GBN [%s] %d/%d: %s → 整包重传",
+                                    upstream.platform, attempt, gbn_window, err[:150])
+                        continue
+                    err = f"{err}（GBN 窗口 {gbn_window} 次重传后仍未成功）"
+                    yield T.sse_frame(json.dumps({"error": {"message": err}},
+                                                 ensure_ascii=False))
+                    record_once(rk, "error", err, br, ttft_seen)
+                    return
+            # ---- 默认实时透传（GBN 关 / 非思考请求）：零行为变化 ----
+            bridge = gw._make_bridge(in_fmt, out_fmt, client_model, body, est_prompt)
             parser = T.SSEParser()
             ttft_ms = 0
             status = "ok"
@@ -663,14 +798,14 @@ class Gateway:
                         if comments and not data_lines:
                             yield "".join(c + "\n" for c in comments) + "\n"
                             continue
-                        payload = "\n".join(data_lines)
-                        for frame in bridge.push(event, payload):
+                        data = "\n".join(data_lines)
+                        for frame in bridge.push(event, data):
                             if not ttft_ms and frame.strip():
                                 ttft_ms = int((time.perf_counter() - started_at) * 1000)
                             yield frame
                 for event, data_lines, comments in parser.flush():
-                    payload = "\n".join(data_lines)
-                    for frame in bridge.push(event, payload):
+                    data = "\n".join(data_lines)
+                    for frame in bridge.push(event, data):
                         yield frame
                 for frame in bridge.close():
                     yield frame

@@ -5499,3 +5499,143 @@ def test_r183_anthropic_out_fmt_clamped(client, hdr, upstream_port):
         client.delete("/api/providers/r183anth", headers=hdr)
 
 
+# ---------------------------------------------------------------- R184 relay_reasoning 单请求思考档位
+def test_r184_relay_reasoning_override(client, hdr):
+    """relay_reasoning：relay 专用载体，单请求覆盖模型级思考档位（平台默认关思考但这一次想开，不用改平台配置）；
+    发上游前必须剥掉（官方 OpenAI 收到未知键直接 400）。"""
+    from tests import fake_upstream
+    base = {"model": "fake/fake-gpt", "messages": [{"role": "user", "content": "hi"}]}
+
+    # 非法值 → 400（文案带字段名与合法值清单）
+    r = client.post("/v1/chat/completions", headers=hdr, json={**base, "relay_reasoning": "banana"})
+    assert r.status_code == 400, r.text
+    assert "relay_reasoning" in r.text, r.text
+
+    # high：覆盖模型级策略（平台默认 auto）→ 上游收到 reasoning_effort=high，载体本身被剥掉
+    r = client.post("/v1/chat/completions", headers=hdr, json={**base, "relay_reasoning": "high"})
+    assert r.status_code == 200, r.text
+    sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+    assert sent.get("reasoning_effort") == "high", sent
+    assert "relay_reasoning" not in sent, "relay 专用载体发上游前必须剥掉"
+
+    # max：线边界兼容——第三方 OpenAI 兼容端点（fake 非 api.openai.com）降级为 high
+    r = client.post("/v1/chat/completions", headers=hdr, json={**base, "relay_reasoning": "max"})
+    assert r.status_code == 200, r.text
+    sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+    assert sent.get("reasoning_effort") == "high", sent
+
+    # off：写通用 OpenAI 兼容平台的关闭字段 reasoning_effort=none，载体剥掉
+    r = client.post("/v1/chat/completions", headers=hdr, json={**base, "relay_reasoning": "off"})
+    assert r.status_code == 200, r.text
+    sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+    assert sent.get("reasoning_effort") == "none", sent
+    assert "relay_reasoning" not in sent
+
+
+# ---------------------------------------------------------------- R185 GBN 窗口重传（v2.1.2）
+def test_r185_gbn_truncation_recovered(client, hdr, upstream_port):
+    """GBN R185：extra.gbn=true + gbn_window=3：m-trunc1 首次命中截断（无终止事件）→ 整包重传，第二次完整 → 2 命中，
+    客户端拿到完整流，窗口内成功记 ok 日志。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r185plat", "name": "R185 GBN fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-trunc1"], "extra": {"gbn": True, "gbn_window": 3}})
+    assert p.status_code == 200, p.text
+    try:
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r185plat/m-trunc1", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True})
+        assert r.status_code == 200, r.text
+        assert " fake" in r.text, "重传成功应转发完整流"
+        hits = [x for x in fake_upstream.RECEIVED
+                if x["path"] == "/v1/chat/completions" and x["body"].get("model") == "m-trunc1"]
+        assert len(hits) == 2, f"首次截断+第二次完整应 2 命中: {hits}"
+        rows = [x for x in client.app.state.store.recent(5)
+                if x.get("model") == "m-trunc1" and x.get("status") == "ok"]
+        assert rows, "GBN 窗口内成功应记 ok 日志"
+    finally:
+        client.delete("/api/providers/r185plat", headers=hdr)
+
+
+def test_r186_gbn_window_exhausted(client, hdr, upstream_port):
+    """GBN R186：m-trunca 永远截断 + gbn_window=2 耗尽 → SSE 错误帧带全角括号
+    「（GBN 窗口 2 次重传后仍未成功）」，重传失败记 error 日志。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r186plat", "name": "R186 GBN fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-trunca"], "extra": {"gbn": True, "gbn_window": 2}})
+    assert p.status_code == 200, p.text
+    try:
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r186plat/m-trunca", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True})
+        assert r.status_code == 200, r.text
+        assert "（GBN 窗口 2 次重传后仍未成功）" in r.text, r.text
+        hits = [x for x in fake_upstream.RECEIVED
+                if x["path"] == "/v1/chat/completions" and x["body"].get("model") == "m-trunca"]
+        assert len(hits) == 2, f"窗口 2 = 至多 2 次尝试: {hits}"
+        rows = [x for x in client.app.state.store.recent(5)
+                if x.get("model") == "m-trunca" and x.get("status") == "error"]
+        assert rows, "窗口耗尽重传失败应记 error 日志"
+    finally:
+        client.delete("/api/providers/r186plat", headers=hdr)
+
+
+def test_r187_gbn_idle_timeout_retry(client, hdr, upstream_port):
+    """GBN R187：m-idle1 首次命中发 2 片后挂 30s → stream_idle_timeout=1.5 读超时触发重传，
+    第二次完整：2 命中、elapsed<15s（不能等假上游 30s 挂起）、完整流 + ok 日志。"""
+    import time
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r187plat", "name": "R187 GBN fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-idle1"], "extra": {"gbn": True, "stream_idle_timeout": 1.5}})
+    assert p.status_code == 200, p.text
+    try:
+        t0 = time.perf_counter()
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r187plat/m-idle1", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True})
+        elapsed = time.perf_counter() - t0
+        assert r.status_code == 200, r.text
+        assert elapsed < 15, f"1.5s 空闲超时应触发重传，不能等 30s 挂起: {elapsed:.1f}s"
+        assert " fake" in r.text
+        hits = [x for x in fake_upstream.RECEIVED
+                if x["path"] == "/v1/chat/completions" and x["body"].get("model") == "m-idle1"]
+        assert len(hits) == 2, hits
+        rows = [x for x in client.app.state.store.recent(5)
+                if x.get("model") == "m-idle1" and x.get("status") == "ok"]
+        assert rows
+    finally:
+        client.delete("/api/providers/r187plat", headers=hdr)
+
+
+def test_r188_gbn_default_thinking_only(client, hdr, upstream_port):
+    """GBN R188：不设 extra.gbn = 仅思考档启用（policy 不在 auto/off，含 relay_reasoning 覆盖后）：
+    普通流 m-trunca 1 命中零重传且无 GBN 帧（实时透传）；relay_reasoning=high → 自动 GBN 默认窗口 3 → 3 命中 + 错误帧。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r188plat", "name": "R188 GBN default fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-trunca"]})
+    assert p.status_code == 200, p.text
+    try:
+        base = {"model": "r188plat/m-trunca", "messages": [{"role": "user", "content": "hi"}],
+                "stream": True}
+        r1 = client.post("/v1/chat/completions", headers=hdr, json=base)
+        assert r1.status_code == 200, r1.text
+        assert "GBN" not in r1.text, "普通思考档应实时透传，无 GBN 错误帧"
+        hits = [x for x in fake_upstream.RECEIVED
+                if x["path"] == "/v1/chat/completions" and x["body"].get("model") == "m-trunca"]
+        assert len(hits) == 1, f"普通流不应重传: {hits}"
+        n_before = len(hits)
+        r2 = client.post("/v1/chat/completions", headers=hdr, json={**base, "relay_reasoning": "high"})
+        assert r2.status_code == 200, r2.text
+        assert "（GBN 窗口 3 次重传后仍未成功）" in r2.text, "relay_reasoning 覆盖应自动 GBN 默认窗口 3"
+        hits2 = [x for x in fake_upstream.RECEIVED
+                 if x["path"] == "/v1/chat/completions" and x["body"].get("model") == "m-trunca"]
+        assert len(hits2) - n_before == 3, f"思考档流 GBN 窗口 3 应 3 命中: {hits2}"
+    finally:
+        client.delete("/api/providers/r188plat", headers=hdr)

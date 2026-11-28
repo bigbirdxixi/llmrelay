@@ -15,6 +15,7 @@ from starlette.datastructures import UploadFile
 app = FastAPI()
 RECEIVED: list[dict] = []
 _ONCE_503 = {"hit": False}
+_TRUNC: dict[str, int] = {}  # GBN 回归：m-trunc1/m-idle1 仅首次命中截断（后续完整）、m-trunca 永远截断
 
 USAGE = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
 
@@ -144,6 +145,11 @@ async def chat(request: Request):
     if mname.startswith("m-slow"):
         import asyncio as _aio
         await _aio.sleep(0.8)
+    # GBN 回归（R185+）：m-trunc1*/m-idle1* 仅首次命中截断（后续完整流）、m-trunca* 永远截断
+    trunc_hits = 0
+    if mname.startswith("m-trunc") or mname.startswith("m-idle"):
+        _TRUNC[mname] = _TRUNC.get(mname, 0) + 1
+        trunc_hits = _TRUNC[mname]
     # key 级错误：探测时不得因此删模型
     if mname.startswith("m-x401"):
         return JSONResponse(status_code=401, content={
@@ -188,6 +194,16 @@ async def chat(request: Request):
                 yield _sse({**base, "choices": [{"index": 0,
                                                  "delta": {"reasoning_content": rp},
                                                  "finish_reason": None}]})
+        # GBN 回归（R185-R188）：m-trunca* 永久无终止事件断流；m-trunc1*/m-idle1* 仅首次命中
+        # m-idle1 首次：发前两件后挂起 30s（触发客户端 stream_idle_timeout 读超时）
+        _ALWAYS_TRUNC = "m-trunca"   # 永远截断的模型（m-trunc + a）
+        if mname == _ALWAYS_TRUNC or (mname in ("m-trunc1", "m-idle1") and trunc_hits == 1):
+            for piece in ("hello", " from"):
+                yield _sse({**base, "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]})
+            if mname == "m-idle1":
+                import asyncio as _aio
+                await _aio.sleep(30)
+            return  # 异常断流：无 finish_reason /
         for piece in ("hello", " from", " fake"):
             yield _sse({**base, "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]})
         if want_tool:

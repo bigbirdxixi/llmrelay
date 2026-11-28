@@ -31,6 +31,16 @@
 - 配置示例（agnes 平台）：`"extra": {"model_max_output_tokens": {"*": 65536}}` 或按模型名 `"agnes-3.0-flash": 65536`
 - 回归测试 R183 四组：精确模型名钳制（524288→65536，假上游超限真 400）、别名继承、低于上限不动 + `max_completion_tokens` 新键同钳、`'*'` 通配 + 数字字符串值、未配置对照（400 透传不变）、anthropic 系上游转换体同钳；全量 154 通过
 
+### 新增：relay_reasoning 单请求思考档位覆盖（R184，「平台默认关思考但这一次想开」）
+- 请求体新键 `relay_reasoning`（OpenAI 系词汇 none/minimal/low/medium/high/max + off，非法值 400 带合法值清单）：客户端单请求覆盖模型级思考策略——平台默认 auto/off 但这一次想开思考（或临时加码到 high/max），不必改平台配置
+- 该键是 relay 专用载体：发上游前剥掉（官方 OpenAI 收未知键直接 400）；off 写平台「关思考」字段（OpenAI 系 reasoning_effort=none）、max 在第三方 OpenAI 兼容端点降级 high（线边界）；思考档请求顺带触发 GBN 默认启用（见 R188）
+- 回归测试 R184：非法值 400、high 覆盖（上游收 reasoning_effort=high 且载体被剥）、max 降级 high、off 写关闭字段；全量 159 通过
+
+### 新增：GBN 窗口重传（R185-R188，上游流截断/空闲不再直接把断流漏给客户端）
+- 流式请求 `extra.gbn`（true/false，缺省=仅思考档启用：policy 不在 auto/off，含 relay_reasoning 覆盖后）：上游流中断 / 缺终止事件 / 空闲超时（`extra.stream_idle_timeout`，缺省 90s）→ 整包重发，窗口（`extra.gbn_window` 1-5，缺省 3）内取成功的一次才转发；耗尽发 SSE 错误帧「上游流未正常结束（缺终止事件）（GBN 窗口 N 次重传后仍未成功）」，请求记账仅一次（成功 ok / 失败 error）
+- 语义分界：GBN 请求整包缓冲非实时（成功前不转发任何帧）；普通对话保持实时透传零行为变化（R188 对照：普通流截断也 1 命中零重传、无 GBN 帧）
+- 回归测试 R185-R188（假上游 m-trunc1/m-trunca/m-idle1 三档：仅首次截断 / 永远截断 / 首次挂 30s）：截断重传恢复（窗口 3，2 命中、完整流含 ' fake'、ok 日志）、窗口耗尽（窗口 2，错误帧 + 2 命中、error 日志）、空闲超时重传（timeout 1.5s，2 命中、elapsed<15s、ok 日志）、默认仅思考档（普通 1 命中无 GBN 帧；relay_reasoning=high 自动 GBN 默认窗口 3 → 3 命中 + 错误帧）；全量 159 通过
+
 ## [2.1.1] - 2026-11-24
 
 ### 功能：非文本模型按量计费（R176 价格表新增 second_fee 元/秒）
