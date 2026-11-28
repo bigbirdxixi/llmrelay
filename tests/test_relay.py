@@ -5391,3 +5391,111 @@ def test_r175_stats_heatmap_today_calendar_day(client, hdr, upstream_port):
     ht2 = client.get("/api/stats/heatmap", params={"days": 1, "today": 1}, headers=hdr).json()
     assert total(h2) == total(h1) + 1
     assert total(ht2) == total(ht1) + 1
+
+
+# ---------------------------------------------------------------- R183 max_tokens 钳制到平台输出上限（v2.1.2）
+def test_r183_max_tokens_clamped_by_platform_cap(client, hdr, upstream_port):
+    """v2.1.2 R183：extra.model_max_output_tokens 在转发前把客户端 max_tokens /
+    max_completion_tokens 钳到上限（精确模型名 + 别名继承 + 低于上限不动）。
+
+    事故背景：Hermes 把 max_tokens 设成上下文窗口（524288），上游 agnes 输出上限
+    65536 → 400 "max_tokens exceeds the limit of 65536"，客户端 overflow recovery
+    把报错里的 limit 误当上下文窗口写回本地缓存（512k 掉到 65.5k）。
+    假上游 m-maxout* 超限真 400，200 即钳制生效；== 上限放行。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r183plat", "name": "R183 fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-maxout"],
+        "model_map": {"m-moalias": "m-maxout"},
+        "extra": {"model_max_output_tokens": {"m-maxout": 65536}}})
+    assert p.status_code == 200, p.text
+    msgs = [{"role": "user", "content": "hi"}]
+    try:
+        def sent_last():
+            return [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+        # 1) 精确模型名：524288 → 65536
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183plat/m-maxout", "messages": msgs, "max_tokens": 524288})
+        assert r.status_code == 200, r.text
+        assert sent_last()["max_tokens"] == 65536, sent_last()
+        # 2) 别名继承目标模型的上限（发上游的是真实模型名）
+        r2 = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183plat/m-moalias", "messages": msgs, "max_tokens": 524288})
+        assert r2.status_code == 200, r2.text
+        s2 = sent_last()
+        assert s2["model"] == "m-maxout" and s2["max_tokens"] == 65536, s2
+        # 3) 低于上限不动
+        r3 = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183plat/m-maxout", "messages": msgs, "max_tokens": 4096})
+        assert r3.status_code == 200
+        assert sent_last()["max_tokens"] == 4096, sent_last()
+        # 4) OpenAI 兼容新键 max_completion_tokens 同样钳
+        r4 = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183plat/m-maxout", "messages": msgs, "max_completion_tokens": 131072})
+        assert r4.status_code == 200, r4.text
+        s4 = sent_last()
+        assert s4["max_completion_tokens"] == 65536, s4
+    finally:
+        client.delete("/api/providers/r183plat", headers=hdr)
+
+
+def test_r183_wildcard_cap(client, hdr, upstream_port):
+    """'*' 通配：一个上限管全平台所有模型；值用数字字符串同样认（R148 体例）。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r183wild", "name": "R183 wild fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["fake-gpt"],
+        "extra": {"model_max_output_tokens": {"*": "8192"}}})
+    assert p.status_code == 200, p.text
+    try:
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183wild/fake-gpt",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 524288})
+        assert r.status_code == 200, r.text
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/chat/completions"][-1]["body"]
+        assert sent["max_tokens"] == 8192, sent
+    finally:
+        client.delete("/api/providers/r183wild", headers=hdr)
+
+
+def test_r183_no_cap_behavior_unchanged(client, hdr, upstream_port):
+    """未配置 model_max_output_tokens 的平台 → 行为零变化（对照）：
+    524288 原样转发，上游 400 直接透传给客户端（即事故前的原始路径）。"""
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r183plain", "name": "R183 plain fake", "type": "openai",
+        "base_url": f"http://127.0.0.1:{upstream_port}/v1", "api_keys": ["pk"],
+        "models": ["m-maxout"]})
+    assert p.status_code == 200, p.text
+    try:
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183plain/m-maxout",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 524288})
+        assert r.status_code == 400, r.text
+        assert "exceeds the limit" in r.text, r.text
+    finally:
+        client.delete("/api/providers/r183plain", headers=hdr)
+
+
+def test_r183_anthropic_out_fmt_clamped(client, hdr, upstream_port):
+    """anthropic 系上游：openai 客户端 → openai_to_anthropic 转换后的 max_tokens 同样钳
+    （假 /v1/messages 对 m-maxout* 超限也 400，200 即钳制生效）。"""
+    from tests import fake_upstream
+    p = client.post("/api/providers", headers=hdr, json={
+        "platform": "r183anth", "name": "R183 anth fake", "type": "anthropic",
+        "base_url": f"http://127.0.0.1:{upstream_port}", "api_keys": ["sk-ak"],
+        "models": ["m-maxout-a"],
+        "extra": {"model_max_output_tokens": {"m-maxout-a": 65536}}})
+    assert p.status_code == 200, p.text
+    try:
+        r = client.post("/v1/chat/completions", headers=hdr, json={
+            "model": "r183anth/m-maxout-a",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 524288})
+        assert r.status_code == 200, r.text
+        sent = [x for x in fake_upstream.RECEIVED if x["path"] == "/v1/messages"][-1]["body"]
+        assert sent["model"] == "m-maxout-a" and sent["max_tokens"] == 65536, sent
+    finally:
+        client.delete("/api/providers/r183anth", headers=hdr)
+
+

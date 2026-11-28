@@ -464,6 +464,17 @@ class Gateway:
         payload, url = self._build_payload(in_fmt, out_fmt, kind, body, upstream, up_model,
                                           est_prompt=est_prompt, policy=policy,
                                           off_field=off_field)
+        # v2.1.2 R183: 转发前把客户端 max_tokens / max_completion_tokens 钳制到平台输出上限
+        # （extra.model_max_output_tokens：模型名 -> 正整数，'*' 通配，别名继承目标模型上限）。
+        # 防上游 400 "max_tokens exceeds the limit of N" 被客户端（如 Hermes 的 overflow recovery）
+        # 误解析成上下文窗口写回本地缓存（512k 掉到 65.5k 的事故）。未配置时完全不动行为。
+        cap = reg.max_output_tokens(upstream, up_model,
+                                    (upstream.model_map or {}).get(up_model, ""))
+        if cap:
+            for _mk in ("max_tokens", "max_completion_tokens"):
+                _mv = payload.get(_mk)
+                if isinstance(_mv, int) and _mv > cap:
+                    payload[_mk] = cap
         # extra_body 只是 OpenAI SDK 客户端侧的载体键：raw HTTP 打上游前要摊平到请求体顶层。
         # Google 的 google.thinking_config（关思考等）必须挂在顶层，原样嵌套发出去上游会直接忽略。
         if out_fmt == "openai" and isinstance(payload.get("extra_body"), dict):

@@ -127,6 +127,14 @@ async def chat(request: Request):
     if mname.startswith("m-400sse"):
         return JSONResponse(status_code=400, content={
             "error": {"message": "当前模型不支持SSE调用方式", "type": "invalid_request_error"}})
+    # v2.1.2 R183: m-maxout* 模型有 65536 输出上限（模拟真实 agnes 平台
+    # "max_tokens exceeds the limit of 65536" 的 400）：超限 400，恰好等于放行
+    if mname.startswith("m-maxout"):
+        _mt = body.get("max_tokens")
+        if isinstance(_mt, int) and _mt > 65536:
+            return JSONResponse(status_code=400, content={
+                "error": {"message": "max_tokens exceeds the limit of 65536",
+                          "type": "invalid_request_error"}})
     # 慢模型加长版：3s 才响应（R91 读超时区分测试用：探测短超时 1s 时触发 ReadTimeout，
     # 验证「上游响应慢」不算连接级 connfail、不触发连续 3 个放弃）
     if mname.startswith("m-slow3"):
@@ -292,6 +300,14 @@ async def messages(request: Request):
         return JSONResponse(status_code=400, content={
             "type": "error", "error": {"type": "invalid_request_error",
                                        "message": "fake anthropic rejected"}})
+    # v2.1.2 R183: m-maxout* 在 anthropic 系端点同样有 65536 输出上限
+    _m = str(body.get("model") or "")
+    if _m.startswith("m-maxout"):
+        _mt = body.get("max_tokens")
+        if isinstance(_mt, int) and _mt > 65536:
+            return JSONResponse(status_code=400, content={
+                "type": "error", "error": {"type": "invalid_request_error",
+                                            "message": "max_tokens exceeds the limit of 65536"}})
     model = body.get("model")
     want_tool = bool(body.get("tools"))
     want_thinking = ("thinking" in (model or "")) and _anthropic_thinking_on(body)

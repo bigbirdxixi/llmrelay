@@ -743,6 +743,29 @@ class Registry:
                 return val
         return 0
 
+    @staticmethod
+    def max_output_tokens(up: Upstream, model: str, target: str = "") -> int:
+        """取 extra.model_max_output_tokens 的输出上限（v2.1.2 R183：转发前钳制客户端 max_tokens）。
+
+        extra.model_max_output_tokens = {"上游真实模型名": 65536, "*": 32768}：
+        精确模型名优先，其次别名指向的真实模型名，最后 '*' 通配兜底。
+        值须为正整数（int / 数字字符串均可）；缺失 / 非正 / 非数值一律不返回（0 = 未配置，行为不变）。
+        """
+        per_model = ((up.extra or {}).get("model_max_output_tokens")) or {}
+        if not isinstance(per_model, dict):
+            return 0
+        for key in (model, target, "*"):
+            if not key or key not in per_model:
+                continue
+            raw = per_model[key]
+            try:
+                val = int(raw) if isinstance(raw, (int, float)) else int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+        return 0
+
     def model_index(self) -> list[dict]:
         out: list[dict] = []
         for up in self.upstreams:
