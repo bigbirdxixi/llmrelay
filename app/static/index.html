@@ -278,8 +278,10 @@ tbody tr:hover td{background:#101a28}
 .mhead .hthink{width:104px;flex:0 0 auto}
 .mhead .hrf{width:64px;flex:0 0 auto}
 /* v2.1.2 R182：价格规则列（替代 5 个 .hp 价格列，与 .mprule 下拉 1:1）；
-   特异性提到 .hcell.hprule 三元——基础 .hcell{flex:0 1 auto} 定义在后，二元选择器压不住 */
-.mhead .hcell.hprule{width:150px;flex:0 0 auto;text-align:center}
+   特异性提到 .hcell.hprule 三元——基础 .hcell{flex:0 1 auto} 定义在后，二元选择器压不住。
+   margin-left:auto = 表头尾部块（价格规则+关闭写法）右推，与行内 .mprs{margin-left:auto}+.mrf
+   尾部块镜像对齐——否则宽视口下行内下拉被甩到最右、表头留在 hthink 后面，列与表头错位（用户 8800 截图反馈） */
+.mhead .hcell.hprule{width:150px;flex:0 0 auto;text-align:center;margin-left:auto}
 </style>
 </head>
 <body>
@@ -1287,6 +1289,12 @@ async function editProvider(platform){
   // v2.1.0 R156 → v2.1.2 R182：价格规则绑定——加载该平台已有绑定
   // （extra.model_pricing_rule 裸模型名 -> 规则名）进 S.editRule（旧行内 5 价格输入已废弃）
   S.editRule = Object.assign({}, ex.model_pricing_rule || {});
+  // v2.1.2 R182：规则下拉选项自取——从「上游平台」tab 直接开弹窗时设置页没渲染过，
+  // S.pricingRules 是空的（下拉只剩「无规则」且已存绑定值被 select 丢弃）；这里直接拉当前租户规则清单
+  try{
+    const rj = await api("/api/pricing-rules");
+    S.pricingRules = (rj.rules || []).map(r => r.rule);
+  }catch(e){}
   S.availFetched = false;
   $("#modalBody").classList.add("wide");   // v2.1.0 R156：平台弹窗加宽（容纳模型行控件）
   $("#modalBody").innerHTML = `
