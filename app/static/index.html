@@ -1343,7 +1343,7 @@ async function editProvider(platform){
         <input id="f_manualmodel" placeholder="手动输入模型名" style="width:150px;padding:6px 8px;font-size:12.5px">
         <button class="btn sm" onclick="addManualModel()">＋添加</button>
       </div></div>
-    <div class="field"><label>模型级设置：「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路；「别名」列自动写入 model_map<br>点 × 删除该模型（其价格规则绑定一并清掉）；思考默认跟随客户端，选「关闭」才会改上游请求（最右列「关闭写法」手选实发字段，默认自动解析，悬停该下拉框可见解析结果）<br>列表第一排为列头（模型名/模型类型/别名/价格规则/思考模式/关闭写法）；「价格规则」在 设置 → 价格规则 维护，选中后成功调用按该规则计费，不选 = 免费只统计消费（表头不随列表滚动）</label>
+    <div class="field"><label>模型级设置：<br>「类型」选生成类/embedding（图像/视频/音频/embedding）后走 /v1/images /v1/videos /v1/audio /v1/embeddings 透传，聊天端点调它会 400 指路<br>「别名」自动写入 model_map；点 × 删除该模型（其价格规则绑定一并清掉）<br>「价格规则」在 设置 → 价格规则 维护：选中后成功调用按该规则计费，不选 = 免费只统计消费<br>「思考模式」默认跟随客户端；选「关闭」才会改上游请求（「关闭写法」手选实发字段，默认自动解析，悬停该下拉框可见解析结果）<br>列表第一排为列头（模型名/模型类型/别名/价格规则/思考模式/关闭写法），表头不随列表滚动</label>
       <div id="f_modelrows" class="modelrows"></div>
     </div>
     <div class="field"><div class="lblrow"><label>高级配置 JSON（可选：headers / chat_path / default_max_tokens 等；model_map 由「别名」列、model_kind 由「类型」列自动生成，不必手写）</label><button class="btn sm" onclick="copyExtraJson()" title="复制文本框中的 JSON 到剪贴板">复制</button></div>
